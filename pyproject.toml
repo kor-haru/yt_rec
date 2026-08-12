@@ -17,5 +17,13 @@ dev = [
     "pytest>=8",
 ]
 
+[project.scripts]
+yt-rec = "yt_rec.app:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

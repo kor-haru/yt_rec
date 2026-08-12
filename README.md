@@ -23,8 +23,39 @@
 ## 개발
 
 ```bash
-pip install -e .
+pip install -e ".[dev]"
+pytest
 ```
+
+### 실행
+
+```bash
+yt-rec                        # 백엔드 없이 기동 — 상단 배지에 `연결 안 됨`
+python -m yt_rec --stub empty       # 빈 상태 더미
+python -m yt_rec --stub populated   # 채널·녹화·완료 더미
+python -m yt_rec --stub scenario    # 시작 → 진행 → 완료 → 오류 재생
+python -m yt_rec --stub flood       # 초당 100건 진행 이벤트 부하
+```
+
+### 화면 코드가 지켜야 할 계약
+
+화면은 `yt_rec.state` 만 참조한다. 백엔드 구현을 직접 부르지 않는다.
+
+| 계층 | 위치 | 역할 |
+|---|---|---|
+| 상태 모델 | `yt_rec.state.models` | GUI가 그리는 불변 데이터 |
+| 이벤트 | `yt_rec.state.events` | 백엔드 → 상태 계층 통지 |
+| 저장소 | `yt_rec.state.store.AppState` | 이벤트 적용, Qt 시그널 방출, 갱신 빈도 제한 |
+| 스텁 | `yt_rec.state.stub.StubEventSource` | 백엔드 없이 화면을 개발·테스트하는 하니스 |
+
+- 백엔드는 `EventSource.event_ready` 로 이벤트를 밀거나 `AppState.post_event()` 를
+  호출한다. 작업 스레드에서 불러도 안전하며, Qt 큐 연결이 GUI 스레드로 넘긴다.
+- 진행 중 녹화의 크기·경과 시간은 `Recording.reported_bytes` / `reported_elapsed`
+  를 그대로 쓴다. `os.stat`·`Path.stat`·`getsize` 로 다시 재지 않는다.
+- 갱신은 기본 200ms 마다 한 번으로 묶인다. 초당 수백 건이 들어와도 화면 갱신은
+  초당 5회를 넘지 않는다.
+- 보조 문구 색은 스타일시트에 고정하지 않고 `ui.widgets.set_muted()` 를 쓴다.
+  `palette(dark)` 같은 값은 다크 테마에서 배경과 겹쳐 글자가 사라진다.
 
 ## 라이선스
 
