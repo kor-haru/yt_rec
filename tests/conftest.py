@@ -17,11 +17,20 @@ Qt 위젯 테스트를 헤드리스로 돌리기 위해 PySide6를 import 하기
 :func:`~yt_rec.ui.widgets.set_muted` 처럼 생성 시점의 팔레트에서 색을 계산해
 위젯에 박아 두는 코드가 있으므로, 창을 만든 뒤에 팔레트를 바꾸면 실제 다크
 모드와 다른 상태를 측정하게 된다.
+
+녹화 엔진
+---------
+실제 미디어가 필요한 테스트는 ffmpeg 로 짧은 합성 클립을 그때그때 만든다.
+큰 파일을 저장소에 넣지 않기 위해서다. ffmpeg/yt-dlp 가 없으면 해당 테스트는
+건너뛴다.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -30,6 +39,7 @@ from PySide6.QtCore import QSettings  # noqa: E402
 from PySide6.QtGui import QColor, QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from yt_rec.recording.binaries import BinaryNotFoundError, Toolchain, resolve_toolchain  # noqa: E402
 from yt_rec.state.store import AppState  # noqa: E402
 from yt_rec.state.stub import StubEventSource  # noqa: E402
 from yt_rec.ui.settings_store import WindowSettings  # noqa: E402
@@ -128,3 +138,60 @@ def window_settings(tmp_path) -> WindowSettings:
     """사용자 설정을 건드리지 않는 임시 INI 기반 설정."""
     path = tmp_path / "yt-rec-test.ini"
     return WindowSettings(QSettings(str(path), QSettings.Format.IniFormat))
+
+
+SAMPLE_SECONDS = 4
+SAMPLE_FPS = 30
+
+
+@pytest.fixture(scope="session")
+def toolchain() -> Toolchain:
+    try:
+        return resolve_toolchain()
+    except BinaryNotFoundError as exc:
+        pytest.skip(str(exc))
+
+
+@pytest.fixture(scope="session")
+def sample_streams(tmp_path_factory, toolchain: Toolchain) -> tuple[Path, Path]:
+    """영상만 담긴 파일과 음성만 담긴 파일. yt-dlp 중간 파일을 흉내 낸다."""
+    directory = tmp_path_factory.mktemp("sample")
+    video = directory / "video.mp4"
+    audio = directory / "audio.m4a"
+
+    video_cmd = [
+        str(toolchain.ffmpeg), "-y", "-hide_banner", "-v", "error",
+        "-f", "lavfi",
+        "-i", f"testsrc2=size=320x240:rate={SAMPLE_FPS}:duration={SAMPLE_SECONDS}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-g", str(SAMPLE_FPS), str(video),
+    ]
+    audio_cmd = [
+        str(toolchain.ffmpeg), "-y", "-hide_banner", "-v", "error",
+        "-f", "lavfi", "-i", f"sine=frequency=440:duration={SAMPLE_SECONDS}",
+        "-c:a", "aac", "-b:a", "64k", str(audio),
+    ]
+    for cmd in (video_cmd, audio_cmd):
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            pytest.skip(
+                "합성 클립을 만들지 못했다 (코덱 미지원?): "
+                + proc.stderr.decode("utf-8", "replace")[:300]
+            )
+    return video, audio
+
+
+@pytest.fixture()
+def intermediates(tmp_path: Path, sample_streams: tuple[Path, Path]) -> tuple[Path, str]:
+    """work 디렉터리에 yt-dlp 가 남긴 것과 같은 이름의 중간 파일을 놓는다."""
+    video, audio = sample_streams
+    work_dir = tmp_path / "work" / "VIDEOID0001"
+    work_dir.mkdir(parents=True)
+    (work_dir / "VIDEOID0001.f137.mp4").write_bytes(video.read_bytes())
+    (work_dir / "VIDEOID0001.f140.m4a").write_bytes(audio.read_bytes())
+    return work_dir, "VIDEOID0001"
+
+
+@pytest.fixture(scope="session")
+def python_executable() -> str:
+    return sys.executable

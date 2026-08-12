@@ -32,3 +32,7 @@ module-name = "yt_rec"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+markers = [
+    "integration: 실제 yt-dlp/ffmpeg 를 돌리는 테스트. 바이너리가 없으면 건너뛴다",
+    "slow: 수십 초가 걸리는 테스트",
+]
