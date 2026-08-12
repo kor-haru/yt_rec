@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-rec"
+version = "0.0.0"
+description = "선택한 YouTube 채널의 라이브를 시작 지점부터 자동 녹화하는 데스크톱 앱"
+requires-python = ">=3.11"
+dependencies = [
+    # GUI. QtWebEngine 계열은 의도적으로 제외한다 (README 제약 참고).
+    "PySide6-Essentials>=6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
