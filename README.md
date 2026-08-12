@@ -10,9 +10,10 @@
 
 | 항목 | 선택 | 이유 |
 |---|---|---|
-| 언어 | Python | 유지보수자가 전체 동작을 읽고 파악할 수 있어야 한다 |
+| 언어 | Python (3.11 이상) | 유지보수자가 전체 동작을 읽고 파악할 수 있어야 한다 |
 | GUI | PySide6 (Qt Widgets) | LGPL. QML은 사용하지 않는다 — 순수 Python으로만 화면을 구성한다 |
 | 미디어 | yt-dlp, ffmpeg | 외부 실행 파일로 호출한다 |
+| 환경·의존성·빌드 | uv | 잠금 파일로 세 OS에서 같은 의존성 트리를 재현한다 |
 
 ### 제약
 
@@ -22,20 +23,50 @@
 
 ## 개발
 
+환경 구성과 의존성 관리는 [uv](https://docs.astral.sh/uv/)로 통일한다. pip이나
+`python -m venv`를 직접 쓰지 않는다.
+
+uv가 없다면 먼저 설치한다.
+
 ```bash
-pip install -e ".[dev]"
-pytest
+# Windows (PowerShell)
+irm https://astral.sh/uv/install.ps1 | iex
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+저장소를 받은 뒤 다음 한 줄이면 끝난다. 가상환경 생성, Python 확보, 의존성
+설치, 프로젝트 자체의 editable 설치까지 `uv sync`가 다 한다.
+
+```bash
+uv sync
+uv run pytest
+```
+
+의존성 버전은 `uv.lock`에 고정돼 있어 어느 머신에서든 같은 트리가 재현된다.
+잠금 파일은 저장소에 포함하며 직접 편집하지 않는다. 의존성을 바꿀 때는
+`pyproject.toml`을 고치고 `uv sync`(또는 `uv lock`)를 실행해 잠금 파일을 함께
+커밋한다.
+
+| 명령 | 용도 |
+|---|---|
+| `uv sync` | 개발 환경 구성 (런타임 + 개발 의존성) |
+| `uv sync --no-dev` | 런타임 의존성만. 배포물 검증용 |
+| `uv run pytest` | 테스트 실행 |
+| `uv add <패키지>` | 런타임 의존성 추가 |
+| `uv add --dev <패키지>` | 개발 의존성 추가 |
 
 ### 실행
 
 ```bash
-yt-rec                        # 백엔드 없이 기동 — 상단 배지에 `연결 안 됨`
-python -m yt_rec --stub empty       # 빈 상태 더미
-python -m yt_rec --stub populated   # 채널·녹화·완료 더미
-python -m yt_rec --stub scenario    # 시작 → 진행 → 완료 → 오류 재생
-python -m yt_rec --stub flood       # 초당 100건 진행 이벤트 부하
+uv run yt-rec                        # 백엔드 없이 기동 — 상단 배지에 `연결 안 됨`
+uv run yt-rec --stub empty           # 빈 상태 더미
+uv run yt-rec --stub populated       # 채널·녹화·완료 더미
+uv run yt-rec --stub scenario        # 시작 → 진행 → 완료 → 오류 재생
+uv run yt-rec --stub flood           # 초당 100건 진행 이벤트 부하
 ```
+
+`uv run python -m yt_rec` 로도 같은 진입점이 뜬다.
 
 ### 화면 코드가 지켜야 할 계약
 

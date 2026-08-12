@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import re
+import subprocess
 import sys
 import tokenize
 import tomllib
@@ -143,12 +144,24 @@ def test_GUI가_파일시스템_모듈을_직접_쓰지_않는다() -> None:
 # ----------------------------------------------------------------------
 # QtWebEngine 금지 (#6, README)
 # ----------------------------------------------------------------------
+def pyproject() -> dict:
+    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def runtime_requirements() -> list[str]:
+    """배포물에 들어가는 런타임 의존성."""
+    return list(pyproject()["project"].get("dependencies", []))
+
+
 def declared_requirements() -> list[str]:
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    """런타임 + 개발 + extra 를 모두 합친 선언 의존성."""
+    data = pyproject()
     project = data["project"]
     reqs = list(project.get("dependencies", []))
     for extra in project.get("optional-dependencies", {}).values():
         reqs.extend(extra)
+    for group in data.get("dependency-groups", {}).values():
+        reqs.extend(item for item in group if isinstance(item, str))
     return reqs
 
 
@@ -269,12 +282,105 @@ def test_상태_저장소는_타이머로_백엔드를_조회하지_않는다() 
 def test_진입점이_존재한다() -> None:
     assert (SRC_ROOT / "app.py").exists()
     assert (SRC_ROOT / "__main__.py").exists()
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    scripts = data["project"].get("scripts", {})
+    scripts = pyproject()["project"].get("scripts", {})
     assert scripts.get("yt-rec") == "yt_rec.app:main"
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib 필요")
 def test_requires_python이_유지된다() -> None:
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert data["project"]["requires-python"] == ">=3.11"
+    assert pyproject()["project"]["requires-python"] == ">=3.11"
+
+
+# ----------------------------------------------------------------------
+# uv 기반 환경·의존성 관리 (#16)
+# ----------------------------------------------------------------------
+LOCK_PATH = REPO_ROOT / "uv.lock"
+
+
+def lock() -> dict:
+    assert LOCK_PATH.exists(), "uv.lock 이 저장소에 없다. 의존성이 고정되지 않는다"
+    return tomllib.loads(LOCK_PATH.read_text(encoding="utf-8"))
+
+
+def locked_packages() -> dict[str, str]:
+    return {p["name"]: p.get("version", "") for p in lock().get("package", [])}
+
+
+def test_잠금_파일이_저장소에_있다() -> None:
+    """재현 가능한 의존성이 이 이슈의 핵심이다."""
+    assert LOCK_PATH.exists()
+    assert locked_packages(), "잠금 파일에 패키지가 하나도 없다"
+
+
+def test_잠금_파일의_requires_python이_pyproject와_일치한다() -> None:
+    assert lock()["requires-python"] == pyproject()["project"]["requires-python"]
+
+
+def test_잠금_파일에_QtWebEngine_계열이_없다() -> None:
+    """잠금 파일까지 확인해야 실제로 설치될 트리를 보증할 수 있다."""
+    offenders = [
+        name
+        for name in locked_packages()
+        if "webengine" in name.lower() or "pyside6-addons" in name.lower()
+    ]
+    assert not offenders, f"잠금 파일에 QtWebEngine 계열이 있다: {offenders}"
+    # 원본 텍스트에도 없어야 한다(휠 URL 등에 섞여 들어오는 경우 대비).
+    assert "webengine" not in LOCK_PATH.read_text(encoding="utf-8").lower()
+
+
+def test_잠금_파일이_런타임_의존성을_담는다() -> None:
+    packages = locked_packages()
+    assert "pyside6-essentials" in packages
+    assert "yt-rec" in packages
+
+
+def test_개발_의존성이_런타임과_분리되어_있다() -> None:
+    """배포물에 pytest 가 섞이면 안 된다.
+
+    ``[dependency-groups]`` 로 분리하면 ``uv sync`` 는 개발용까지 넣고
+    ``uv sync --no-dev`` 는 런타임만 넣는다.
+    """
+    data = pyproject()
+    groups = data.get("dependency-groups", {})
+    assert "dev" in groups, "개발 의존성 그룹이 정의되지 않았다"
+    assert any("pytest" in item for item in groups["dev"])
+
+    runtime = " ".join(runtime_requirements()).lower()
+    assert "pytest" not in runtime, "pytest 가 런타임 의존성에 들어 있다"
+
+    # 잠금 파일도 같은 구분을 유지한다.
+    project_entry = next(p for p in lock()["package"] if p["name"] == "yt-rec")
+    runtime_names = {d["name"] for d in project_entry.get("dependencies", [])}
+    assert "pytest" not in runtime_names
+    assert "pyside6-essentials" in runtime_names
+
+
+def test_uv_빌드_백엔드를_쓴다() -> None:
+    """환경·의존성·빌드를 uv 하나로 통일한다(setuptools 설정 잔재 없음)."""
+    data = pyproject()
+    assert data["build-system"]["build-backend"] == "uv_build"
+    assert "setuptools" not in data.get("tool", {})
+    assert "setuptools" not in " ".join(data["build-system"]["requires"]).lower()
+
+
+def test_가상환경이_추적되지_않는다() -> None:
+    """``.gitignore`` 에 규칙이 있는지가 아니라 실제로 걸리는지 확인한다."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", ".venv"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, ".venv 가 .gitignore 에 걸리지 않는다"
+    assert ".venv" in result.stdout
+
+
+def test_잠금_파일은_추적_대상이다() -> None:
+    """잠금 파일이 실수로 무시되면 재현성이 사라진다."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", "uv.lock"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, f"uv.lock 이 무시된다: {result.stdout}"

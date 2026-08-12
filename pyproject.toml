@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
 
 [project]
 name = "yt-rec"
@@ -9,19 +9,24 @@ description = "선택한 YouTube 채널의 라이브를 시작 지점부터 자�
 requires-python = ">=3.11"
 dependencies = [
     # GUI. QtWebEngine 계열은 의도적으로 제외한다 (README 제약 참고).
+    # PySide6 대신 -Essentials 를 쓰는 이유가 그것이다. PySide6 메타 패키지는
+    # PySide6-Addons 를 끌어오고, 거기에 Chromium 이 들어 있다.
     "PySide6-Essentials>=6.7",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8",
 ]
 
 [project.scripts]
 yt-rec = "yt_rec.app:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# 개발용 의존성. 런타임 의존성과 분리해 배포물에 들어가지 않게 한다.
+# `uv sync` 가 기본으로 함께 설치하고, 배포용 설치에는 `--no-dev` 를 쓴다.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "yt_rec"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
