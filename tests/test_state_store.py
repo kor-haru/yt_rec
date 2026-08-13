@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from PySide6.QtCore import QThread
 from PySide6.QtTest import QTest
 
+from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
 from yt_rec.state.models import (
     CompletedRecording,
@@ -290,3 +291,277 @@ def test_작업_스레드가_보낸_이벤트는_GUI_스레드에서_적용된�
 def test_알_수_없는_이벤트는_거부한다(state: AppState) -> None:
     with pytest.raises(TypeError):
         state.apply(object())  # type: ignore[arg-type]
+
+
+class _CallFromThread(QThread):
+    """작업 스레드에서 주어진 함수를 부르고 결과나 예외를 담아 온다."""
+
+    def __init__(self, call) -> None:
+        super().__init__()
+        self._call = call
+        self.error: BaseException | None = None
+        self.result: object = None
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            self.result = self._call()
+        except BaseException as exc:  # noqa: BLE001 - 그대로 실어 온다
+            self.error = exc
+
+
+def _run_in_worker(call):
+    thread = _CallFromThread(call)
+    thread.start()
+    assert thread.wait(5000), "작업 스레드가 끝나지 않았다"
+    return thread
+
+
+# ----------------------------------------------------------------------
+# 스레드 계약 — 잘못된 스레드에서 부르면 즉시 실패한다
+# ----------------------------------------------------------------------
+def test_작업_스레드에서_apply를_부르면_즉시_실패한다(qapp) -> None:
+    """조용히 깨지는 대신 예외가 나야 한다.
+
+    실측 회귀: 기본값 ``emit_interval_ms=200`` 에서 작업 스레드가 ``apply()`` 를
+    부르면 모델은 갱신되는데 ``QTimer.start()`` 가 다른 스레드라서 조용히
+    실패했다. **시그널이 한 번도 방출되지 않고 Qt 경고도 예외도 없어** 화면이
+    영구 정지했다. 여기서는 상태가 바뀌지 않았다는 것까지 함께 확인한다.
+    """
+    store = AppState(emit_interval_ms=200)
+    emissions: list[object] = []
+    store.recordings_changed.connect(emissions.append)
+
+    thread = _run_in_worker(
+        lambda: store.apply(ev.RecordingStarted(Recording(recording_id="x", title="t")))
+    )
+    QTest.qWait(50)
+
+    assert isinstance(thread.error, RuntimeError), (
+        f"작업 스레드의 apply() 가 통과했다: {thread.error!r}"
+    )
+    assert "post_event" in str(thread.error), "무엇을 써야 하는지 알려 줘야 한다"
+    # 조용히 반쯤 적용되는 일이 없어야 한다.
+    assert store.recordings == ()
+    assert emissions == []
+    store.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["flush", "snapshot", "mark_errors_seen", "apply_all", "attach", "detach"],
+)
+def test_작업_스레드에서_다른_조작도_막힌다(qapp, name: str) -> None:
+    """``emit_interval_ms=0`` 이면 반대 문제가 생긴다.
+
+    ``flush()``/``snapshot()`` 이 작업 스레드에서 실행되면 GUI 스레드의 쓰기와
+    동기화 없이 내부 리스트를 읽는다. 주입 경로만 막고 나머지를 열어 두면
+    계약이 반쪽이다.
+    """
+    store = AppState(emit_interval_ms=0)
+    source = EventSource()
+    calls = {
+        "flush": store.flush,
+        "snapshot": store.snapshot,
+        "mark_errors_seen": store.mark_errors_seen,
+        "apply_all": lambda: store.apply_all([]),
+        "attach": lambda: store.attach(source),
+        "detach": lambda: store.detach(source),
+    }
+    thread = _run_in_worker(calls[name])
+    assert isinstance(thread.error, RuntimeError), f"{name} 이 작업 스레드에서 통과했다"
+    store.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "name", ["connection", "watch", "channels", "recordings", "completed", "logs", "quota"]
+)
+def test_작업_스레드에서_읽기도_막힌다(qapp, name: str) -> None:
+    """읽기도 GUI 스레드 전용이다. 내부 컨테이너를 동기화 없이 읽으면 안 된다."""
+    store = AppState(emit_interval_ms=0)
+    thread = _run_in_worker(lambda: getattr(store, name))
+    assert isinstance(thread.error, RuntimeError), f"{name} 읽기가 통과했다"
+    store.deleteLater()
+
+
+def test_post_event만_작업_스레드에서_통한다(qapp) -> None:
+    """막는 것과 함께 열어 둔 길이 실제로 통하는지도 확인한다."""
+    store = AppState(emit_interval_ms=0)
+    thread = _run_in_worker(
+        lambda: store.post_event(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    )
+    assert thread.error is None, f"post_event 가 막혔다: {thread.error!r}"
+
+    deadline = 0
+    while store.connection is not ConnectionState.CONNECTED and deadline < 100:
+        QTest.qWait(20)
+        deadline += 1
+    assert store.connection is ConnectionState.CONNECTED
+    store.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# 주입 경로의 순서
+# ----------------------------------------------------------------------
+def test_post_event가_먼저_보낸_이벤트를_먼저_적용한다(state: AppState) -> None:
+    """실측 회귀: 방출 순서 ``[2, 1]``, 최종 상태 ``1``.
+
+    ``_posted`` 가 명시적 ``QueuedConnection`` 이라 GUI 스레드에서 불러도
+    지연됐다. 반면 ``apply()`` 는 동기였다. 그래서 **먼저 보낸 이벤트가 나중
+    것을 덮어썼다.**
+    """
+    order: list[int] = []
+    state.watch_changed.connect(lambda watch: order.append(watch.channel_count))
+
+    state.post_event(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=1))
+    state.apply(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=2))
+    QTest.qWait(20)
+
+    assert order == [1, 2], f"부른 순서대로 적용되지 않았다: {order}"
+    assert state.watch.channel_count == 2, "나중에 보낸 값이 최종 상태여야 한다"
+
+
+def test_세_주입_경로의_순서_의미가_같다(state: AppState) -> None:
+    """``apply`` / ``post_event`` / ``attach`` 한 소스의 시그널을 섞어도 FIFO 다."""
+    source = EventSource()
+    state.attach(source)
+    order: list[int] = []
+    state.watch_changed.connect(lambda watch: order.append(watch.channel_count))
+
+    def watch(count: int) -> ev.WatchStatusChanged:
+        return ev.WatchStatusChanged(WatchState.WATCHING, channel_count=count)
+
+    state.apply(watch(1))
+    state.post_event(watch(2))
+    source.event_ready.emit(watch(3))
+    state.post_event(watch(4))
+    state.apply(watch(5))
+    QTest.qWait(20)
+
+    assert order == [1, 2, 3, 4, 5], f"경로마다 순서가 다르다: {order}"
+    assert state.watch.channel_count == 5
+    state.detach(source)
+
+
+def test_작업_스레드에서_온_이벤트는_도착_순서로_적용된다(qapp) -> None:
+    """다른 스레드에서 온 것은 GUI 이벤트 루프에 도착한 순서대로 적용된다."""
+    store = AppState(emit_interval_ms=0)
+    order: list[int] = []
+    store.watch_changed.connect(lambda watch: order.append(watch.channel_count))
+
+    def send() -> None:
+        for i in range(1, 6):
+            store.post_event(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=i))
+
+    thread = _run_in_worker(send)
+    assert thread.error is None
+    deadline = 0
+    while len(order) < 5 and deadline < 100:
+        QTest.qWait(20)
+        deadline += 1
+
+    assert order == [1, 2, 3, 4, 5], f"보낸 순서가 뒤집혔다: {order}"
+    store.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# 시간대 계약
+# ----------------------------------------------------------------------
+def test_시간대_없는_시각은_경고를_낸다(state: AppState) -> None:
+    naive = datetime(2026, 8, 13, 14, 47)
+    with pytest.warns(ev.NaiveDatetimeWarning, match="started_at"):
+        state.apply(
+            ev.RecordingStarted(
+                Recording(recording_id="r1", title="t", started_at=naive)
+            )
+        )
+    # 경고만 내고 이벤트 자체는 적용한다. 장시간 구동 앱을 죽이지 않는다.
+    assert [r.recording_id for r in state.recordings] == ["r1"]
+
+
+def test_중첩된_필드의_naive_시각도_찾는다() -> None:
+    naive = datetime(2026, 8, 13, 14, 47)
+    event = ev.ChannelsChanged(
+        (
+            WatchedChannel(channel_id="a", name="a", next_check_at=now()),
+            WatchedChannel(channel_id="b", name="b", last_check_at=naive),
+        )
+    )
+    assert ev.naive_datetime_fields(event) == ("channels[1].last_check_at",)
+
+
+def test_시간대_있는_시각은_경고가_없다(state: AppState, recwarn) -> None:
+    utc = datetime(2026, 8, 13, 5, 47, tzinfo=timezone.utc)
+    state.apply(ev.RecordingStarted(Recording(recording_id="r1", title="t", started_at=utc)))
+    state.apply(ev.QuotaChanged(QuotaStatus(used=1, limit=2, resets_at=now())))
+    state.apply(ev.LogAppended(LogEntry(at=now(), severity=Severity.INFO, message="x")))
+    naive_warnings = [w for w in recwarn if issubclass(w.category, ev.NaiveDatetimeWarning)]
+    assert not naive_warnings, f"시간대 있는 값에 경고가 났다: {naive_warnings}"
+
+
+def test_상태_계층이_채운_시각은_시간대를_갖는다(state: AppState) -> None:
+    """``started_at`` 을 비워 보내면 상태 계층이 채운다. 그 값도 계약을 지켜야 한다."""
+    state.apply(ev.RecordingStarted(Recording(recording_id="r1", title="t")))
+    rec = state.recordings[0]
+    assert rec.started_at is not None and rec.started_at.tzinfo is not None
+    assert rec.reported_at is not None and rec.reported_at.tzinfo is not None
+
+    state.apply(ev.RecordingFinished(CompletedRecording(recording_id="r1", title="t")))
+    done = state.completed[0]
+    assert done.finished_at is not None and done.finished_at.tzinfo is not None
+
+
+# ----------------------------------------------------------------------
+# 화면 → 백엔드 명령
+# ----------------------------------------------------------------------
+def test_명령이_백엔드로_전달된다(state: AppState) -> None:
+    received: list[object] = []
+    state.command_requested.connect(received.append)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+
+    assert state.stop_recording("rec-1", reason="사용자 중지") is True
+    assert state.set_watched_channels(["c1", "c2"]) is True
+    assert state.update_settings(output_dir=r"D:\rec", max_quality="1080p") is True
+
+    assert received == [
+        cmd.StopRecording("rec-1", reason="사용자 중지"),
+        cmd.SetWatchedChannels(("c1", "c2")),
+        cmd.UpdateSettings({"output_dir": r"D:\rec", "max_quality": "1080p"}),
+    ]
+
+
+def test_백엔드가_없으면_명령이_거부된다(state: AppState) -> None:
+    """조용히 사라지면 사용자는 `눌렀는데 아무 일도 없다` 를 보게 된다."""
+    sent: list[object] = []
+    rejected: list[tuple[object, str]] = []
+    state.command_requested.connect(sent.append)
+    state.command_rejected.connect(lambda command, why: rejected.append((command, why)))
+
+    assert state.connection is ConnectionState.DISCONNECTED
+    assert state.stop_recording("rec-1") is False
+    assert sent == []
+    assert len(rejected) == 1
+    assert rejected[0][0] == cmd.StopRecording("rec-1")
+    assert rejected[0][1]
+
+
+def test_명령은_상태를_직접_바꾸지_않는다(state: AppState) -> None:
+    """명령은 요청이다. 상태를 정하는 곳은 백엔드 하나여야 한다."""
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.RecordingStarted(Recording(recording_id="r1", title="t")))
+    assert state.stop_recording("r1") is True
+    # 백엔드가 RecordingFinished 를 보내기 전까지 카드는 남아 있어야 한다.
+    assert [r.recording_id for r in state.recordings] == ["r1"]
+
+
+def test_알_수_없는_명령은_거부한다(state: AppState) -> None:
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    with pytest.raises(TypeError):
+        state.send_command(object())  # type: ignore[arg-type]
+
+
+def test_명령은_작업_스레드에서_보낼_수_없다(qapp) -> None:
+    store = AppState(emit_interval_ms=0)
+    store.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    thread = _run_in_worker(lambda: store.stop_recording("r1"))
+    assert isinstance(thread.error, RuntimeError)
+    store.deleteLater()

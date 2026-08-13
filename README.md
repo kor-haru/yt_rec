@@ -76,17 +76,77 @@ uv run yt-rec --stub flood           # 초당 100건 진행 이벤트 부하
 |---|---|---|
 | 상태 모델 | `yt_rec.state.models` | GUI가 그리는 불변 데이터 |
 | 이벤트 | `yt_rec.state.events` | 백엔드 → 상태 계층 통지 |
-| 저장소 | `yt_rec.state.store.AppState` | 이벤트 적용, Qt 시그널 방출, 갱신 빈도 제한 |
+| 명령 | `yt_rec.state.commands` | 화면 → 백엔드 요청 |
+| 저장소 | `yt_rec.state.store.AppState` | 이벤트 적용, Qt 시그널 방출, 갱신 빈도 제한, 명령 전달 |
 | 스텁 | `yt_rec.state.stub.StubEventSource` | 백엔드 없이 화면을 개발·테스트하는 하니스 |
 
-- 백엔드는 `EventSource.event_ready` 로 이벤트를 밀거나 `AppState.post_event()` 를
-  호출한다. 작업 스레드에서 불러도 안전하며, Qt 큐 연결이 GUI 스레드로 넘긴다.
 - 진행 중 녹화의 크기·경과 시간은 `Recording.reported_bytes` / `reported_elapsed`
   를 그대로 쓴다. `os.stat`·`Path.stat`·`getsize` 로 다시 재지 않는다.
 - 갱신은 기본 200ms 마다 한 번으로 묶인다. 초당 수백 건이 들어와도 화면 갱신은
   초당 5회를 넘지 않는다.
 - 보조 문구 색은 스타일시트에 고정하지 않고 `ui.widgets.set_muted()` 를 쓴다.
   `palette(dark)` 같은 값은 다크 테마에서 배경과 겹쳐 글자가 사라진다.
+- 상태·수치를 담은 짧은 문구는 `ElidedLabel` 처럼 말줄임할 수 있는 라벨에 넣는다.
+  평범한 `QLabel` 은 폭이 모자라면 넘치는 글자를 아무 표시 없이 잘라 내
+  **틀린 값**을 보여 준다(`오류 1234건` → `오류 123`).
+
+#### 스레드
+
+**작업 스레드에서 부를 수 있는 것은 `AppState.post_event()` 하나뿐이다.**
+나머지 메서드와 프로퍼티(`apply`, `apply_all`, `flush`, `snapshot`,
+`mark_errors_seen`, `send_command`, `connection`, `recordings`, …)를 다른
+스레드에서 부르면 그 자리에서 `RuntimeError` 가 난다. 예전에는 조용히 통과한 뒤
+시그널이 한 번도 방출되지 않아 화면이 영구 정지했다.
+
+이벤트 주입 경로는 셋이고 순서 의미는 하나로 맞춰 두었다.
+
+| 경로 | 누가 | 언제 적용되나 |
+|---|---|---|
+| `AppState.apply(event)` / `apply_all(events)` | GUI 스레드 전용 | 즉시(동기) |
+| `AppState.post_event(event)` | 어느 스레드든 | 같은 스레드면 즉시, 작업 스레드면 GUI 스레드로 큐잉 |
+| `EventSource.event_ready` (`attach` 로 연결) | 어느 스레드든 | Qt 자동 연결 — 같은 스레드면 즉시, 다른 스레드면 큐잉 |
+
+한 문장으로: **같은 스레드에서 보낸 이벤트는 부른 순서대로 즉시 적용되고, 다른
+스레드에서 보낸 이벤트는 GUI 이벤트 루프에 도착한 순서대로 적용된다.**
+
+#### 시간대
+
+**모델과 이벤트의 모든 `datetime` 은 시간대를 가진(aware) 값이다.** 어느
+시간대인지는 상관없다 — `datetime.now(timezone.utc)` 든
+`datetime.now().astimezone()` 이든 좋다.
+
+- **표시하는 쪽은 `ui.formatting.to_local()` 로 로컬로 옮긴 뒤 그린다.**
+  `format_timestamp()` / `format_countdown()` 은 이미 그렇게 한다. 새로 시각을
+  그리는 코드도 반드시 거쳐야 한다. 안 거치면 로컬 14:47 이 `05:47` 로 표시되고,
+  같은 객체의 `last_check_at` 과 `next_check_at` 이 서로 다른 기준으로 그려진다.
+- 시간대 없는(naive) 값은 계약 위반이다. 파이썬 표준 규칙대로 **로컬 벽시계
+  시각**으로 해석되므로 `datetime.utcnow()` 같은 naive-UTC 는 어긋난 값이 된다.
+  `AppState.apply()` 가 `NaiveDatetimeWarning` 으로 알려 준다.
+  직접 검사할 때는 `state.events.naive_datetime_fields(event)` 를 쓴다.
+
+#### 화면 → 백엔드 (녹화 중지, 채널 선택, 설정)
+
+화면이 백엔드 객체를 직접 붙잡는 경로는 없다. 저장소가 유일한 창구다.
+
+```python
+if not state.stop_recording("rec-1", reason="사용자가 중지했습니다"):
+    ...                                    # 백엔드 미연결. command_rejected 로 사유가 온다
+state.set_watched_channels(["UC...", "UC..."])   # 부분 변경이 아니라 전체 교체
+state.update_settings(output_dir=r"D:\recordings", max_quality="1080p")
+```
+
+- 세 메서드 모두 `AppState.send_command()` 를 거쳐 `command_requested` 시그널로
+  나간다. 백엔드는 그 시그널만 구독한다(작업 스레드면 Qt가 큐 연결로 넘긴다).
+- 백엔드가 연결되지 않았으면 보내지 않고 `False` 를 돌려주며
+  `command_rejected(command, 사유)` 를 방출한다. 명령이 조용히 사라져
+  `눌렀는데 아무 일도 없음` 이 되는 것을 막는다.
+- **명령은 요청이지 결과가 아니다.** `True` 는 `전달했다`는 뜻이다. 화면은 명령을
+  보낸 뒤 스스로 상태를 바꾸지 말고, 백엔드가 이벤트로 되돌려 주는 결과를 그린다.
+  그래야 실패했을 때 화면과 실제가 갈라지지 않는다.
+- 새 조작이 필요하면 `state/commands.py` 에 데이터 클래스를 추가하고 `GuiCommand`
+  에 붙인다. 화면마다 백엔드에 닿는 방법을 따로 만들지 않는다.
+- 창 크기·섹션 접힘처럼 화면에만 있는 표시 상태는 명령이 아니다.
+  `ui.settings_store.WindowSettings` 가 로컬에 저장한다.
 
 ## 라이선스
 

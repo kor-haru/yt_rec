@@ -10,6 +10,19 @@
 크기를 ``os.stat``/``Path.stat``/``os.path.getsize`` 로 읽으면 실제보다 훨씬
 작은 값이 나온다(실측: 1182.3 MB 파일이 22.7 MB로 보임). 그래서 이 값들은
 반드시 녹화 프로세스가 보고한 것만 사용한다.
+
+시간대 계약
+-----------
+**이 모듈의 모든 ``datetime`` 필드는 시간대를 가진(aware) 값이다.** 어느
+시간대인지는 상관없다 — 표시하는 쪽이 :func:`yt_rec.ui.formatting.to_local`
+로 로컬로 옮긴 뒤 그린다. 그래서 같은 객체의 ``last_check_at`` 과
+``next_check_at`` 이 서로 다른 기준으로 그려지는 일이 없다.
+
+시간대가 없는(naive) 값을 넣으면 파이썬 표준 규칙대로 **로컬 벽시계 시각**으로
+해석된다. 즉 ``datetime.utcnow()`` 같은 naive-UTC 는 시간대 차이만큼 어긋난
+시각으로 표시된다. 계약 위반이며
+:class:`~yt_rec.state.events.NaiveDatetimeWarning` 으로 경고가 나온다.
+검사만 하고 싶으면 :func:`~yt_rec.state.events.naive_datetime_fields` 를 쓴다.
 """
 
 from __future__ import annotations
@@ -117,6 +130,8 @@ class WatchStatus:
     남은 시간을 초 단위로 흘려보내면 초당 이벤트가 발생하므로, 백엔드는
     확인 주기가 바뀔 때만 이 값을 갱신하고 GUI가 로컬 시계로 남은 시간을
     계산해 그린다. 이것은 백엔드 폴링이 아니라 이미 받은 값의 재렌더링이다.
+
+    시간대를 가진 값이어야 한다(모듈 docstring `시간대 계약`).
     """
 
 
@@ -126,8 +141,17 @@ class WatchedChannel:
 
     channel_id: str
     name: str
+
     next_check_at: datetime | None = None
+    """다음 확인 시각. 시간대 있음."""
+
     last_check_at: datetime | None = None
+    """마지막 확인 시각. 시간대 있음.
+
+    ``next_check_at`` 과 같은 규칙을 따라야 한다. 한쪽만 naive 로 오면 같은
+    채널의 두 시각이 서로 다른 기준으로 그려진다.
+    """
+
     last_check_result: str = ""
     live_now: bool = False
 
@@ -146,7 +170,9 @@ class Recording:
     channel_name: str = ""
     quality: str = ""
     state: RecordingState = RecordingState.STARTING
+
     started_at: datetime | None = None
+    """녹화 시작 시각. 시간대 있음. 생략하면 상태 계층이 수신 시각으로 채운다."""
 
     reported_bytes: int = 0
     """녹화 프로세스가 보고한 누적 바이트."""
@@ -155,7 +181,7 @@ class Recording:
     """녹화 프로세스가 보고한 경과 시간."""
 
     reported_at: datetime | None = None
-    """위 두 값을 보고받은 시각. `응답 없음` 판정의 기준."""
+    """위 두 값을 보고받은 시각. `응답 없음` 판정의 기준. 시간대 있음."""
 
     retry_count: int = 0
     detail: str = ""
@@ -169,7 +195,10 @@ class CompletedRecording:
     recording_id: str
     title: str
     channel_name: str = ""
+
     finished_at: datetime | None = None
+    """마무리 시각. 시간대 있음. 생략하면 상태 계층이 수신 시각으로 채운다."""
+
     duration: timedelta = timedelta()
     total_bytes: int = 0
     """녹화 프로세스가 마지막으로 보고한 최종 크기."""
@@ -184,6 +213,8 @@ class LogEntry:
     """로그·오류 한 줄. 대시보드는 개수만, 로그 뷰어(#12)는 전체를 쓴다."""
 
     at: datetime
+    """기록 시각. 시간대 있음."""
+
     severity: Severity
     message: str
     source: str = ""
@@ -195,7 +226,9 @@ class QuotaStatus:
 
     used: int = 0
     limit: int | None = None
+
     resets_at: datetime | None = None
+    """사용량이 초기화되는 시각. 시간대 있음."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,6 +37,7 @@ RECORDING_DISPLAY_MODULES = (
     SRC_ROOT / "state" / "store.py",
     SRC_ROOT / "state" / "models.py",
     SRC_ROOT / "state" / "events.py",
+    SRC_ROOT / "state" / "commands.py",
 )
 
 #: 파일 크기를 직접 재는 호출. Windows에서 진행 중 파일의 크기가 실제보다
@@ -315,6 +316,55 @@ def test_상태_저장소는_타이머로_백엔드를_조회하지_않는다() 
     """저장소의 타이머는 방출을 묶는 용도 하나뿐이다."""
     source = (SRC_ROOT / "state" / "store.py").read_text(encoding="utf-8")
     assert source.count("QTimer(") == 1
+
+
+# ----------------------------------------------------------------------
+# 화면 이슈(#8~#12)가 읽어야 하는 계약이 README 에 적혀 있다
+# ----------------------------------------------------------------------
+def readme() -> str:
+    return (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # 스레드 계약
+        "post_event",
+        "RuntimeError",
+        # 시간대 계약
+        "to_local",
+        "NaiveDatetimeWarning",
+        # 명령 경로
+        "yt_rec.state.commands",
+        "send_command",
+        "stop_recording",
+        "set_watched_channels",
+        "update_settings",
+        "command_rejected",
+    ],
+)
+def test_README에_계약이_적혀_있다(phrase: str) -> None:
+    """다섯 화면이 병렬로 올라온다. 계약이 코드에만 있으면 각자 발명한다.
+
+    독스트링에 있는 것과 `무엇을 읽어야 하는지 아는 것`은 다르다.
+    """
+    assert phrase in readme(), f"README 에 `{phrase}` 설명이 없다"
+
+
+def test_화면이_백엔드에_닿는_경로가_저장소_하나다() -> None:
+    """화면 계층이 명령 데이터 클래스를 직접 만들어 시그널에 실지 않는다.
+
+    ``AppState`` 의 도우미(``stop_recording`` 등)만 쓰면 거부 처리와 스레드
+    확인이 한 곳에 모인다. 화면이 ``command_requested.emit`` 을 직접 부르면
+    그 검사를 우회한다.
+    """
+    offenders: list[str] = []
+    for path in sorted((SRC_ROOT / "ui").rglob("*.py")):
+        body = code_text(path)
+        for no, line in enumerate(body.splitlines(), start=1):
+            if "command_requested.emit" in line:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{no}")
+    assert not offenders, f"화면이 명령 시그널을 직접 방출한다: {offenders}"
 
 
 def test_진입점이_존재한다() -> None:
