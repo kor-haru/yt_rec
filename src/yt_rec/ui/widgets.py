@@ -28,10 +28,70 @@ __all__ = [
     "clear_layout",
     "set_muted",
     "MUTED_ALPHA",
+    "ELLIPSIS",
+    "can_elide",
+    "visible_text_width",
+    "drawn_text",
 ]
 
 MUTED_ALPHA = 170
 """보조 문구의 불투명도(0~255)."""
+
+ELLIPSIS = "…"
+"""말줄임 표시. `잘렸다`는 사실이 화면에 드러나는지 판단하는 기준이다."""
+
+
+def can_elide(label: QLabel) -> bool:
+    """폭이 모자랄 때 말줄임할 수 있는 라벨인지.
+
+    위젯 클래스 이름이 아니라 **능력**으로 판단한다. 말줄임을 못 하는 라벨은
+    넘치는 글자를 아무 표시 없이 잘라 버리므로, 담긴 문구가 온전히 그려져야만
+    한다. 이 구분을 클래스 목록으로 적어 두면 화면 이슈가 새 라벨 종류를
+    들여올 때 검사에서 조용히 빠진다(실측: 배지 잘림 회귀 테스트가 ``Badge``
+    만 순회해서, 같은 결함을 가진 상태 표시줄 라벨을 통과시켰다).
+    """
+    return callable(getattr(label, "elided_text", None))
+
+
+def visible_text_width(label: QLabel) -> int:
+    """이 라벨의 글자가 실제로 나타날 수 있는 폭.
+
+    라벨 자신의 폭만 보면 안 된다. 부모가 창보다 넓어지면 라벨은 제 폭을
+    받아 놓고도 창 밖으로 밀려 화면에서 사라진다(실측: 상태 표시줄이 674px 를
+    요구하는데 창이 376px 이라 오류 라벨이 0px 만 보였다). 그래서 잘리고 남은
+    영역까지 본다.
+    """
+    if not label.isVisible():
+        return 0
+    region = label.visibleRegion()
+    if region.isEmpty():
+        return 0
+    return max(region.boundingRect().intersected(label.contentsRect()).width(), 0)
+
+
+def drawn_text(label: QLabel) -> str:
+    """지금 이 순간 화면에 실제로 나타나는 문자열.
+
+    두 단계를 그대로 따라간다. 먼저 라벨이 자기 폭에 맞춰 그리려고 만드는
+    문자열(말줄임할 수 있으면 말줄임한 것, 못 하면 원문)을 구하고, 그 다음
+    부모·창에 잘려 나가고 남는 부분만 취한다.
+
+    `무엇이 보이는가` 를 위젯 종류와 무관하게 한 가지 방법으로 묻기 위한
+    함수다. 원문과 다르면서 :data:`ELLIPSIS` 로 끝나지도 않으면 사용자는
+    잘렸다는 사실조차 모른 채 **틀린 값**을 읽는다.
+    """
+    metrics = label.fontMetrics()
+    painted = label.text()
+    if can_elide(label):
+        painted = label.elided_text(max(label.contentsRect().width(), 0))
+
+    available = visible_text_width(label)
+    if metrics.horizontalAdvance(painted) <= available:
+        return painted
+    cut = len(painted)
+    while cut and metrics.horizontalAdvance(painted[:cut]) > available:
+        cut -= 1
+    return painted[:cut]
 
 
 def muted_color(widget: QWidget, *, alpha: int = MUTED_ALPHA) -> QColor:

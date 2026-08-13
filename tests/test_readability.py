@@ -5,12 +5,17 @@
 통째로 보이지 않았다. 컬러 이모지만 보이고 글자는 사라졌다. 이슈 #6 의
 `빈 상태 안내 문구 표시` 수용 기준이 위젯에 문자열만 들어 있다고 충족되는 것이
 아니므로, 실제 대비를 계산해 확인한다.
+
+**여기 있는 검사는 ``theme`` 픽스처로 라이트·다크 두 팔레트에서 각각 돈다.**
+``QT_QPA_PLATFORM=offscreen`` 은 팔레트를 라이트로 고정하므로, 픽스처가 어두운
+팔레트를 직접 주입하지 않으면 이 파일은 사고가 났던 조건을 한 번도 재현하지
+못한다(tests/conftest.py 의 `다크 테마` 참고).
 """
 
 from __future__ import annotations
 
 import pytest
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from yt_rec.state import events as ev
@@ -58,12 +63,37 @@ def test_스타일시트가_테마_의존_고정색을_쓰지_않는다() -> Non
     assert "color: palette(dark)" not in STYLESHEET
 
 
+def test_다크_테마_검사가_실제로_어두운_팔레트에서_돈다(
+    qapp: QApplication, theme: str
+) -> None:
+    """가드 자체가 무력해지지 않게 한다.
+
+    이 파일의 검사들이 `다크 테마 회귀 방지`라고 적혀 있으면서 실제로는 라이트
+    팔레트만 측정하던 것이 문제였다. ``theme`` 픽스처가 조용히 아무것도 하지
+    않게 되면 여기서 먼저 걸린다.
+    """
+    background = QApplication.palette().color(QPalette.ColorRole.Window)
+    foreground = QApplication.palette().color(QPalette.ColorRole.WindowText)
+    background_luminance = _relative_luminance(background)
+    if theme == "dark":
+        assert background_luminance < 0.1, (
+            f"다크로 돌린다면서 배경이 {background.name()} (휘도 "
+            f"{background_luminance:.3f}) 다 — 팔레트 주입이 먹지 않았다"
+        )
+        assert _relative_luminance(foreground) > background_luminance
+    else:
+        assert background_luminance > 0.5, (
+            f"라이트 기준 배경이 {background.name()} 다"
+        )
+        assert _relative_luminance(foreground) < background_luminance
+
+
 @pytest.mark.parametrize(
     "label_name",
     ["recording_empty", "channels_empty", "completed_empty"],
 )
 def test_빈_상태_안내_문구가_배경과_구분된다(
-    qapp: QApplication, window_settings: WindowSettings, label_name: str
+    qapp: QApplication, theme: str, window_settings: WindowSettings, label_name: str
 ) -> None:
     state = AppState(emit_interval_ms=0)
     window = MainWindow(state, settings=window_settings)
@@ -87,7 +117,7 @@ def test_빈_상태_안내_문구가_배경과_구분된다(
 
 
 def test_비연결_안내_문구가_실제로_읽힌다(
-    qapp: QApplication, window_settings: WindowSettings
+    qapp: QApplication, theme: str, window_settings: WindowSettings
 ) -> None:
     """위젯에 문자열이 들어 있는 것과 화면에서 읽히는 것은 다르다.
 
@@ -126,7 +156,7 @@ def test_비연결_안내_문구가_실제로_읽힌다(
 
 
 def test_카드_메타_문구가_배경과_구분된다(
-    qapp: QApplication, window_settings: WindowSettings
+    qapp: QApplication, theme: str, window_settings: WindowSettings
 ) -> None:
     state = AppState(emit_interval_ms=0)
     window = MainWindow(state, settings=window_settings)
@@ -159,7 +189,7 @@ def test_카드_메타_문구가_배경과_구분된다(
 
 
 def test_본문_문구는_흐리게_처리하지_않는다(
-    qapp: QApplication, window_settings: WindowSettings
+    qapp: QApplication, theme: str, window_settings: WindowSettings
 ) -> None:
     """제목은 보조 문구가 아니므로 전체 대비를 유지해야 한다."""
     state = AppState(emit_interval_ms=0)

@@ -54,6 +54,11 @@ EMPTY_COMPLETED = "완료된 녹화가 없습니다. 첫 녹화가 끝나면 여
 EMPTY_CHANNELS_DISCONNECTED = (
     "백엔드에 연결되지 않아 감시 상태를 알 수 없습니다. 앱을 다시 시작해 보세요."
 )
+EMPTY_CHANNELS_CONNECTING = (
+    "백엔드에 연결하는 중입니다. 감시 중인 채널은 연결이 끝나면 표시됩니다."
+)
+# `연결 중` 에 `다시 시작해 보세요` 를 보여 주면 아직 진행 중인 일을 실패로
+# 단정하고 엉뚱한 조치를 권하는 셈이 된다.
 
 _RECORDING_BADGE_KIND = {
     RecordingState.STARTING: "neutral",
@@ -78,6 +83,11 @@ class _Row(QWidget):
         super().__init__(parent)
         self.setObjectName("row")
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # 스타일시트(`QWidget#row`)의 아래 테두리를 실제로 그리게 한다. 평범한
+        # QWidget 은 이 속성이 없으면 스타일시트의 배경·테두리를 아예 칠하지
+        # 않는다. 스타일시트에 규칙만 써 두고 이 줄을 빠뜨리면 조용히 무시되어
+        # 행 구분선이 한 픽셀도 나오지 않는다(픽셀 측정으로 확인).
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
 
 class RecordingRow(_Row):
@@ -323,7 +333,9 @@ class Dashboard(QWidget):
         """
         if self._channel_rows:
             return
-        if self._state.connection is not ConnectionState.CONNECTED:
+        if self._state.connection is ConnectionState.CONNECTING:
+            self.channels_empty.setText(EMPTY_CHANNELS_CONNECTING)
+        elif self._state.connection is not ConnectionState.CONNECTED:
             self.channels_empty.setText(EMPTY_CHANNELS_DISCONNECTED)
         elif watch.state is WatchState.STOPPED and watch.stop_reason is not None:
             self.channels_empty.setText(f"{stop_reason_text(watch.stop_reason)} — {EMPTY_CHANNELS}")
