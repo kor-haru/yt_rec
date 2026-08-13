@@ -574,8 +574,16 @@ def test_창을_좁혀도_어떤_문구도_조용히_잘리지_않는다(
 def test_최소_너비가_상태_표시줄을_담는다(
     state: AppState, window_settings: WindowSettings
 ) -> None:
-    """상태 표시줄이 창보다 넓으면 라벨이 창 밖으로 밀려 사라진다."""
+    """상태 표시줄이 창보다 넓으면 라벨이 창 밖으로 밀려 사라진다.
+
+    실측: 최장 문구에서 상태 표시줄이 674px 를 요구하는데 창 최소 너비가 376px
+    이라 오류 라벨이 0px 만 보였다.
+    """
     window = make_window(state, window_settings)
+    # 최소 너비를 결정하는 것은 상태 표시줄이므로 최장 문구에서 확인한다.
+    window.next_check_label.setText(STATUS_NEXT_CHECK_SAMPLE)
+    window.quota_label.setText("quota 1,234,567 / 10,000,000")
+    window.error_label.setText(STATUS_ERRORS_SAMPLE)
     window.resize(window.minimumWidth(), 640)
     QApplication.processEvents()
 
@@ -609,16 +617,23 @@ def test_최소_너비에서_다음_확인과_오류_건수는_말줄임되지_�
     window.close()
 
 
-def test_감시_배지_문구가_길어져도_창_최소_너비가_바뀌지_않는다(
+def test_감시_배지_문구가_길어져도_창_크기가_흔들리지_않는다(
     state: AppState, window_settings: WindowSettings
 ) -> None:
     """실측 회귀: 백엔드가 죽은 상태(376px)로 저장하고 재실행 후 연결되면 398px 로
     튀어 **복원된 창 크기가 무효화됐다**(#6 수용 기준 위반).
 
-    최소 너비가 표시 내용에 따라 커지면 Qt 가 창을 그만큼 넓힌다.
+    최소 너비가 표시 내용에 따라 커지면 Qt 가 창을 그만큼 넓힌다. 여기서는
+    최소 너비에 붙여 둔 창이 배지 문구가 길어져도 그 자리에 있는지 본다.
+    `언제 다시 계산하는가` 자체는
+    ``test_constraints.py::test_최소_크기를_다시_잡는_곳이_생성과_표시_두_곳뿐이다``
+    가 지킨다.
     """
     window = make_window(state, window_settings)
     baseline = window.minimumWidth()
+    window.resize(baseline, 500)
+    QApplication.processEvents()
+    assert window.width() == baseline
 
     state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
     state.apply(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=999))
@@ -627,10 +642,14 @@ def test_감시_배지_문구가_길어져도_창_최소_너비가_바뀌지_않
     assert window.minimumWidth() == baseline, (
         f"배지 문구가 길어지면서 최소 너비가 {baseline} → {window.minimumWidth()} 로 커졌다"
     )
+    assert window.width() == baseline, "창이 스스로 넓어졌다"
+    # 그리고 그 최소 너비는 최장 배지 문구를 이미 담고 있다.
+    assert drawn_text(window.watch_badge) == window.watch_badge.text()
 
     state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
     QApplication.processEvents()
     assert window.minimumWidth() == baseline
+    assert window.width() == baseline
     window.close()
 
 

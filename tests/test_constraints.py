@@ -351,6 +351,37 @@ def test_README에_계약이_적혀_있다(phrase: str) -> None:
     assert phrase in readme(), f"README 에 `{phrase}` 설명이 없다"
 
 
+def test_최소_크기를_다시_잡는_곳이_생성과_표시_두_곳뿐이다() -> None:
+    """표시 내용이 바뀔 때 창 최소 크기를 다시 계산하면 창이 스스로 넓어진다.
+
+    실측 회귀: ``_refresh_badge`` 가 watch 변경마다 ``_apply_minimum_size()`` 를
+    다시 돌려서, 백엔드가 죽은 상태(376px)로 저장하고 재실행 후 연결되면 398px
+    로 튀어 **복원된 창 크기가 무효화됐다**(#6 수용 기준 위반).
+
+    픽셀로 확인하려면 그때그때 어느 구성 요소가 최소 너비를 결정하는지에 따라
+    결과가 달라진다(글꼴·로케일 의존). 그래서 `언제 다시 잡는가` 를 직접 본다.
+    """
+    path = SRC_ROOT / "ui" / "main_window.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    callers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "_apply_minimum_size"
+            ):
+                callers.add(node.name)
+
+    assert callers == {"__init__", "showEvent"}, (
+        f"_apply_minimum_size() 를 부르는 곳이 {sorted(callers)} 다. "
+        "표시 내용이 바뀔 때 다시 부르면 창이 스스로 넓어진다"
+    )
+
+
 def test_화면이_백엔드에_닿는_경로가_저장소_하나다() -> None:
     """화면 계층이 명령 데이터 클래스를 직접 만들어 시그널에 실지 않는다.
 
