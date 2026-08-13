@@ -20,6 +20,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "yt_rec"
 
+#: 파일시스템·외부 프로세스 금지가 걸리는 계층. 화면과 상태뿐이다.
+#:
+#: 제약의 대상은 `GUI` 다. 녹화 백엔드(``recording/``)는 종료된 파일의 유효성을
+#: ``stat`` 으로 확인하고 yt-dlp·ffmpeg 를 직접 띄우는 것이 제 일이므로 여기에
+#: 넣지 않는다. 금지된 것은 *화면과 상태 계층*이 파일시스템이나 외부 프로세스를
+#: 직접 만지는 일이다.
+GUI_ROOTS = (SRC_ROOT / "ui", SRC_ROOT / "state")
+
 #: 진행 중 녹화 표시 경로. 크기·경과 시간을 그리는 모든 모듈.
 RECORDING_DISPLAY_MODULES = (
     SRC_ROOT / "ui" / "dashboard.py",
@@ -45,6 +53,11 @@ FORBIDDEN_STAT_PATTERN = re.compile(
 
 def python_sources() -> list[Path]:
     return sorted(SRC_ROOT.rglob("*.py"))
+
+
+def gui_sources() -> list[Path]:
+    """화면·상태 계층의 파이썬 모듈. :data:`GUI_ROOTS` 아래 전부."""
+    return sorted(path for root in GUI_ROOTS for path in root.rglob("*.py"))
 
 
 _LITERAL_TOKENS = {tokenize.COMMENT, tokenize.STRING}
@@ -84,6 +97,19 @@ def test_소스가_비어_있지_않다() -> None:
     assert python_sources(), "src/yt_rec 아래에 파이썬 모듈이 없다"
 
 
+def test_화면_계층_검사_대상이_비어_있지_않다() -> None:
+    """범위를 좁힌 검사가 조용히 `아무것도 안 보는 검사`가 되지 않게 한다.
+
+    경로 오타나 디렉터리 이동으로 :func:`gui_sources` 가 빈 목록을 돌려주면
+    아래 금지 검사들이 전부 무조건 통과해 버린다. 표시 경로 모듈이 모두 이
+    범위에 들어 있는지까지 확인한다.
+    """
+    sources = set(gui_sources())
+    assert sources, f"{[str(r) for r in GUI_ROOTS]} 아래에 파이썬 모듈이 없다"
+    missing = [str(p.relative_to(REPO_ROOT)) for p in RECORDING_DISPLAY_MODULES if p not in sources]
+    assert not missing, f"표시 경로 모듈이 검사 범위에서 빠졌다: {missing}"
+
+
 # ----------------------------------------------------------------------
 # GUI는 파일 크기를 stat으로 읽지 않는다 (#7)
 # ----------------------------------------------------------------------
@@ -112,10 +138,15 @@ def test_진행_중_녹화_표시_경로에_stat_계열_호출이_없다(path: P
     assert not bad, f"stat 계열 접근이 있다: {bad}"
 
 
-def test_소스_전체에_stat_계열_호출이_없다() -> None:
-    """지금은 표시 경로 밖에도 없다. 생기면 어디에 생겼는지 알 수 있게 한다."""
+def test_화면과_상태_계층_전체에_stat_계열_호출이_없다() -> None:
+    """표시 경로 목록에 아직 없는 새 모듈까지 함께 막는다.
+
+    :data:`RECORDING_DISPLAY_MODULES` 는 손으로 적은 목록이라 화면 이슈가
+    모듈을 새로 만들면 빠진다. 계층 전체를 훑어 그 틈을 메운다. 범위는
+    :data:`GUI_ROOTS` 까지다 — 녹화 백엔드의 파일 검증은 막지 않는다.
+    """
     bad: list[str] = []
-    for path in python_sources():
+    for path in gui_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_STAT_ATTRS:
@@ -124,9 +155,12 @@ def test_소스_전체에_stat_계열_호출이_없다() -> None:
 
 
 def test_GUI가_파일시스템_모듈을_직접_쓰지_않는다() -> None:
-    """상태 계층과 화면 계층은 os / pathlib 를 import 하지 않는다."""
+    """상태 계층과 화면 계층은 os / pathlib 를 import 하지 않는다.
+
+    녹화 백엔드는 파일을 만들고 옮기는 것이 일이므로 대상이 아니다.
+    """
     offenders: list[str] = []
-    for path in python_sources():
+    for path in gui_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -257,8 +291,12 @@ def test_QML을_쓰지_않는다() -> None:
 # GUI가 백엔드를 폴링하지 않는다 (#7)
 # ----------------------------------------------------------------------
 def test_GUI가_외부_프로세스를_직접_돌리지_않는다() -> None:
+    """화면·상태 계층은 yt-dlp·ffmpeg·HTTP 를 직접 부르지 않는다.
+
+    호출은 녹화 백엔드가 하고, 결과는 이벤트로 올라온다.
+    """
     offenders: list[str] = []
-    for path in python_sources():
+    for path in gui_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

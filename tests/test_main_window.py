@@ -22,6 +22,8 @@ from yt_rec.state.models import (
 from yt_rec.state.store import AppState
 from yt_rec.state.stub import EMOJI_TITLE, LONG_TITLE, StubEventSource
 from yt_rec.ui.dashboard import (
+    EMPTY_CHANNELS,
+    EMPTY_CHANNELS_DISCONNECTED,
     EMPTY_COMPLETED,
     EMPTY_RECORDING,
     SECTION_CHANNELS,
@@ -65,8 +67,11 @@ def test_빈_상태_안내_문구가_섹션마다_표시된다(
     assert dash.completed_empty.isVisible()
     assert dash.recording_empty.text() == EMPTY_RECORDING
     assert dash.completed_empty.text() == EMPTY_COMPLETED
-    # 채널 안내는 감시 중단 사유가 붙을 수 있으므로 유도 문구 포함 여부로 본다.
-    assert "채널 관리" in dash.channels_empty.text()
+    # 소스를 붙이지 않았으니 이 창은 `연결 안 됨` 이다. 채널 섹션도 상단 배지와
+    # 같은 원인을 말해야 한다. `채널 관리에서 선택하세요` 는 이 상태에서 틀린
+    # 조치다 — 채널을 골라도 백엔드가 없으면 아무 일도 일어나지 않는다.
+    assert dash.channels_empty.isVisible()
+    assert dash.channels_empty.text() == EMPTY_CHANNELS_DISCONNECTED
     window.close()
 
 
@@ -77,7 +82,51 @@ def test_감시가_중지되면_사유가_안내에_붙는다(
     stub.load_preset("empty")
     QApplication.processEvents()
     assert window.watch_badge.text() == "중지됨"
-    assert "감시할 채널이 선택되지 않았습니다" in window.dashboard.channels_empty.text()
+    empty_text = window.dashboard.channels_empty.text()
+    assert "감시할 채널이 선택되지 않았습니다" in empty_text
+    # 연결된 상태에서는 채널을 고르는 것이 실제로 조치가 된다.
+    assert "채널 관리" in empty_text
+    window.close()
+
+
+def test_비연결_안내가_채널_안내로_덮이지_않는다(
+    state: AppState, window_settings: WindowSettings
+) -> None:
+    """연결이 끊기면 채널 섹션도 그 원인을 말해야 한다.
+
+    실측 회귀: 연결이 끊기면 저장소가 감시 요약을 ``UNKNOWN`` 으로 되돌리고
+    ``connection`` 과 ``watch`` 를 연달아 방출한다. 나중에 도착하는 감시 통지가
+    비연결 안내를 `채널 관리에서 채널을 선택하세요` 로 덮어써서, 백엔드가
+    없는데 채널을 고르라는 엉뚱한 조치가 표시됐다.
+    """
+    window = make_window(state, window_settings)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=0))
+    QApplication.processEvents()
+    assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS
+
+    state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+    QApplication.processEvents()
+    assert window.watch_badge.text() == "연결 안 됨"
+    assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS_DISCONNECTED
+
+    # 감시 통지가 한 번 더 늦게 도착해도 원인이 지워지지 않아야 한다.
+    state.apply(ev.WatchStatusChanged(WatchState.UNKNOWN))
+    QApplication.processEvents()
+    assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS_DISCONNECTED
+    window.close()
+
+
+def test_다시_연결되면_비연결_안내가_사라진다(
+    state: AppState, window_settings: WindowSettings
+) -> None:
+    """원인이 해소됐는데 안내가 남아 있으면 그것도 틀린 표시다."""
+    window = make_window(state, window_settings)
+    assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS_DISCONNECTED
+
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    QApplication.processEvents()
+    assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS
     window.close()
 
 

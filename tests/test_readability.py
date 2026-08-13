@@ -13,8 +13,11 @@ import pytest
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
+from yt_rec.state import events as ev
+from yt_rec.state.models import ConnectionState
 from yt_rec.state.store import AppState
 from yt_rec.state.stub import StubEventSource
+from yt_rec.ui.dashboard import EMPTY_CHANNELS_DISCONNECTED
 from yt_rec.ui.main_window import STYLESHEET, MainWindow
 from yt_rec.ui.settings_store import WindowSettings
 
@@ -78,6 +81,45 @@ def test_빈_상태_안내_문구가_배경과_구분된다(
         f"(글자 {label.text_color().name(QColor.NameFormat.HexArgb)}, "
         f"배경 {background.name()})"
     )
+
+    window.close()
+    state.deleteLater()
+
+
+def test_비연결_안내_문구가_실제로_읽힌다(
+    qapp: QApplication, window_settings: WindowSettings
+) -> None:
+    """위젯에 문자열이 들어 있는 것과 화면에서 읽히는 것은 다르다.
+
+    이 문구는 `왜 아무 일도 일어나지 않는가` 를 알리는 유일한 안내다. 배경과
+    같은 색이거나 첫 낱말부터 말줄임되면 문자열 단언은 통과해도 사용자는
+    원인을 알 수 없다. 실제 대비와 그려지는 문자열까지 확인한다.
+    """
+    state = AppState(emit_interval_ms=0)
+    window = MainWindow(state, settings=window_settings)
+    window.show()
+    # 연결됐다가 끊긴 경로. 저장소가 감시 통지를 뒤이어 방출한다.
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+    QApplication.processEvents()
+
+    label = window.dashboard.channels_empty
+    assert label.text() == EMPTY_CHANNELS_DISCONNECTED
+    assert label.isVisible()
+
+    background = label.palette().color(label.backgroundRole())
+    ratio = contrast_ratio(label.text_color(), background)
+    assert ratio >= MIN_CONTRAST, (
+        f"비연결 안내 대비비가 {ratio:.2f} 로 너무 낮다 "
+        f"(글자 {label.text_color().name(QColor.NameFormat.HexArgb)}, "
+        f"배경 {background.name()})"
+    )
+
+    # 창을 최소 너비까지 좁혀도 원인이 드러나는 만큼은 그려져야 한다.
+    window.resize(window.minimumWidth(), 480)
+    QApplication.processEvents()
+    drawn = label.elided_text()
+    assert "백엔드에 연결되지" in drawn, f"안내가 {drawn!r} 로만 그려진다"
 
     window.close()
     state.deleteLater()

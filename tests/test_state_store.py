@@ -22,7 +22,7 @@ from yt_rec.state.models import (
     WatchedChannel,
     WatchState,
 )
-from yt_rec.state.store import MAX_COMPLETED, MAX_LOGS, AppState
+from yt_rec.state.store import MAX_COMPLETED, MAX_LOGS, AppState, EventSource
 from yt_rec.ui.formatting import now
 
 
@@ -44,6 +44,54 @@ def test_연결_끊기면_감시_상태를_알_수_없음으로_되돌린다(sta
     state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
     assert state.watch.state is WatchState.UNKNOWN
     assert state.watch.stop_reason is StopReason.BACKEND_DOWN
+
+
+def test_마지막_소스를_떼면_연결_안_됨으로_되돌린다(state: AppState) -> None:
+    """이벤트를 줄 백엔드가 하나도 없는데 `연결됨` 으로 남으면 안 된다.
+
+    실측 회귀: :meth:`AppState.detach` 가 목록에서만 빼고 연결·감시 상태를
+    그대로 뒀다. 화면은 백엔드가 사라진 뒤에도 `감시 중` 을 계속 보여줬다.
+    """
+    source = EventSource()
+    state.attach(source)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=2))
+    assert state.connection is ConnectionState.CONNECTED
+    assert state.watch.state is WatchState.WATCHING
+
+    state.detach(source)
+    assert state.connection is ConnectionState.DISCONNECTED
+    # 연결 이벤트와 같은 경로를 타므로 감시 요약도 함께 정리된다.
+    assert state.watch.state is WatchState.UNKNOWN
+    assert state.watch.stop_reason is StopReason.BACKEND_DOWN
+
+
+def test_소스가_남아_있으면_하나를_떼도_연결이_유지된다(state: AppState) -> None:
+    """소스 하나를 떼는 것은 백엔드가 내려간 것과 다르다."""
+    first, second = EventSource(), EventSource()
+    state.attach(first)
+    state.attach(second)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.WatchStatusChanged(WatchState.WATCHING, channel_count=2))
+
+    state.detach(first)
+    assert state.connection is ConnectionState.CONNECTED
+    assert state.watch.state is WatchState.WATCHING
+
+    state.detach(second)
+    assert state.connection is ConnectionState.DISCONNECTED
+
+
+def test_소스를_떼면_화면에도_연결_해제가_통지된다(state: AppState) -> None:
+    """모델만 바뀌고 시그널이 안 나가면 화면은 옛 값을 계속 그린다."""
+    source = EventSource()
+    state.attach(source)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+
+    seen: list[object] = []
+    state.connection_changed.connect(seen.append)
+    state.detach(source)
+    assert seen == [ConnectionState.DISCONNECTED]
 
 
 def test_녹화_시작_진행_완료_전이(state: AppState) -> None:

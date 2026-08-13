@@ -202,13 +202,21 @@ class AppState(QObject):
         self._sources.append(source)
 
     def detach(self, source: EventSource) -> None:
-        """연결을 끊는다. 백엔드가 내려가면 `연결 안 됨` 으로 되돌린다."""
+        """연결을 끊는다. 마지막 소스가 빠지면 `연결 안 됨` 으로 되돌린다.
+
+        소스가 여럿일 때 하나만 떼는 것은 여전히 연결된 상태다. 하나도 남지
+        않았을 때만 되돌린다. 이벤트를 줄 백엔드가 없는데 ``CONNECTED`` 로
+        남아 있으면 화면이 `감시 중` 을 계속 보여줘 사용자가 오해한다.
+        """
         try:
             source.event_ready.disconnect(self._on_source_event)
         except (RuntimeError, TypeError):
             pass
         if source in self._sources:
             self._sources.remove(source)
+        if not self._sources:
+            # 연결 이벤트와 같은 경로를 타야 감시 요약까지 함께 정리된다.
+            self.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
 
     def post_event(self, event: ev.BackendEvent) -> None:
         """어느 스레드에서 불러도 안전한 이벤트 주입구.

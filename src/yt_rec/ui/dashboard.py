@@ -51,6 +51,9 @@ SECTION_COMPLETED = "completed"
 EMPTY_RECORDING = "진행 중인 녹화가 없습니다. 감시 중인 채널에서 라이브가 시작되면 여기에 표시됩니다."
 EMPTY_CHANNELS = "감시 중인 채널이 없습니다. `채널 관리`에서 자동 녹화할 채널을 선택하세요."
 EMPTY_COMPLETED = "완료된 녹화가 없습니다. 첫 녹화가 끝나면 여기에 요약이 표시됩니다."
+EMPTY_CHANNELS_DISCONNECTED = (
+    "백엔드에 연결되지 않아 감시 상태를 알 수 없습니다. 앱을 다시 시작해 보세요."
+)
 
 _RECORDING_BADGE_KIND = {
     RecordingState.STARTING: "neutral",
@@ -313,19 +316,25 @@ class Dashboard(QWidget):
         self.completed_empty.setVisible(not items)
 
     def _on_watch(self, watch: WatchStatus) -> None:
+        """채널 섹션의 빈 상태 문구를 고른다. 문구를 정하는 곳은 여기 하나다.
+
+        비연결이 가장 먼저다. 백엔드가 없으면 감시 요약 자체를 신뢰할 수 없어
+        `채널을 선택하세요` 같은 안내는 원인도 조치도 틀린 말이 된다.
+        """
         if self._channel_rows:
             return
-        if watch.state is WatchState.STOPPED and watch.stop_reason is not None:
+        if self._state.connection is not ConnectionState.CONNECTED:
+            self.channels_empty.setText(EMPTY_CHANNELS_DISCONNECTED)
+        elif watch.state is WatchState.STOPPED and watch.stop_reason is not None:
             self.channels_empty.setText(f"{stop_reason_text(watch.stop_reason)} — {EMPTY_CHANNELS}")
         else:
             self.channels_empty.setText(EMPTY_CHANNELS)
 
-    def _on_connection(self, connection: ConnectionState) -> None:
-        if connection is ConnectionState.CONNECTED:
-            return
-        self.channels_empty.setText(
-            "백엔드에 연결되지 않아 감시 상태를 알 수 없습니다. 앱을 다시 시작해 보세요."
-        )
+    def _on_connection(self, _connection: ConnectionState) -> None:
+        # 연결이 바뀌면 문구를 다시 고른다. 판정은 _on_watch() 한 곳에서만
+        # 하므로 페이로드가 아니라 저장소의 현재 값을 함께 본다. 다시
+        # 연결됐을 때 비연결 안내가 그대로 남지 않는 것도 이 경로 덕이다.
+        self._on_watch(self._state.watch)
 
     # ------------------------------------------------------------------
     def refresh_countdowns(self) -> None:
