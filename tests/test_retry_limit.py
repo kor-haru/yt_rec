@@ -7,6 +7,9 @@
   (실측으로 29만 회 재시도 / 7시간이 관측된 그 상태다.)
 
 두 경우를 같은 조건에서 비교해, 유한 상한에서만 정상 종료되는지 확인한다.
+
+세 번째 경우도 같은 조건에서 확인한다: ``extra_ytdlp_args`` 로 무한 상한을 넣어도
+거부되어 유한 상한이 유지된다. 거부가 없으면 그 테스트는 무한 상한 쪽 결과가 된다.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import pytest
 from yt_rec.recording import (
     FragmentRetried,
     FragmentSkipped,
+    LogLine,
     RecordingEngine,
     RecordingOptions,
     RecordingStatus,
@@ -89,7 +93,23 @@ def stub_server(hls_fixture):
         thread.join(timeout=5)
 
 
-def make_engine(tmp_path: Path, stub_server: str, toolchain, **overrides):
+class _GuardBypassEngine(RecordingEngine):
+    """거부 목록을 우회해 무한 상한을 실제로 적용한다.
+
+    무한 상한이 왜 위험한지 증거를 테스트로 남기기 위한 것이다. 설정
+    (``extra_ytdlp_args``)으로는 더 이상 이 상태를 만들 수 없다 —
+    :func:`test_추가_인자로는_재시도_상한을_무력화할_수_없다` 가 그것을 고정한다.
+    """
+
+    def build_download_argv(self, video_id: str) -> list[str]:
+        argv = super().build_download_argv(video_id)
+        # URL 앞에 끼워 넣는다. yt-dlp 는 뒤에 온 옵션이 이긴다.
+        return [*argv[:-1], "--fragment-retries", "infinite", argv[-1]]
+
+
+def make_engine(
+    tmp_path: Path, stub_server: str, toolchain, *, engine_class=RecordingEngine, **overrides
+):
     options = RecordingOptions(
         output_dir=tmp_path / "녹화",
         url_template=stub_server + "/{video_id}.m3u8",
@@ -98,7 +118,7 @@ def make_engine(tmp_path: Path, stub_server: str, toolchain, **overrides):
         fragment_retry_sleep="linear=0.2:0.5",
         **overrides,
     )
-    return RecordingEngine(options, toolchain=toolchain)
+    return engine_class(options, toolchain=toolchain)
 
 
 def test_유한_상한이면_죽은_조각을_건너뛰고_병합까지_끝낸다(
@@ -156,9 +176,9 @@ def test_무한_상한이면_스스로_끝내지_못한다(tmp_path, stub_server
         tmp_path,
         stub_server,
         toolchain,
-        fragment_retries=2,  # 아래 추가 인자가 덮어쓴다
+        engine_class=_GuardBypassEngine,  # 설정으로는 이 상태를 만들 수 없다
+        fragment_retries=2,  # 우회해 붙인 인자가 덮어쓴다
         stall_timeout_seconds=8.0,
-        extra_ytdlp_args=("--fragment-retries", "infinite"),
     )
     events = []
     engine.add_listener(events.append)
@@ -176,3 +196,41 @@ def test_무한_상한이면_스스로_끝내지_못한다(tmp_path, stub_server
     assert retries, "재시도를 반복했다"
     assert all(e.max_attempts is None for e in retries), "상한이 무한으로 찍힌다"
     assert retries[-1].attempt > 2, "유한 상한이었다면 2회에서 멈췄을 횟수"
+
+
+def test_추가_인자로는_재시도_상한을_무력화할_수_없다(tmp_path, stub_server, toolchain):
+    """위 두 테스트가 갈라지는 지점이다.
+
+    ``extra_ytdlp_args`` 에 ``--fragment-retries infinite`` 를 넣어도 거부되어 유한
+    상한이 유지된다. 거부가 없으면 무한 상한 쪽 결과가 되어 8초 정지 판정에 걸린다.
+    """
+    engine = make_engine(
+        tmp_path,
+        stub_server,
+        toolchain,
+        fragment_retries=2,
+        stall_timeout_seconds=8.0,
+        extra_ytdlp_args=("--fragment-retries", "infinite"),
+    )
+    events = []
+    engine.add_listener(events.append)
+
+    argv = engine.build_download_argv(STREAM_ID)
+    assert "infinite" not in argv, "실제 명령줄에 무한 상한이 들어가지 않는다"
+    assert argv[argv.index("--fragment-retries") + 1] == "2"
+    assert any(
+        isinstance(e, LogLine) and "--fragment-retries infinite" in e.text for e in events
+    ), "거부 사실을 알린다"
+
+    started = time.monotonic()
+    result = engine.record(STREAM_ID)
+    elapsed = time.monotonic() - started
+
+    assert result.stalled is False, "유한 상한이 유지되어 스스로 끝냈어야 한다"
+    assert result.succeeded, result.message
+    assert result.skipped_fragments == (4,), "상한에 걸린 조각을 건너뛰었다"
+    assert not any(isinstance(e, StallDetected) for e in events)
+    assert elapsed < 120
+
+    retries = [e for e in events if isinstance(e, FragmentRetried)]
+    assert retries and all(e.max_attempts == 2 for e in retries), "상한이 2로 찍힌다"

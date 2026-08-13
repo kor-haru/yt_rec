@@ -10,8 +10,11 @@
 * **메타데이터는 시작할 때 확보한다.** 방송 종료 직후 영상이 멤버 전용으로 바뀌면
   제목을 조회할 수 없어 파일명을 만들지 못한다. 그래서 시작 시점에 받아 두고,
   마무리에서는 보관된 값만 쓴다.
-* **중간 파일은 병합 검증에 성공한 뒤에만 지운다.** 검증이 실패하면 남겨 두어야
-  나중에 손으로라도 살릴 수 있다.
+* **중간 파일은 병합 검증에 성공하고 종료 상태를 저장한 뒤에만 지운다.** 검증이
+  실패하면 남겨 두어야 나중에 손으로라도 살릴 수 있고, 상태 저장보다 먼저 지우면
+  그 사이에 죽었을 때 복구가 파일을 못 찾아 녹화를 영구히 건너뛴다.
+* **사용자 추가 인자는 안전 옵션을 덮어쓸 수 없다.** yt-dlp 는 뒤에 온 옵션이 이기므로
+  추가 인자를 엔진 옵션 앞에 놓고, 엔진 소관 옵션이 들어오면 이유와 함께 거부한다.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .binaries import Toolchain, resolve_toolchain
+from .binaries import BinaryNotFoundError, Toolchain, resolve_toolchain
 from .errors import DenialCategory, MetadataUnavailableError, classify_error
 from .events import (
     FragmentRetried,
@@ -81,6 +84,132 @@ _POSTPROCESSOR_LINE = re.compile(
 _MAX_PATH_CHARS = 250
 
 EventCallback = Callable[[RecordingEvent], None]
+
+# -- 사용자 추가 인자 방어 -------------------------------------------------------
+#
+# yt-dlp 는 같은 옵션이 여러 번 오면 **뒤에 온 것이 이긴다.** 그래서 사용자가 넣은
+# extra_ytdlp_args 를 엔진 옵션 뒤에 붙이면 안전 장치가 그대로 무력화된다. 두 겹으로
+# 막는다: (1) 엔진이 정하는 옵션이 들어오면 이유와 함께 거부하고, (2) 통과한 인자는
+# 엔진 옵션보다 앞에 놓아 순서로도 지지 않게 한다.
+
+_WHY_RETRY = (
+    "재시도 상한은 설정(fragment_retries/total_retries/extractor_retries)으로만 정한다. "
+    "무한 상한은 방송 종료 시 사라진 조각을 영원히 다시 요청하며 녹화를 정지시킨다"
+)
+_WHY_SKIP = "상한에 걸린 조각은 건너뛰어야 나머지를 마저 받아 병합까지 끝낼 수 있다"
+_WHY_OUTPUT = "중간 파일 이름과 위치는 엔진이 정한다. 최종 파일명은 보관된 메타데이터로 만든다"
+_WHY_PART = "중간 파일 복구가 .part 없는 이름에 기대고 있다"
+_WHY_LIVE = "방송 시작 지점부터 받는지는 live_from_start 설정으로 정한다"
+_WHY_PARSE = "진행률·로그를 못 읽으면 정지 판정과 조각 기록이 무너진다"
+_WHY_FORMAT = "화질 상한과 컨테이너는 설정(max_height/container)으로 정한다"
+_WHY_CONFIG = "사용자 설정 파일이 무한 재시도 같은 옵션을 되살릴 수 있다"
+_WHY_ENGINE = "엔진이 정하는 값이다"
+
+#: extra_ytdlp_args 로 덮어쓸 수 없는 옵션 -> (값을 받는가, 거부 이유).
+#:
+#: :meth:`RecordingEngine.build_download_argv` 가 넘기는 옵션은 모두 여기 있어야 한다
+#: (테스트가 그 대응을 검사한다). 별칭과 부정형도 같은 옵션으로 취급한다.
+_ENGINE_OWNED_ARGS: dict[str, tuple[bool, str]] = {
+    # 재시도 상한 — 이 엔진이 존재하는 이유다(#14).
+    "-R": (True, _WHY_RETRY),
+    "--retries": (True, _WHY_RETRY),
+    "--fragment-retries": (True, _WHY_RETRY),
+    "--extractor-retries": (True, _WHY_RETRY),
+    "--retry-sleep": (True, _WHY_RETRY),
+    # 상한에 걸린 조각을 어떻게 할지.
+    "--skip-unavailable-fragments": (False, _WHY_SKIP),
+    "--no-skip-unavailable-fragments": (False, _WHY_SKIP),
+    "--abort-on-unavailable-fragment": (False, _WHY_SKIP),
+    "--abort-on-unavailable-fragments": (False, _WHY_SKIP),
+    "--no-abort-on-unavailable-fragment": (False, _WHY_SKIP),
+    "--no-abort-on-unavailable-fragments": (False, _WHY_SKIP),
+    # 파일 이름과 위치.
+    "-o": (True, _WHY_OUTPUT),
+    "--output": (True, _WHY_OUTPUT),
+    "-P": (True, _WHY_OUTPUT),
+    "--paths": (True, _WHY_OUTPUT),
+    "--part": (False, _WHY_PART),
+    "--no-part": (False, _WHY_PART),
+    # 방송 시작 지점.
+    "--live-from-start": (False, _WHY_LIVE),
+    "--no-live-from-start": (False, _WHY_LIVE),
+    # 출력 파싱.
+    "--progress-template": (True, _WHY_PARSE),
+    "--newline": (False, _WHY_PARSE),
+    "--progress": (False, _WHY_PARSE),
+    "--no-progress": (False, _WHY_PARSE),
+    "--encoding": (True, _WHY_PARSE),
+    "--no-colors": (False, _WHY_PARSE),
+    "--color": (True, _WHY_PARSE),
+    # 화질과 컨테이너.
+    "-f": (True, _WHY_FORMAT),
+    "--format": (True, _WHY_FORMAT),
+    "--merge-output-format": (True, _WHY_FORMAT),
+    # 설정 파일.
+    "--ignore-config": (False, _WHY_CONFIG),
+    "--no-config": (False, _WHY_CONFIG),
+    "--no-ignore-config": (False, _WHY_CONFIG),
+    "--config-location": (True, _WHY_CONFIG),
+    "--config-locations": (True, _WHY_CONFIG),
+    # 나머지 엔진 소관.
+    "-N": (True, _WHY_ENGINE),
+    "--concurrent-fragments": (True, _WHY_ENGINE),
+    "--ffmpeg-location": (True, _WHY_ENGINE),
+    "--mtime": (False, _WHY_ENGINE),
+    "--no-mtime": (False, _WHY_ENGINE),
+    "--no-playlist": (False, _WHY_ENGINE),
+    "--yes-playlist": (False, _WHY_ENGINE),
+}
+
+
+def _match_engine_owned(token: str) -> tuple[bool, str] | None:
+    """토큰이 엔진 소관 옵션이면 ``(값을 뒤에 따로 받는가, 거부 이유)``.
+
+    ``--flag=값`` 과 ``-oNAME`` 처럼 값이 붙어 오는 형태도 잡아낸다. 값이 이미 붙어
+    있으면 다음 토큰을 값으로 먹지 않는다.
+    """
+    if not token.startswith("-") or token in ("-", "--"):
+        return None
+
+    name, attached, _value = token.partition("=")
+    entry = _ENGINE_OWNED_ARGS.get(name)
+    if entry is not None:
+        takes_value, reason = entry
+        return takes_value and not attached, reason
+
+    # 짧은 옵션은 값이 붙어 올 수 있다(``-oNAME``, ``-R3``). 공백이 들어 있는 토큰은
+    # 다른 옵션에 딸린 값(``--postprocessor-args "-f mp4"``)이므로 건드리지 않는다.
+    if not token.startswith("--") and len(token) > 2 and not any(c.isspace() for c in token):
+        entry = _ENGINE_OWNED_ARGS.get(token[:2])
+        if entry is not None and entry[0]:
+            return False, entry[1]
+    return None
+
+
+def _filter_extra_args(extra: Iterable[str]) -> tuple[list[str], list[str]]:
+    """추가 인자에서 엔진 소관 옵션을 걷어낸다. ``(통과한 인자, 거부 사유)``.
+
+    값을 받는 옵션은 값 토큰까지 함께 버린다. 플래그만 버리고 값을 남기면 yt-dlp 가
+    그 값을 URL 로 오해한다.
+    """
+    tokens = list(extra)
+    accepted: list[str] = []
+    rejected: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        owned = _match_engine_owned(token)
+        if owned is None:
+            accepted.append(token)
+            continue
+        takes_value, reason = owned
+        dropped = [token]
+        if takes_value and index < len(tokens) and not tokens[index].startswith("-"):
+            dropped.append(tokens[index])
+            index += 1
+        rejected.append(f"추가 인자를 거부했다: {' '.join(dropped)} — {reason}")
+    return accepted, rejected
 
 
 class RecordingEngine:
@@ -151,9 +280,27 @@ class RecordingEngine:
             _terminate(process)
 
     def record(self, video_id: str) -> RecordingResult:
-        """``video_id`` 를 녹화하고 결과를 돌려준다. 예외 대신 결과로 실패를 알린다."""
-        self._stop.clear()
+        """``video_id`` 를 녹화하고 결과를 돌려준다. 예외 대신 결과로 실패를 알린다.
+
+        이 계약은 **전 경로에서** 성립해야 한다. 도구를 못 찾거나(``yt-dlp``/``ffmpeg``
+        미설치) 준비 단계에서 예상하지 못한 오류가 나도 예외를 흘리지 않는다. 호출자는
+        결과를 받아 표시할 뿐, 예외를 받을 준비가 되어 있지 않다 — GUI 워커 스레드에서
+        예외가 나면 상태 없이 죽는다.
+        """
         started_at = time.time()
+        try:
+            return self._record(video_id, started_at)
+        except BinaryNotFoundError as exc:
+            # 어느 바이너리가 없는지 그대로 담는다. 사용자가 PATH 를 고칠 수 있어야 한다.
+            return self._aborted(video_id, started_at, f"녹화를 시작할 수 없다: {exc}")
+        except Exception as exc:  # noqa: BLE001 - 계약상 예외를 흘리지 않는다
+            return self._aborted(video_id, started_at, f"녹화 준비 중 오류: {exc}")
+
+    def _record(self, video_id: str, started_at: float) -> RecordingResult:
+        self._stop.clear()
+        # 도구를 가장 먼저 해석한다. 없으면 여기서 BinaryNotFoundError 가 나고
+        # record() 가 결과로 바꾼다. work 디렉터리를 만들기 전이라 흔적도 남지 않는다.
+        _ = self.toolchain
         work_dir = self.work_dir_for(video_id)
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +352,28 @@ class RecordingEngine:
             download_message=download.message,
             denial=download.denial,
         )
+
+    def _aborted(self, video_id: str, started_at: float, message: str) -> RecordingResult:
+        """시작하지도 못한 실패를 결과로 만든다. **상태 파일은 건드리지 않는다.**
+
+        도구가 없거나 준비 단계에서 죽은 것은 환경 문제다. 여기서 종료 상태를 못 박으면
+        이전 시도가 남긴 중간 파일을 :meth:`recover_pending` 이 영구히 건너뛴다.
+        """
+        work_dir = self.work_dir_for(video_id)
+        result = RecordingResult(
+            video_id=video_id,
+            status=RecordingStatus.FAILED,
+            metadata=LiveMetadata.load(work_dir) or LiveMetadata.placeholder_for(video_id),
+            work_dir=work_dir,
+            started_at=started_at,
+            finished_at=time.time(),
+            message=message,
+        )
+        self._emit(
+            StatusChanged(video_id=video_id, status=RecordingStatus.FAILED, detail=message)
+        )
+        self._emit(RecordingFinished(video_id=video_id, result=result))
+        return result
 
     def recover_pending(self) -> list[RecordingResult]:
         """마무리되지 않은 채 남은 녹화를 찾아 병합·검증까지 끝낸다.
@@ -292,10 +461,21 @@ class RecordingEngine:
     # -- 다운로드 --------------------------------------------------------------
 
     def build_download_argv(self, video_id: str) -> list[str]:
-        """yt-dlp 명령줄. 테스트에서 인자 구성을 그대로 확인할 수 있게 공개한다."""
+        """yt-dlp 명령줄. 테스트에서 인자 구성을 그대로 확인할 수 있게 공개한다.
+
+        사용자 추가 인자(:attr:`RecordingOptions.extra_ytdlp_args`)는 엔진 옵션보다
+        **앞에** 놓는다. yt-dlp 는 뒤에 온 옵션이 이기므로, 거부 목록
+        (:data:`_ENGINE_OWNED_ARGS`)을 빠져나간 인자가 있어도 안전 옵션이 최종적으로
+        이긴다. 거부한 인자는 이유와 함께 :class:`LogLine` 으로 알린다.
+        """
         options = self.options
+        extra, rejected = _filter_extra_args(options.extra_ytdlp_args)
+        for note in rejected:
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] {note}"))
+
         argv = [
             str(self.toolchain.ytdlp),
+            *extra,
             "--ignore-config",
             "--no-colors",
             "--encoding",
@@ -331,7 +511,6 @@ class RecordingEngine:
         ]
         if options.live_from_start:
             argv.append("--live-from-start")
-        argv.extend(options.extra_ytdlp_args)
         argv.append(self.source_url(video_id))
         return argv
 
@@ -648,9 +827,6 @@ class RecordingEngine:
                     message=f"결과 파일을 옮기지 못했다: {exc}",
                 )
 
-        if not self.options.keep_intermediates:
-            _cleanup_intermediates(work_dir, video_id)
-
         status = RecordingStatus.COMPLETED if verification.complete else RecordingStatus.PARTIAL
         message = download_message
         if not verification.complete:
@@ -670,6 +846,8 @@ class RecordingEngine:
             verification=verification,
             output_path=final_path,
             message=message,
+            # 중간 파일 정리는 종료 상태를 저장한 **뒤에** 한다(_conclude 안에서).
+            cleanup=True,
         )
 
     def _conclude(
@@ -687,6 +865,7 @@ class RecordingEngine:
         verification: MediaVerification | None,
         output_path: Path | None,
         message: str,
+        cleanup: bool = False,
     ) -> RecordingResult:
         result = RecordingResult(
             video_id=video_id,
@@ -703,7 +882,18 @@ class RecordingEngine:
             finished_at=time.time(),
             message=message,
         )
+        # 순서가 중요하다. 종료 상태를 먼저 원자적으로 저장하고, 그 다음에 중간 파일을
+        # 지운다. 거꾸로 하면 그 사이에 죽었을 때 중간 파일은 사라졌는데 state.json 은
+        # recording 으로 남아, recover_pending() 이 복구할 파일을 못 찾고 이 녹화를
+        # 영구히 건너뛴다. 몇 시간 녹화한 결과를 잃는 경로다.
         self._save_state(work_dir, result)
+        if cleanup and not self.options.keep_intermediates:
+            try:
+                _cleanup_intermediates(work_dir, video_id)
+            except OSError:
+                # 정리 실패는 결과를 뒤집지 않는다. 결과 파일은 이미 제자리에 있고
+                # 상태도 저장됐다. 남은 중간 파일은 디스크만 차지한다.
+                pass
         self._emit(StatusChanged(video_id=video_id, status=status, detail=message))
         self._emit(RecordingFinished(video_id=video_id, result=result))
         return result
@@ -712,19 +902,32 @@ class RecordingEngine:
 
     @staticmethod
     def _save_state(work_dir: Path, result: RecordingResult) -> Path:
+        """상태를 원자적으로 저장한다. 임시 파일에 쓴 뒤 교체한다.
+
+        같은 파일에 곧바로 쓰면 그 도중에 죽었을 때 잘린 JSON 이 남는다. 교체 방식이면
+        읽는 쪽은 항상 이전 상태 아니면 새 상태만 본다.
+        """
         work_dir.mkdir(parents=True, exist_ok=True)
         target = work_dir / STATE_FILENAME
-        target.write_text(
+        tmp = work_dir / f"{STATE_FILENAME}.tmp"
+        tmp.write_text(
             json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        os.replace(tmp, target)
         return target
 
     @staticmethod
     def _load_state(work_dir: Path) -> dict | None:
+        """보관된 상태를 읽는다. 없거나 잘렸으면 ``None``.
+
+        ``None`` 은 "끝나지 않은 녹화"로 취급되어 복구 대상이 된다. 부분 기록된 파일
+        때문에 복구를 건너뛰는 일이 없어야 한다.
+        """
         try:
-            return json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+            state = json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        return state if isinstance(state, dict) else None
 
 
 class _DownloadOutcome:

@@ -89,7 +89,9 @@ class RecordingOptions:
     #: 파일명에 넣을 제목의 최대 글자 수.
     max_title_chars: int = 120
 
-    #: yt-dlp 에 그대로 덧붙일 추가 인자.
+    #: yt-dlp 에 덧붙일 추가 인자. 쿠키·프록시처럼 엔진이 정하지 않는 것에 쓴다.
+    #: 엔진이 직접 정하는 옵션(재시도 상한, ``-o``, ``--live-from-start`` 등)은
+    #: 여기에 넣어도 거부된다. 안전 장치를 덮어쓰지 못하게 하기 위한 것이다.
     extra_ytdlp_args: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:

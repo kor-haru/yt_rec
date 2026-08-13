@@ -15,16 +15,21 @@ from pathlib import Path
 import pytest
 
 from yt_rec.recording import (
+    BinaryNotFoundError,
     DenialCategory,
     LiveMetadata,
+    LogLine,
     MetadataUnavailableError,
     ProgressReported,
     RecordingEngine,
+    RecordingFinished,
     RecordingOptions,
+    RecordingResult,
     RecordingStatus,
     StallDetected,
     Toolchain,
 )
+from yt_rec.recording import engine as engine_module
 from yt_rec.recording.engine import STATE_FILENAME
 from yt_rec.recording.progress import PROGRESS_MARKER
 
@@ -128,11 +133,178 @@ def test_출력은_video_id_로_두고_최종_이름은_우리가_정한다(tmp_
     assert argv[-1].endswith(VIDEO_ID)
 
 
-def test_추가_인자는_뒤에_붙는다(tmp_path):
+def test_추가_인자는_안전_옵션보다_앞에_놓인다(tmp_path):
+    """yt-dlp 는 뒤에 온 옵션이 이긴다. 사용자 인자가 안전 옵션 뒤로 가면 안 된다."""
     argv = base_engine(
         tmp_path, extra_ytdlp_args=("--cookies-from-browser", "chrome")
     ).build_download_argv(VIDEO_ID)
-    assert argv[-3:] == ["--cookies-from-browser", "chrome", argv[-1]]
+
+    assert argv[1:3] == ["--cookies-from-browser", "chrome"]
+    for guarded in ("--fragment-retries", "--retries", "-o", "--live-from-start"):
+        assert argv.index(guarded) > argv.index("--cookies-from-browser")
+
+
+# -- 추가 인자로 안전 옵션을 덮어쓸 수 없다 ---------------------------------------
+
+#: 실제로 안전 장치를 무력화하는 인자들. 하나라도 통과하면 사고로 이어진다.
+CONFLICTING_EXTRA_ARGS = (
+    "--fragment-retries", "infinite",   # 사라진 조각을 영원히 재요청 (29만 회/7시간)
+    "--retries", "infinite",
+    "--extractor-retries", "infinite",
+    "-o", "%(title)s.%(ext)s",          # 파일명 결정 로직 우회
+    "--no-live-from-start",             # 방송 시작 지점부터 받는 요건 파괴
+    "--abort-on-unavailable-fragment",  # 죽은 조각 하나로 전체를 포기
+    "--config-location", "my.conf",     # 설정 파일로 위 옵션들을 되살리기
+)
+
+
+def test_추가_인자로_재시도_상한을_무력화할_수_없다(tmp_path):
+    argv = base_engine(
+        tmp_path,
+        fragment_retries=20,
+        total_retries=10,
+        extractor_retries=3,
+        extra_ytdlp_args=CONFLICTING_EXTRA_ARGS,
+    ).build_download_argv(VIDEO_ID)
+
+    assert "infinite" not in argv
+    assert argv.count("--fragment-retries") == 1
+    assert argv[argv.index("--fragment-retries") + 1] == "20"
+    assert argv[argv.index("--retries") + 1] == "10"
+    assert argv[argv.index("--extractor-retries") + 1] == "3"
+    # 상한에 걸린 조각은 건너뛰고 나머지를 마저 받아야 한다.
+    assert "--abort-on-unavailable-fragment" not in argv
+    assert "--skip-unavailable-fragments" in argv
+
+
+def test_추가_인자로_파일명과_시작_지점을_바꿀_수_없다(tmp_path):
+    argv = base_engine(
+        tmp_path, extra_ytdlp_args=CONFLICTING_EXTRA_ARGS
+    ).build_download_argv(VIDEO_ID)
+
+    assert argv.count("-o") == 1
+    assert argv[argv.index("-o") + 1] == "%(id)s.%(ext)s"
+    assert "--no-live-from-start" not in argv
+    assert "--live-from-start" in argv
+    assert "--config-location" not in argv
+    # 거부한 플래그의 값이 남으면 yt-dlp 가 그 값을 URL 로 오해한다.
+    assert argv[-1].endswith(VIDEO_ID)
+    for orphan in ("%(title)s.%(ext)s", "my.conf", "infinite"):
+        assert orphan not in argv
+
+
+def test_짧은_옵션과_등호_형태도_거부한다(tmp_path):
+    """``-R99`` 나 ``--fragment-retries=infinite`` 로도 우회할 수 없어야 한다."""
+    argv = base_engine(
+        tmp_path,
+        fragment_retries=20,
+        total_retries=10,
+        extra_ytdlp_args=("--fragment-retries=infinite", "-R99", "-o%(title)s.%(ext)s"),
+    ).build_download_argv(VIDEO_ID)
+
+    assert argv[argv.index("--fragment-retries") + 1] == "20"
+    assert argv[argv.index("--retries") + 1] == "10"
+    assert argv[argv.index("-o") + 1] == "%(id)s.%(ext)s"
+    assert not any(t.startswith(("-R", "-o%", "--fragment-retries=")) for t in argv[1:-1])
+
+
+def test_거부한_인자는_이유와_함께_알린다(tmp_path):
+    """조용히 무시하면 사용자는 자기 설정이 반영된 줄로 안다."""
+    engine = base_engine(tmp_path, extra_ytdlp_args=("--fragment-retries", "infinite"))
+    notes: list[str] = []
+    engine.add_listener(lambda e: notes.append(e.text) if isinstance(e, LogLine) else None)
+
+    engine.build_download_argv(VIDEO_ID)
+
+    assert len(notes) == 1
+    assert "--fragment-retries infinite" in notes[0]
+    assert "재시도 상한" in notes[0]
+
+
+def test_안전과_무관한_추가_인자는_그대로_넘긴다(tmp_path):
+    extra = ("--cookies", "쿠키.txt", "--proxy", "socks5://127.0.0.1:1080")
+    engine = base_engine(tmp_path, extra_ytdlp_args=extra)
+    notes: list[LogLine] = []
+    engine.add_listener(lambda e: notes.append(e) if isinstance(e, LogLine) else None)
+
+    argv = engine.build_download_argv(VIDEO_ID)
+
+    assert argv[1 : 1 + len(extra)] == list(extra)
+    assert notes == []
+
+
+def test_엔진이_넘기는_옵션은_모두_거부_목록에_있다(tmp_path):
+    """목록이 뒤처지면 새로 추가한 옵션을 사용자 인자가 덮어쓸 수 있다."""
+    argv = base_engine(tmp_path).build_download_argv(VIDEO_ID)
+    flags = [token for token in argv if token.startswith("-")]
+
+    assert flags
+    assert [f for f in flags if f not in engine_module._ENGINE_OWNED_ARGS] == []
+
+
+# -- 도구를 못 찾았을 때 ---------------------------------------------------------
+
+
+def _missing(tool: str, executable: str):
+    def 없다(*args, **kwargs):
+        raise BinaryNotFoundError(tool, executable)
+
+    return 없다
+
+
+@pytest.mark.parametrize(
+    "tool,executable",
+    [("ytdlp", "yt-dlp"), ("ffmpeg", "ffmpeg"), ("ffprobe", "ffprobe")],
+)
+def test_도구가_없으면_예외_대신_실패_결과를_돌려준다(
+    tmp_path, monkeypatch, tool, executable
+):
+    """record() 는 예외를 던지지 않는 계약이다. 호출부가 예외를 맞으면 안 된다."""
+    monkeypatch.setattr(engine_module, "resolve_toolchain", _missing(tool, executable))
+    engine = RecordingEngine(RecordingOptions(output_dir=tmp_path / "out"))
+    events = []
+    engine.add_listener(events.append)
+
+    result = engine.record(VIDEO_ID)  # 예외가 새면 여기서 테스트가 깨진다
+
+    assert result.status is RecordingStatus.FAILED
+    assert result.output_path is None
+    assert executable in result.message, "어느 바이너리가 없는지 알려 준다"
+    assert "PATH" in result.message, "어떻게 조치하는지도 알려 준다"
+    assert any(isinstance(e, RecordingFinished) for e in events)
+
+
+def test_도구가_없어도_복구할_중간_파일을_잃지_않는다(tmp_path, monkeypatch):
+    """도구를 못 찾은 실행이 상태를 종료로 못 박으면 복구가 이 녹화를 영구히 건너뛴다."""
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(b"\x00" * 1024)
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": time.time()}), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(engine_module, "resolve_toolchain", _missing("ffmpeg", "ffmpeg"))
+    result = RecordingEngine(options).record(VIDEO_ID)
+
+    assert result.status is RecordingStatus.FAILED
+    state = json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    assert state["status"] == "recording", "복구 대상 표시를 지우지 않았다"
+
+
+def test_준비_중_예상하지_못한_오류도_결과로_바꾼다(tmp_path, monkeypatch):
+    def 터진다(*args, **kwargs):
+        raise RuntimeError("디스크가 갑자기 사라졌다")
+
+    monkeypatch.setattr("yt_rec.recording.engine.fetch_metadata", 터진다)
+    engine = RecordingEngine(
+        RecordingOptions(output_dir=tmp_path / "out"), toolchain=DUMMY_TOOLCHAIN
+    )
+
+    result = engine.record(VIDEO_ID)
+
+    assert result.status is RecordingStatus.FAILED
+    assert "디스크가 갑자기 사라졌다" in result.message
 
 
 # -- 정상 종료 ------------------------------------------------------------------
@@ -569,6 +741,152 @@ def test_yt_dlp_원문_출력을_로그로_남긴다(tmp_path, toolchain, sample
 
     log = (engine.work_dir_for(VIDEO_ID) / "yt-dlp.log").read_text(encoding="utf-8")
     assert "Destination" in log
+
+
+# -- 상태 저장과 중간 파일 정리의 순서 -------------------------------------------
+
+
+@pytest.mark.integration
+def test_상태를_저장한_뒤에_중간_파일을_치운다(
+    tmp_path, toolchain, sample_streams, monkeypatch
+):
+    """정리 직전에 프로세스가 죽는 경우.
+
+    거꾸로 하면 중간 파일은 사라졌는데 state.json 은 ``recording`` 으로 남아,
+    복구가 파일을 못 찾고 몇 시간 녹화한 결과를 영구히 건너뛴다.
+    """
+    video, audio = sample_streams
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    _prestore(engine, stored_metadata())
+
+    def 죽는다(*args, **kwargs):
+        raise KeyboardInterrupt("정리하려는 순간 프로세스가 죽었다")
+
+    monkeypatch.setattr(engine_module, "_cleanup_intermediates", 죽는다)
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.record(VIDEO_ID)
+
+    # 결과 파일과 종료 상태가 남았다. 중간 파일은 아직 그대로다(지우기 전에 죽었으니).
+    state = json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    assert state["status"] in ("completed", "partial")
+    assert Path(state["output_path"]).exists()
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
+
+    # 다시 켜도 이 녹화를 다시 마무리하지 않는다 — 같은 파일을 두 번 만들지 않는다.
+    assert RecordingEngine(engine.options, toolchain=toolchain).recover_pending() == []
+    assert len(list((tmp_path / "녹화").glob("*.mp4"))) == 1
+
+
+@pytest.mark.integration
+def test_정리에_실패해도_성공한_결과를_뒤집지_않는다(
+    tmp_path, toolchain, sample_streams, monkeypatch
+):
+    """결과 파일과 상태는 이미 제자리에 있다. 남은 중간 파일은 디스크만 차지한다."""
+    video, audio = sample_streams
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+    )
+    _prestore(engine, stored_metadata())
+
+    def 잠겨_있다(*args, **kwargs):
+        raise OSError("다른 프로세스가 파일을 붙잡고 있다")
+
+    monkeypatch.setattr(engine_module, "_cleanup_intermediates", 잠겨_있다)
+
+    result = engine.record(VIDEO_ID)
+
+    assert result.succeeded
+    assert result.output_path.exists()
+
+
+def test_상태_파일은_임시_파일을_교체해_쓴다(tmp_path, monkeypatch):
+    """쓰는 도중에 죽어도 이전 상태가 잘린 JSON 으로 덮이면 안 된다."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": 1.0}), encoding="utf-8"
+    )
+    result = RecordingResult(
+        video_id=VIDEO_ID,
+        status=RecordingStatus.COMPLETED,
+        metadata=stored_metadata(),
+        work_dir=work_dir,
+    )
+
+    def 교체가_실패한다(*args, **kwargs):
+        raise OSError("교체 실패")
+
+    monkeypatch.setattr(engine_module.os, "replace", 교체가_실패한다)
+    with pytest.raises(OSError):
+        RecordingEngine._save_state(work_dir, result)
+
+    kept = json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
+    assert kept["status"] == "recording", "이전 상태가 온전히 남았다"
+
+
+def test_상태를_저장하면_임시_파일이_남지_않는다(tmp_path):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    RecordingEngine._save_state(
+        work_dir,
+        RecordingResult(
+            video_id=VIDEO_ID,
+            status=RecordingStatus.COMPLETED,
+            metadata=stored_metadata(),
+            work_dir=work_dir,
+        ),
+    )
+
+    assert sorted(p.name for p in work_dir.iterdir()) == [STATE_FILENAME]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "written",
+    [
+        '{"status": "compl',  # 쓰는 도중에 죽어 JSON 이 잘렸다
+        "123",  # JSON 이긴 하지만 객체가 아니다
+        "",  # 만들기만 하고 아무것도 못 썼다
+    ],
+)
+def test_부분_기록된_상태_파일은_복구를_막지_않는다(
+    tmp_path, toolchain, sample_streams, written
+):
+    """상태를 못 읽으면 끝나지 않은 녹화로 봐야 한다. 건너뛰면 결과를 잃는다."""
+    video, audio = sample_streams
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    stored_metadata().save(work_dir)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(video.read_bytes())
+    (work_dir / f"{VIDEO_ID}.f140.m4a").write_bytes(audio.read_bytes())
+    (work_dir / STATE_FILENAME).write_text(written, encoding="utf-8")
+
+    results = RecordingEngine(options, toolchain=toolchain, tz=KST).recover_pending()
+
+    assert len(results) == 1
+    assert results[0].succeeded
+    assert json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))[
+        "status"
+    ] in ("completed", "partial")
 
 
 # -- 도우미 ---------------------------------------------------------------------
