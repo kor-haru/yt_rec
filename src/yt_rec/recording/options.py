@@ -71,6 +71,18 @@ class RecordingOptions:
     #: 이 시간 동안 진전이 없으면 정지로 판정한다(초).
     stall_timeout_seconds: float = 900.0
 
+    #: 중간 파일 병합(ffmpeg) 시한(초). 반드시 유한해야 한다.
+    #:
+    #: 정지 감지기는 다운로드 단계에서만 돈다. 마무리 단계의 ffmpeg/ffprobe 가 물리면
+    #: 아무도 알아채지 못한 채 무기한 매달린다 — #14 가 없애려는 "겉보기에 정상인
+    #: 무기한 정지"와 같은 것이다. 그래서 이 단계에도 시한을 둔다.
+    merge_timeout_seconds: float = 3600.0
+
+    #: 검증(ffprobe/ffmpeg) 하위 프로세스 하나당 시한(초). 반드시 유한해야 한다.
+    #:
+    #: 실측: 1.6GB / 7041초 / 60fps 파일의 패킷 훑기가 2.4초였다. 넉넉한 상한이다.
+    verify_timeout_seconds: float = 1800.0
+
     #: ``--live-from-start`` 사용 여부. 방송 시작 지점부터 받으려면 켜야 한다.
     live_from_start: bool = True
 
@@ -101,6 +113,10 @@ class RecordingOptions:
             raise ValueError("total_retries 는 음수일 수 없다")
         if self.stall_timeout_seconds <= 0:
             raise ValueError("stall_timeout_seconds 는 양수여야 한다")
+        if self.merge_timeout_seconds <= 0:
+            raise ValueError("merge_timeout_seconds 는 양수여야 한다")
+        if self.verify_timeout_seconds <= 0:
+            raise ValueError("verify_timeout_seconds 는 양수여야 한다")
         if self.container not in ("mp4", "mkv"):
             raise ValueError(f"지원하지 않는 컨테이너: {self.container}")
         object.__setattr__(self, "output_dir", Path(self.output_dir))

@@ -14,6 +14,7 @@ __all__ = [
     "MetadataUnavailableError",
     "RecordingError",
     "ToolFailure",
+    "ToolTimeout",
     "classify_error",
     "is_transient",
 ]
@@ -164,3 +165,16 @@ class ToolFailure(RecordingError):
         super().__init__(message, classify_error(output or message))
         self.returncode = returncode
         self.output = output
+
+
+class ToolTimeout(ToolFailure):
+    """외부 도구가 시한을 넘겨 끊었다.
+
+    실패와 구분해 두는 이유: 시한 초과는 "물려 있었다"는 뜻이므로 정지로 기록·표시해야
+    한다. 마무리 단계(ffmpeg/ffprobe)에는 정지 감지기가 돌지 않으니 이 예외가 그 역할을
+    대신한다(#14).
+    """
+
+    def __init__(self, message: str, *, timeout: float | None = None):
+        super().__init__(message)
+        self.timeout = timeout

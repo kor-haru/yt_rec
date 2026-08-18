@@ -34,7 +34,12 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .binaries import BinaryNotFoundError, Toolchain, resolve_toolchain
-from .errors import DenialCategory, MetadataUnavailableError, classify_error
+from .errors import (
+    DenialCategory,
+    MetadataUnavailableError,
+    ToolTimeout,
+    classify_error,
+)
 from .events import (
     FragmentRetried,
     FragmentSkipped,
@@ -52,6 +57,7 @@ from .merge import (
     MediaVerification,
     find_intermediates,
     merge_streams,
+    select_merge_sources,
     verify_media,
 )
 from .metadata import LiveMetadata, fetch_metadata
@@ -66,10 +72,13 @@ from .progress import (
     parse_skipped_fragment,
 )
 
-__all__ = ["RecordingEngine", "STATE_FILENAME"]
+__all__ = ["LOCK_FILENAME", "RecordingEngine", "STATE_FILENAME"]
 
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "yt-dlp.log"
+
+#: 이 work 디렉터리를 지금 쓰고 있는 프로세스 표시. :func:`_lock_owner` 참고.
+LOCK_FILENAME = "owner.lock"
 
 _MEDIA_SUFFIXES = frozenset({".mp4", ".mkv", ".webm", ".m4a", ".mka", ".m4v"})
 
@@ -272,12 +281,30 @@ class RecordingEngine:
     # -- 공개 진입점 -----------------------------------------------------------
 
     def request_stop(self) -> None:
-        """진행 중인 녹화를 멈춘다. 지금까지 받은 내용은 병합해 마무리한다."""
+        """진행 중인 녹화를 멈춘다. 지금까지 받은 내용은 병합해 마무리한다.
+
+        **아직 시작하지 않은 녹화에도 걸린다.** 플래그는 :meth:`clear_stop` 을 부를
+        때까지 남는다. :meth:`record` 가 시작할 때 플래그를 지우면, 워커 스레드가
+        ``record()`` 를 부르기 직전에 사용자가 누른 중단이 사라져 녹화가 방송 끝까지
+        (수 시간) 계속된다. 감시 루프(#3)가 ``record()`` 를 반복 호출하는 구조에서는
+        호출 사이에 눌린 중단이 매번 없어진다.
+        """
         self._stop.set()
         with self._process_lock:
             process = self._process
         if process is not None:
             _terminate(process)
+
+    def stop_requested(self) -> bool:
+        """중단 요청이 걸려 있는가. 스레드 안전."""
+        return self._stop.is_set()
+
+    def clear_stop(self) -> None:
+        """중단 요청을 거둔다. 다시 녹화하려면 **명시적으로** 불러야 한다.
+
+        :meth:`record` 가 알아서 지우지 않는 것은 의도한 것이다. 위 설명 참고.
+        """
+        self._stop.clear()
 
     def record(self, video_id: str) -> RecordingResult:
         """``video_id`` 를 녹화하고 결과를 돌려준다. 예외 대신 결과로 실패를 알린다.
@@ -297,13 +324,24 @@ class RecordingEngine:
             return self._aborted(video_id, started_at, f"녹화 준비 중 오류: {exc}")
 
     def _record(self, video_id: str, started_at: float) -> RecordingResult:
-        self._stop.clear()
+        # 중단 플래그는 여기서 지우지 않는다. 지우면 record() 를 부르기 직전에 눌린
+        # 중단이 사라진다. 거두려면 clear_stop() 을 명시적으로 불러야 한다.
         # 도구를 가장 먼저 해석한다. 없으면 여기서 BinaryNotFoundError 가 나고
         # record() 가 결과로 바꾼다. work 디렉터리를 만들기 전이라 흔적도 남지 않는다.
         _ = self.toolchain
         work_dir = self.work_dir_for(video_id)
         work_dir.mkdir(parents=True, exist_ok=True)
+        # 이 디렉터리를 지금 쓰고 있다고 표시한다. recover_pending() 이 이 표시를 보고
+        # 살아 있는 녹화의 중간 파일을 병합하지 않는다.
+        _write_lock(work_dir)
+        try:
+            return self._record_locked(video_id, started_at, work_dir)
+        finally:
+            _release_lock(work_dir)
 
+    def _record_locked(
+        self, video_id: str, started_at: float, work_dir: Path
+    ) -> RecordingResult:
         # 1) 메타데이터 선확보 — 파일명 재료는 지금 잡아 두어야 한다.
         self._emit(StatusChanged(video_id=video_id, status=RecordingStatus.FETCHING_METADATA))
         metadata, denial = self._secure_metadata(video_id, work_dir)
@@ -351,6 +389,7 @@ class RecordingEngine:
             downloaded_bytes=download.downloaded_bytes,
             download_message=download.message,
             denial=download.denial,
+            format_ids=download.format_ids,
         )
 
     def _aborted(self, video_id: str, started_at: float, message: str) -> RecordingResult:
@@ -379,15 +418,38 @@ class RecordingEngine:
         """마무리되지 않은 채 남은 녹화를 찾아 병합·검증까지 끝낸다.
 
         프로세스가 죽거나 강제 종료된 뒤 다시 켰을 때 부르면 된다.
+
+        **지금 녹화 중인 work 디렉터리는 건드리지 않는다.** 앱을 두 개 띄우거나 녹화
+        도중에 이 함수를 부르면, 살아 있는 중간 파일을 병합해 엉뚱한 결과를 만들고
+        상태 파일을 덮어쓴다. Windows 는 열린 파일 unlink 가 실패해 피해가 제한되지만
+        POSIX 에서는 그대로 지워진다. 그래서 소유권 표시(:data:`LOCK_FILENAME`)를 보고
+        살아 있는 소유자가 있으면 건너뛴다.
         """
         root = self.options.resolved_work_root()
         if not root.is_dir():
+            return []
+
+        # 도구가 없으면 **아무것도 하지 않는다.** 한 건이라도 손대면 그 녹화의 종료
+        # 상태가 저장되어, ffmpeg 를 다시 설치해도 다시 복구되지 않는다.
+        try:
+            _ = self.toolchain
+        except BinaryNotFoundError as exc:
+            self._emit(LogLine(video_id="", text=f"[yt-rec] 복구를 미룬다: {exc}"))
             return []
 
         results: list[RecordingResult] = []
         for work_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             # 한 건이 실패해도 나머지 복구는 계속한다.
             try:
+                owner = _lock_owner(work_dir)
+                if owner is not None:
+                    self._emit(
+                        LogLine(
+                            video_id=work_dir.name,
+                            text=f"[yt-rec] 녹화 중이라 복구를 건너뛴다 (pid {owner})",
+                        )
+                    )
+                    continue
                 state = self._load_state(work_dir)
                 if state and _is_terminal(state.get("status")):
                     continue
@@ -515,15 +577,27 @@ class RecordingEngine:
         return argv
 
     def _run_download(self, video_id: str, work_dir: Path) -> _DownloadOutcome:
+        outcome = _DownloadOutcome()
+        if self._stop.is_set():
+            # record() 를 부르기 직전에 눌린 중단. yt-dlp 를 띄우지도 않는다.
+            outcome.returncode = None
+            outcome.message = "사용자 요청으로 중단했다"
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] {outcome.message}"))
+            return outcome
+
         argv = self.build_download_argv(video_id)
         detector = StallDetector(self.options.stall_timeout_seconds)
-        outcome = _DownloadOutcome()
         log_path = work_dir / LOG_FILENAME
 
         creationflags = 0
+        popen_extra: dict = {}
         if os.name == "nt":
             # GUI 빌드(pythonw/윈도우 모드)에서 녹화마다 콘솔 창이 번쩍이지 않게 한다.
             creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+        else:
+            # 자식을 새 프로세스 그룹의 리더로 만든다. 이래야 _terminate 가 그룹째
+            # 신호를 보내 후처리용 ffmpeg 손자까지 함께 끊을 수 있다.
+            popen_extra["start_new_session"] = True
 
         try:
             process = subprocess.Popen(
@@ -534,6 +608,7 @@ class RecordingEngine:
                 stdin=subprocess.DEVNULL,
                 bufsize=0,
                 creationflags=creationflags,
+                **popen_extra,
             )
         except OSError as exc:
             outcome.returncode = -1
@@ -608,6 +683,8 @@ class RecordingEngine:
 
         outcome.returncode = process.returncode
         outcome.downloaded_bytes = sum(per_format_bytes.values()) or None
+        # 이번 시도가 실제로 받은 포맷. 낡은 중간 파일을 걸러내는 근거가 된다(A).
+        outcome.format_ids = tuple(f for f in per_format_bytes if f and f != "?")
         if outcome.returncode != 0 and not outcome.message:
             outcome.message = f"yt-dlp 종료 코드 {outcome.returncode}"
         return outcome
@@ -679,6 +756,7 @@ class RecordingEngine:
         downloaded_bytes: int | None,
         download_message: str,
         denial: DenialCategory | None,
+        format_ids: Iterable[str] = (),
     ) -> RecordingResult:
         skipped = tuple(sorted(set(int(i) for i in skipped_fragments)))
         fail = partial(
@@ -706,7 +784,20 @@ class RecordingEngine:
                 downloaded_bytes=downloaded_bytes,
                 download_message=download_message,
                 denial=denial,
+                format_ids=tuple(format_ids),
             )
+        except BinaryNotFoundError as exc:
+            # 도구가 없는 것은 환경 문제다. **종료 상태를 저장하지 않는다** — 저장하면
+            # ffmpeg 를 다시 설치해도 recover_pending() 이 이 녹화를 영구히 건너뛴다.
+            return fail(
+                message=f"마무리를 미룬다 (도구를 찾을 수 없다): {exc}", save_state=False
+            )
+        except ToolTimeout as exc:
+            # 마무리 단계가 물렸다. 다운로드 단계의 정지 감지기는 여기까지 오지 않으므로
+            # 이 경로에서 직접 기록·표시한다(#14).
+            self._emit(StallDetected(video_id=video_id, idle_seconds=exc.timeout or 0.0))
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] {exc}"))
+            return fail(message=f"마무리 시간 초과: {exc}", stalled=True)
         except Exception as exc:  # noqa: BLE001 - 마무리 실패로 예외를 던지지 않는다
             # 여기서 예외를 흘리면 GUI 워커 스레드가 상태 없이 죽는다.
             # 중간 파일은 정리하지 않았으므로 손으로 살릴 수 있다.
@@ -724,15 +815,33 @@ class RecordingEngine:
         downloaded_bytes: int | None,
         download_message: str,
         denial: DenialCategory | None,
+        format_ids: tuple[str, ...] = (),
     ) -> RecordingResult:
-        # 이전 시도가 남긴 복구본은 지운다. 남겨 두면 이번에 받은 중간 파일을
-        # 병합하지 않고 낡은 파일을 결과로 내보내게 된다.
-        for stale in work_dir.glob(f"{video_id}.recovered.*"):
-            stale.unlink(missing_ok=True)
-
         # 중간 파일이 남아 있다면 그것이 원본이다. yt-dlp 는 스스로 병합에 성공하면
         # 중간 파일을 지우므로, 남아 있다는 것은 마무리가 안 됐다는 뜻이다.
-        sources = find_intermediates(work_dir, video_id)
+        #
+        # 후보를 다 모으는 것이 아니라 **이번 시도가 받은 것**만 고른다. 지난 시도가
+        # 검증 실패로 남긴 중간 파일이 있는데 사용자가 화질 상한을 낮춰 다시 녹화하면
+        # 포맷 id 가 달라져 낡은 파일과 새 파일이 함께 모인다(A).
+        candidates = find_intermediates(work_dir, video_id)
+        selection = select_merge_sources(
+            candidates,
+            self.toolchain,
+            format_ids=format_ids,
+            timeout=self.options.verify_timeout_seconds,
+        )
+        for note in selection.excluded:
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] 병합에서 제외: {note}"))
+        sources = list(selection.sources)
+
+        # 이전 시도가 남긴 복구본은 지운다. 남겨 두면 이번에 받은 중간 파일을
+        # 병합하지 않고 낡은 파일을 결과로 내보내게 된다. **후보를 모은 뒤에** 지운다 —
+        # 먼저 지우면 중간 파일 없이 복구본만 남은 work 디렉터리에서 유일한 결과물을
+        # 없애 버린다.
+        if sources:
+            for stale in work_dir.glob(f"{video_id}.recovered.*"):
+                stale.unlink(missing_ok=True)
+
         merged = None if sources else _completed_output(work_dir, video_id)
 
         if merged is None:
@@ -754,7 +863,17 @@ class RecordingEngine:
                 )
             candidate = work_dir / f"{video_id}.recovered.{self.options.container}"
             try:
-                merged = merge_streams(sources, candidate, self.toolchain)
+                merged = merge_streams(
+                    sources,
+                    candidate,
+                    self.toolchain,
+                    maps=selection.maps,
+                    timeout=self.options.merge_timeout_seconds,
+                )
+            except (BinaryNotFoundError, ToolTimeout):
+                # 도구가 없는 것과 물린 것은 _finalize 가 따로 다룬다. 여기서 결과로
+                # 감싸면 종료 상태가 못 박히거나 정지 사실이 묻힌다.
+                raise
             except Exception as exc:  # noqa: BLE001 - 병합 실패도 결과로 보고한다
                 # 중간 파일 병합이 안 되면 yt-dlp 가 남긴 결과라도 써 본다.
                 merged = _completed_output(work_dir, video_id)
@@ -776,7 +895,19 @@ class RecordingEngine:
 
         # 검증
         self._emit(StatusChanged(video_id=video_id, status=RecordingStatus.VERIFYING))
-        verification = verify_media(merged, self.toolchain, deep=self.options.verify_deep)
+        verification = verify_media(
+            merged,
+            self.toolchain,
+            deep=self.options.verify_deep,
+            timeout=self.options.verify_timeout_seconds,
+        )
+        if verification.timed_out:
+            # 검증이 물렸다. 다운로드 단계의 정지 감지기는 여기까지 오지 않는다.
+            self._emit(
+                StallDetected(
+                    video_id=video_id, idle_seconds=self.options.verify_timeout_seconds
+                )
+            )
 
         if not verification.playable:
             # 중간 파일은 남긴다. 손으로라도 살릴 수 있어야 한다.
@@ -786,7 +917,7 @@ class RecordingEngine:
                 work_dir=work_dir,
                 status=RecordingStatus.FAILED,
                 started_at=started_at,
-                stalled=stalled,
+                stalled=stalled or verification.timed_out,
                 skipped=skipped,
                 downloaded_bytes=downloaded_bytes,
                 denial=denial,
@@ -846,8 +977,12 @@ class RecordingEngine:
             verification=verification,
             output_path=final_path,
             message=message,
-            # 중간 파일 정리는 종료 상태를 저장한 **뒤에** 한다(_conclude 안에서).
-            cleanup=True,
+            # 중간 파일 정리는 **검증에 성공한 뒤에만** 한다(#14 수용 기준).
+            # playable 만 보고 지우면 "음성 스트림이 없다", "프레임 수 불일치",
+            # "패킷 검사를 마치지 못했다"처럼 누락이 확인되거나 아예 재지 못한 상태에서
+            # 원본이 사라져 다시 병합할 기회가 없어진다.
+            # 순서는 _conclude 안에서 지킨다 — 종료 상태를 저장한 **뒤에** 지운다.
+            cleanup=verification.complete,
         )
 
     def _conclude(
@@ -866,6 +1001,7 @@ class RecordingEngine:
         output_path: Path | None,
         message: str,
         cleanup: bool = False,
+        save_state: bool = True,
     ) -> RecordingResult:
         result = RecordingResult(
             video_id=video_id,
@@ -886,8 +1022,12 @@ class RecordingEngine:
         # 지운다. 거꾸로 하면 그 사이에 죽었을 때 중간 파일은 사라졌는데 state.json 은
         # recording 으로 남아, recover_pending() 이 복구할 파일을 못 찾고 이 녹화를
         # 영구히 건너뛴다. 몇 시간 녹화한 결과를 잃는 경로다.
-        self._save_state(work_dir, result)
-        if cleanup and not self.options.keep_intermediates:
+        #
+        # ``save_state=False`` 는 환경 문제로 마무리를 **미루는** 경우다(도구 미설치).
+        # 종료 상태를 못 박으면 도구를 다시 설치해도 복구가 이 녹화를 건너뛴다.
+        if save_state:
+            self._save_state(work_dir, result)
+        if cleanup and save_state and not self.options.keep_intermediates:
             try:
                 _cleanup_intermediates(work_dir, video_id)
             except OSError:
@@ -939,6 +1079,8 @@ class _DownloadOutcome:
         self.skipped_fragments: list[int] = []
         self.downloaded_bytes: int | None = None
         self.denial: DenialCategory | None = None
+        #: 이번 시도에 yt-dlp 가 진행률로 알려준 포맷 id.
+        self.format_ids: tuple[str, ...] = ()
         self.message = ""
 
 
@@ -953,6 +1095,73 @@ def _fit_to_path_limit(directory: Path, basename: str, suffix: str) -> str:
         return basename
     trimmed = basename[: max(8, room)].rstrip(" .　")
     return trimmed or "recording"
+
+
+def _write_lock(work_dir: Path) -> None:
+    """이 work 디렉터리를 쓰고 있다고 표시한다. 실패해도 녹화를 막지 않는다."""
+    try:
+        (work_dir / LOCK_FILENAME).write_text(
+            json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _release_lock(work_dir: Path) -> None:
+    try:
+        (work_dir / LOCK_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _process_alive(pid: int) -> bool:
+    """``pid`` 가 살아 있는가. **판단할 수 없으면 살아 있는 것으로 본다.**
+
+    모를 때 "살아 있다"로 기울이는 것은 의도한 것이다. 살아 있는 녹화의 중간 파일을
+    복구가 병합해 없애는 쪽이, 복구를 한 번 미루는 쪽보다 훨씬 나쁘다. pid 가 재사용된
+    경우에도 같은 방향으로 틀린다(복구를 미룬다).
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # Windows 의 os.kill 은 signal 0 을 받지 않고 TerminateProcess 를 부른다.
+        # 살아 있는지 보려고 쓰면 그 프로세스를 죽인다. 절대 쓰지 않는다.
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == 259  # STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001 - 판단 실패는 "살아 있다"로 본다
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # 권한이 없다는 것은 그 pid 가 살아 있다는 뜻이다
+    return True
+
+
+def _lock_owner(work_dir: Path) -> int | None:
+    """work 디렉터리를 붙잡고 있는 살아 있는 프로세스의 pid. 없으면 ``None``."""
+    try:
+        data = json.loads((work_dir / LOCK_FILENAME).read_text(encoding="utf-8"))
+        pid = int(data["pid"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if pid == os.getpid():
+        # 우리 프로세스가 녹화 중이다(같은 앱에서 복구를 부른 경우).
+        return pid
+    return pid if _process_alive(pid) else None
 
 
 def _is_terminal(status: str | None) -> bool:
@@ -1050,11 +1259,25 @@ def _terminate(process: subprocess.Popen) -> None:
         except (OSError, subprocess.SubprocessError):
             pass
     else:
+        # 프로세스 **그룹째** 끊는다. 직접 자식에게만 신호를 보내면 후처리용 ffmpeg
+        # 손자가 살아남아 work 디렉터리 파일을 붙잡고, 병합·정리가 실패한다.
+        # 그룹이 만들어져 있어야 하므로 Popen 에 start_new_session=True 를 준다.
         try:
-            process.send_signal(signal.SIGINT)
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        except (OSError, AttributeError, ValueError):
+            try:
+                process.send_signal(signal.SIGINT)
+            except (OSError, ValueError):
+                pass
+        try:
             process.wait(timeout=15)
             return
-        except (OSError, ValueError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            pass
+        # SIGINT 로 안 끝났다. 그룹째 SIGTERM.
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except (OSError, AttributeError, ValueError):
             pass
 
     try:

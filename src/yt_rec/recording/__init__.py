@@ -26,6 +26,7 @@ from .errors import (
     MetadataUnavailableError,
     RecordingError,
     ToolFailure,
+    ToolTimeout,
     classify_error,
     is_transient,
 )
@@ -42,7 +43,14 @@ from .events import (
     StallDetected,
     StatusChanged,
 )
-from .merge import MediaVerification, find_intermediates, merge_streams, verify_media
+from .merge import (
+    MediaVerification,
+    SourceSelection,
+    find_intermediates,
+    merge_streams,
+    select_merge_sources,
+    verify_media,
+)
 from .metadata import LiveMetadata, fetch_metadata
 from .naming import FORBIDDEN_CHAR_MAP, local_date_from_epoch, sanitize_filename_component
 from .options import (
@@ -75,10 +83,12 @@ __all__ = [
     "RecordingOptions",
     "RecordingResult",
     "RecordingStatus",
+    "SourceSelection",
     "StallDetected",
     "StallDetector",
     "StatusChanged",
     "ToolFailure",
+    "ToolTimeout",
     "Toolchain",
     "classify_error",
     "default_settings_path",
@@ -92,5 +102,6 @@ __all__ = [
     "resolve_toolchain",
     "sanitize_filename_component",
     "save_settings",
+    "select_merge_sources",
     "verify_media",
 ]

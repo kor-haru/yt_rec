@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .binaries import resolve_toolchain
+from .binaries import BinaryNotFoundError, resolve_toolchain
 from .engine import RecordingEngine
 from .events import ProgressReported, RecordingEvent, RecordingFinished
 from .merge import verify_media
@@ -43,8 +43,15 @@ def _report(verification) -> None:
     print(f"데먹싱 오류:     {len(verification.demux_errors)}건")
     print(f"프레임 수:       {verification.video_frames} (예상 {verification.expected_frames})")
     print(f"역행 타임스탬프: {verification.backward_timestamps}건")
-    print(f"최대 프레임 간격: {verification.max_frame_gap} (1프레임 {verification.frame_interval})")
+    print(
+        f"최대 프레임 간격: {verification.max_frame_gap} "
+        f"(전형 간격 {verification.frame_interval})"
+    )
     print(f"영상/음성 차이:  {verification.av_duration_delta}")
+    print(
+        f"트랙 수:         영상 {verification.video_stream_count} / "
+        f"음성 {verification.audio_stream_count}"
+    )
     for issue in verification.issues:
         print(f"  - {issue}")
 
@@ -67,7 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     recover.add_argument("-o", "--output-dir", required=True, type=Path)
 
     args = parser.parse_args(argv)
-    toolchain = resolve_toolchain()
+    try:
+        toolchain = resolve_toolchain()
+    except BinaryNotFoundError as exc:
+        # 트레이스백을 그대로 보여 주면 사용자가 무엇을 고쳐야 하는지 알기 어렵다.
+        sys.stderr.write(f"{exc}\n")
+        return 2
 
     if args.command == "verify":
         _report(verify_media(args.path, toolchain))

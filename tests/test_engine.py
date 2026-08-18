@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -903,3 +904,402 @@ def _premerge(sample_streams, dest: Path, toolchain: Toolchain) -> Path:
     from yt_rec.recording.merge import merge_streams
 
     return merge_streams(list(sample_streams), dest, toolchain)
+
+
+# -- E. record() 직전에 누른 중단이 사라지지 않는다 ---------------------------------
+
+
+@pytest.mark.integration
+def test_record_직전에_누른_중단이_사라지지_않는다(tmp_path, toolchain, sample_streams):
+    """워커 스레드가 record() 를 부르기 직전에 사용자가 중단을 누른 경우.
+
+    플래그가 지워지면 녹화가 방송 끝까지(수 시간) 계속된다. 감시 루프(#3)가 record()
+    를 반복 호출하는 구조에서는 호출 사이에 눌린 중단이 매번 없어진다.
+    """
+    video, audio = sample_streams
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            },
+            "sleep": 120,  # 중단이 무시되면 여기서 오래 매달린다
+        },
+    )
+    _prestore(engine, stored_metadata())
+
+    engine.request_stop()
+    assert engine.stop_requested() is True
+
+    started = time.monotonic()
+    result = engine.record(VIDEO_ID)
+    elapsed = time.monotonic() - started
+
+    assert engine.stop_requested() is True, "정지 요청이 지워졌다"
+    assert elapsed < 20, f"중단을 무시하고 계속 받았다 ({elapsed:.1f}초)"
+    assert "중단" in result.message
+
+
+@pytest.mark.integration
+def test_중단_요청_직후에는_yt_dlp_를_띄우지도_않는다(tmp_path, toolchain):
+    engine = make_engine(tmp_path, toolchain, {"argv_out": str(tmp_path / "argv.json")})
+    _prestore(engine, stored_metadata())
+
+    engine.request_stop()
+    engine.record(VIDEO_ID)
+
+    assert not (tmp_path / "argv.json").exists(), "다운로더를 띄웠다"
+
+
+def test_clear_stop_을_불러야_다시_녹화한다(tmp_path):
+    engine = base_engine(tmp_path)
+    engine.request_stop()
+    assert engine.stop_requested() is True
+
+    engine.clear_stop()
+
+    assert engine.stop_requested() is False
+
+
+# -- A. 낡은 중간 파일이 결과에 섞이지 않는다 -------------------------------------
+
+
+@pytest.mark.integration
+def test_지난_시도의_낡은_중간_파일을_결과로_내보내지_않는다(
+    tmp_path, toolchain, make_clip
+):
+    """지난 시도가 f137 을 남긴 뒤 화질 상한을 낮춰 f299 로 다시 받은 상황.
+
+    낡은 파일이 트랙 0 이 되면 프레임 검사가 그 트랙을 보고 통과한다(실측 재현).
+    """
+    stale = make_clip("stale.mp4", seconds=3)
+    fresh = make_clip("fresh.mp4", seconds=5)
+    audio = make_clip("audio.m4a", seconds=5, kind="audio")
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f299.mp4": str(fresh),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            },
+            "lines": [progress(1000, 1, "299"), progress(500, 1, "140")],
+        },
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(stale.read_bytes())
+    _prestore(engine, stored_metadata())
+
+    result = engine.record(VIDEO_ID)
+
+    assert result.succeeded, result.message
+    verification = result.verification
+    assert verification.video_stream_count == 1
+    assert verification.audio_stream_count == 1
+    assert verification.video_frames == pytest.approx(150, abs=2), (
+        "이번에 받은 5초(150프레임)여야 한다. 90프레임이면 낡은 3초를 본 것이다"
+    )
+    assert verification.duration == pytest.approx(5.0, abs=0.3)
+
+
+# -- C. 누락이 확인되면 중간 파일을 지우지 않는다 ----------------------------------
+
+
+@pytest.mark.integration
+def test_누락이_확인되면_중간_파일을_지우지_않는다(tmp_path, toolchain, sample_streams):
+    """#14 수용 기준: 중간 파일은 병합 검증에 **성공한** 뒤에만 정리한다.
+
+    playable 만 보고 지우면 "음성 스트림이 없다"가 확인된 결과에서도 원본이 사라져
+    다시 병합할 기회가 없어진다.
+    """
+    video, _ = sample_streams
+    engine = make_engine(
+        tmp_path, toolchain, {"files": {f"{VIDEO_ID}.f137.mp4": str(video)}}
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    _prestore(engine, stored_metadata())
+
+    result = engine.record(VIDEO_ID)
+
+    assert result.status is RecordingStatus.PARTIAL
+    assert result.verification.playable is True
+    assert result.verification.complete is False
+    assert any("음성" in issue for issue in result.verification.issues)
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists(), "누락이 확인됐는데 원본을 지웠다"
+
+
+# -- B. 마무리 단계에 시한이 있다 --------------------------------------------------
+
+
+@pytest.mark.integration
+def test_병합이_물리면_정지로_기록하고_알린다(
+    tmp_path, toolchain, sample_streams, hanging_tool
+):
+    """마무리 단계에는 정지 감지기가 돌지 않는다. 여기서 물리면 아무도 못 알아챈다."""
+    video, audio = sample_streams
+    hanging = Toolchain(
+        ytdlp=toolchain.ytdlp,
+        ffprobe=toolchain.ffprobe,
+        ffmpeg=hanging_tool("ffmpeg"),
+    )
+    engine = make_engine(
+        tmp_path,
+        hanging,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+        merge_timeout_seconds=1.5,
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    _prestore(engine, stored_metadata())
+    events = []
+    engine.add_listener(events.append)
+
+    started = time.monotonic()
+    result = engine.record(VIDEO_ID)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 30, f"시한 없이 매달렸다 ({elapsed:.1f}초)"
+    assert result.status is RecordingStatus.FAILED
+    assert result.stalled is True, "정지로 기록해야 한다"
+    assert "시간 초과" in result.message
+    assert any(isinstance(e, StallDetected) for e in events), "표시도 해야 한다"
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists(), "중간 파일은 남긴다"
+
+
+@pytest.mark.integration
+def test_검증이_물려도_중간_파일을_지우지_않는다(
+    tmp_path, toolchain, sample_streams, hanging_tool
+):
+    video, audio = sample_streams
+    # 병합은 진짜 ffmpeg 로 하고, 검증에 쓰는 ffprobe 만 물리게 한다.
+    # (select_merge_sources 도 ffprobe 를 쓰므로 병합 자체가 먼저 막힌다 — 그래도
+    #  결과는 실패로 보고되고 중간 파일은 남아야 한다.)
+    hanging = Toolchain(
+        ytdlp=toolchain.ytdlp,
+        ffmpeg=toolchain.ffmpeg,
+        ffprobe=hanging_tool("ffprobe"),
+    )
+    engine = make_engine(
+        tmp_path,
+        hanging,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+        verify_timeout_seconds=1.5,
+        merge_timeout_seconds=1.5,
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    _prestore(engine, stored_metadata())
+
+    started = time.monotonic()
+    result = engine.record(VIDEO_ID)
+
+    assert time.monotonic() - started < 30
+    assert result.succeeded is False
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
+
+
+def test_마무리_시한_기본값은_유한하다(tmp_path):
+    options = RecordingOptions(output_dir=tmp_path / "out")
+
+    assert options.merge_timeout_seconds > 0
+    assert options.verify_timeout_seconds > 0
+    with pytest.raises(ValueError):
+        RecordingOptions(output_dir=tmp_path / "out", merge_timeout_seconds=0)
+    with pytest.raises(ValueError):
+        RecordingOptions(output_dir=tmp_path / "out", verify_timeout_seconds=-1)
+
+
+# -- 저심각도: 복구 경로 ----------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_복구본만_남은_디렉터리에서_유일한_결과물을_지우지_않는다(
+    tmp_path, toolchain, sample_streams
+):
+    """중간 파일 없이 복구본만 남은 work 디렉터리.
+
+    후보 수집 **전에** 복구본을 지우면 유일한 결과물을 없애 놓고 FAILED 로 처리한다.
+    """
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    stored_metadata().save(work_dir)
+    _premerge(sample_streams, work_dir / f"{VIDEO_ID}.recovered.mp4", toolchain)
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": time.time()}), encoding="utf-8"
+    )
+
+    results = RecordingEngine(options, toolchain=toolchain, tz=KST).recover_pending()
+
+    assert len(results) == 1
+    assert results[0].succeeded, results[0].message
+    assert results[0].output_path.exists()
+
+
+@pytest.mark.integration
+def test_녹화_중인_디렉터리는_복구가_건드리지_않는다(tmp_path, toolchain, sample_streams):
+    """앱을 두 개 띄우거나 녹화 중에 복구를 부른 경우."""
+    video, audio = sample_streams
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    stored_metadata().save(work_dir)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(video.read_bytes())
+    (work_dir / f"{VIDEO_ID}.f140.m4a").write_bytes(audio.read_bytes())
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": time.time()}), encoding="utf-8"
+    )
+    # 살아 있는 소유자 표시. 지금 이 프로세스가 녹화 중인 것과 같은 상태다.
+    (work_dir / engine_module.LOCK_FILENAME).write_text(
+        json.dumps({"pid": os.getpid(), "at": time.time()}), encoding="utf-8"
+    )
+
+    results = RecordingEngine(options, toolchain=toolchain, tz=KST).recover_pending()
+
+    assert results == []
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists(), "살아 있는 중간 파일을 지웠다"
+    assert json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))[
+        "status"
+    ] == "recording", "상태를 덮어썼다"
+
+
+@pytest.mark.integration
+def test_죽은_소유자_표시는_복구를_막지_않는다(tmp_path, toolchain, sample_streams):
+    """강제 종료된 뒤 남은 표시 때문에 복구가 영구히 막히면 안 된다."""
+    video, audio = sample_streams
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    stored_metadata().save(work_dir)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(video.read_bytes())
+    (work_dir / f"{VIDEO_ID}.f140.m4a").write_bytes(audio.read_bytes())
+    (work_dir / engine_module.LOCK_FILENAME).write_text(
+        json.dumps({"pid": 0, "at": 0.0}), encoding="utf-8"
+    )
+
+    results = RecordingEngine(options, toolchain=toolchain, tz=KST).recover_pending()
+
+    assert len(results) == 1
+    assert results[0].succeeded
+
+
+@pytest.mark.integration
+def test_녹화_중에는_소유자_표시가_남고_끝나면_사라진다(
+    tmp_path, toolchain, sample_streams
+):
+    video, audio = sample_streams
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    _prestore(engine, stored_metadata())
+    seen: list[bool] = []
+    engine.add_listener(
+        lambda e: seen.append((work_dir / engine_module.LOCK_FILENAME).exists())
+        if isinstance(e, ProgressReported)
+        else None
+    )
+
+    engine.record(VIDEO_ID)
+
+    assert not (work_dir / engine_module.LOCK_FILENAME).exists(), "끝났는데 표시가 남았다"
+
+
+def test_도구가_없으면_복구를_미룬다(tmp_path, monkeypatch):
+    """ffmpeg 를 다시 설치하면 다시 복구될 수 있어야 한다.
+
+    한 건이라도 종료 상태로 못 박으면 그 녹화는 영구히 건너뛰어진다.
+    """
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(b"\x00" * 4096)
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": time.time()}), encoding="utf-8"
+    )
+    monkeypatch.setattr(engine_module, "resolve_toolchain", _missing("ffmpeg", "ffmpeg"))
+
+    results = RecordingEngine(options).recover_pending()
+
+    assert results == []
+    assert json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))[
+        "status"
+    ] == "recording", "종료 상태를 못 박으면 다시 복구되지 않는다"
+    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
+
+
+# -- 저심각도: 자식 프로세스 트리 -------------------------------------------------
+
+
+@pytest.mark.integration
+def test_자식을_끊을_때_손자까지_닿게_띄운다(tmp_path, toolchain, sample_streams):
+    """POSIX 에서 프로세스 그룹을 만들지 않으면 ffmpeg 손자가 살아남는다."""
+    import subprocess as sp
+
+    video, audio = sample_streams
+    calls: list[dict] = []
+    real_popen = sp.Popen
+
+    class SpyPopen(real_popen):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            calls.append(dict(kwargs))
+            super().__init__(*args, **kwargs)
+
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {
+                f"{VIDEO_ID}.f137.mp4": str(video),
+                f"{VIDEO_ID}.f140.m4a": str(audio),
+            }
+        },
+    )
+    _prestore(engine, stored_metadata())
+    engine_module.subprocess.Popen = SpyPopen  # type: ignore[assignment]
+    try:
+        engine.record(VIDEO_ID)
+    finally:
+        engine_module.subprocess.Popen = real_popen  # type: ignore[assignment]
+
+    download = calls[0]
+    if os.name == "nt":
+        # taskkill /F /T 가 트리째 끊는다. 콘솔 창은 띄우지 않는다.
+        assert download["creationflags"] & sp.CREATE_NO_WINDOW
+    else:
+        assert download["start_new_session"] is True, "프로세스 그룹이 없다"
+
+
+# -- 저심각도: CLI -------------------------------------------------------------
+
+
+def test_CLI_는_도구가_없으면_트레이스백을_내지_않는다(tmp_path, monkeypatch, capsys):
+    from yt_rec.recording import __main__ as cli
+
+    monkeypatch.setattr(cli, "resolve_toolchain", _missing("ffmpeg", "ffmpeg"))
+
+    code = cli.main(["verify", str(tmp_path / "없음.mp4")])
+
+    assert code != 0
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "ffmpeg" in captured.err
+    assert "PATH" in captured.err

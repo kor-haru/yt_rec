@@ -195,3 +195,119 @@ def intermediates(tmp_path: Path, sample_streams: tuple[Path, Path]) -> tuple[Pa
 @pytest.fixture(scope="session")
 def python_executable() -> str:
     return sys.executable
+
+
+@pytest.fixture()
+def make_clip(toolchain: Toolchain, tmp_path: Path):
+    """합성 클립을 그때그때 만든다.
+
+    ``select`` 는 ffmpeg 의 select 필터 표현식이다. ``fps_mode="passthrough"`` 를 함께
+    주면 걸러낸 자리에 **타임스탬프 구멍이 그대로 남는다** — 조각을 건너뛴 실제 파일과
+    같은 모습이다. ``setpts`` 로 번호를 다시 붙이면 구멍이 사라져 다른 것을 시험하게
+    된다.
+    """
+
+    def _make(
+        name: str,
+        *,
+        seconds: float,
+        fps: int = SAMPLE_FPS,
+        kind: str = "video",
+        select: str | None = None,
+        fps_mode: str | None = None,
+    ) -> Path:
+        dest = tmp_path / name
+        if kind == "audio":
+            cmd = [
+                str(toolchain.ffmpeg), "-y", "-hide_banner", "-v", "error",
+                "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+                "-c:a", "aac", "-b:a", "64k", str(dest),
+            ]
+        else:
+            cmd = [
+                str(toolchain.ffmpeg), "-y", "-hide_banner", "-v", "error",
+                "-f", "lavfi",
+                "-i", f"testsrc2=size=320x240:rate={fps}:duration={seconds}",
+            ]
+            if select:
+                cmd += ["-vf", f"select='{select}'"]
+            if fps_mode:
+                cmd += ["-fps_mode", fps_mode]
+            cmd += [
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-g", str(fps), str(dest),
+            ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            pytest.skip(
+                "합성 클립을 만들지 못했다: "
+                + proc.stderr.decode("utf-8", "replace")[:300]
+            )
+        return dest
+
+    return _make
+
+
+#: 시한 시험이 쓰는 시한(초). 이보다 오래 걸리면 시한이 안 걸린 것이다.
+STUB_TIMEOUT = 1.5
+
+
+@pytest.fixture()
+def hanging_tool(tmp_path: Path):
+    """아무 출력 없이 **실제로 물려 있는** 가짜 도구. :class:`Toolchain` 에 끼운다.
+
+    monkeypatch 로 :class:`subprocess.TimeoutExpired` 만 던지면 예외 처리는 확인되지만
+    시한 장치가 실제로 프로세스를 끊는지는 확인되지 않는다. 특히
+    ``_scan_video_packets`` 는 출력을 한 줄도 안 주는 상대를 상대로 읽기 루프에서
+    영원히 멈추므로, 실물로 걸어 봐야 한다.
+
+    **자식 프로세스를 만들지 않는 방식으로 문다.** 셸이 python 을 띄우고 그 python 이
+    자는 구성으로 만들면, 셸을 죽여도 손자가 파이프 쓰기 끝을 붙잡고 있어 읽는 쪽이
+    EOF 를 못 본다(실측: kill 후 communicate 가 손자가 깰 때까지 매달렸다. 손자의
+    출력을 ``>nul`` 로 돌려도 마찬가지다 — CreateProcess 가 상속 가능한 핸들을 모두
+    넘기기 때문이다). 그러면 시한이 걸렸는지가 아니라 손자가 깨는 시각을 재게 된다.
+    그래서 셸 자신이 도는 빈 루프를 쓴다 — 끊으면 파이프가 곧바로 닫힌다.
+
+    루프 횟수는 **스스로 끝나도록** 잡는다. 무한에 가깝게 두면 시험이 중간에 끊겼을 때
+    고아가 된 셸이 코어 하나를 계속 태운다(실측: 620 CPU초를 태우고 있는 것을 발견해
+    다른 시험들이 몇 배로 느려졌다). 시한(1~2초)보다 넉넉히 길고 짧게 끝나는 값이면
+    충분하다 — 실측 cmd.exe 는 초당 약 440만 회 돌아 6천만 회가 약 13초다.
+    """
+
+    def _make(name: str) -> Path:
+        directory = tmp_path / "stubbin"
+        directory.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            # cmd.exe 는 .cmd 를 OEM 코드페이지로 읽는다. 내용에 비ASCII 를 넣지 않는다
+            # (tmp_path 에 한글이 섞이면 경로가 깨져 조용히 실패한다).
+            launcher = directory / f"{name}.cmd"
+            launcher.write_text(
+                "@echo off\r\nfor /l %%i in (1,1,60000000) do @rem\r\n",
+                encoding="ascii",
+            )
+        else:
+            launcher = directory / name
+            launcher.write_text(
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 3000000 ]; do i=$((i+1)); done\n",
+                encoding="ascii",
+            )
+            launcher.chmod(0o755)
+        return launcher
+
+    return _make
+
+
+@pytest.fixture()
+def hanging_ffprobe(toolchain: Toolchain, hanging_tool) -> Toolchain:
+    """ffprobe 만 물려 있는 도구 묶음."""
+    return Toolchain(
+        ytdlp=toolchain.ytdlp, ffmpeg=toolchain.ffmpeg, ffprobe=hanging_tool("ffprobe")
+    )
+
+
+@pytest.fixture()
+def hanging_ffmpeg(toolchain: Toolchain, hanging_tool) -> Toolchain:
+    """ffmpeg 만 물려 있는 도구 묶음."""
+    return Toolchain(
+        ytdlp=toolchain.ytdlp, ffprobe=toolchain.ffprobe, ffmpeg=hanging_tool("ffmpeg")
+    )
