@@ -106,7 +106,7 @@ ffprobe -v error -select_streams v:0 -count_frames \
 ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,dts_time \
         -of csv=p=0 "결과 파일" > packets.csv
 
-# 5) 영상과 음성 길이 차이 1초 이내
+# 5) 영상과 음성 길이 차이 — 조각 하나(+여유, 구현 임계 6초) 이내
 ffprobe -v error -show_entries stream=index,codec_type,duration -of default=nw=1 "결과 파일"
 ```
 
@@ -115,7 +115,9 @@ ffprobe -v error -show_entries stream=index,codec_type,duration -of default=nw=1
 1. 녹화 중에 작업 관리자로 앱 프로세스를 강제 종료한다.
 2. `<출력 디렉터리>/.yt-rec/<VIDEO_ID>/` 에 `<VIDEO_ID>.f*.mp4` 중간 파일이 남아 있다.
 3. `python -m yt_rec.recording recover -o <출력 디렉터리>`
-4. 병합된 파일이 출력 디렉터리에 생기고, 검증에 성공했으면 중간 파일이 사라진다.
+4. 병합된 파일이 출력 디렉터리에 생기고, 검증이 **누락 없이 완전**(complete)이면
+   중간 파일이 사라진다. 재생은 되지만 누락이 확인된 PARTIAL 에서는 중간 파일을
+   남긴다.
 5. 검증에 실패했으면 중간 파일이 **그대로 남아 있어야 한다.**
 
 ## 7. 긴 방송에서의 진행률 표시 (README 제약)

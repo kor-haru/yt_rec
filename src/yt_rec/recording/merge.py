@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from array import array
@@ -114,12 +115,16 @@ def _run(argv: list[str], *, timeout: float | None = None) -> subprocess.Complet
     ``subprocess.run`` 은 시한을 넘기면 자식을 죽이고 거둔 뒤
     :class:`subprocess.TimeoutExpired` 를 던진다. 좀비가 남지 않는다.
     """
+    extra: dict = {}
+    if os.name == "nt":
+        extra["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     return subprocess.run(
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,
+        **extra,
     )
 
 
@@ -476,14 +481,27 @@ def select_merge_sources(
             pools["audio"].append(path)
 
     wanted = {str(f) for f in (format_ids or ()) if f}
+    matches = {
+        kind: [p for p in pool if _format_id_of(p) in wanted]
+        for kind, pool in pools.items()
+    }
+    any_wanted_hit = any(matches.values())
     chosen: dict[str, Path] = {}
     for kind, pool in pools.items():
         if not pool:
             continue
         if wanted:
-            matched = [p for p in pool if _format_id_of(p) in wanted]
-            if matched:
-                pool = matched
+            if matches[kind]:
+                pool = matches[kind]
+            elif any_wanted_hit:
+                # 진행률에 영상만 잡혀도 음성은 버리지 않는다.
+                pass
+            else:
+                # 어느 종류도 이번 포맷이 아니면 낡은 f* 로 돌아가지 않는다.
+                # yt-dlp 가 이번 중간 파일을 병합하고 지운 뒤에 남는 것이 그것이다.
+                for path in pool:
+                    excluded.append(f"이번 포맷이 아니라 건너뛴다: {path.name}")
+                continue
         # 최근에 바뀐 것부터. 시각이 같으면(복구 경로에서 포맷 id 가 없을 때) 더 큰
         # 파일을 쓴다. 이름 순이면 낡은 f137 이 새 f299 보다 항상 앞선다.
         pool = sorted(pool, key=lambda p: (-_mtime(p), -_size(p), p.name))
@@ -500,8 +518,11 @@ def select_merge_sources(
         maps.append(f"{sources.index(path)}:{kind[0]}:0")
 
     for kind, pool in pools.items():
+        winner = chosen.get(kind)
+        if winner is None:
+            continue
         for path in pool:
-            if chosen.get(kind) is not path and path not in sources:
+            if path is not winner and path not in sources:
                 excluded.append(
                     f"{_KIND_LABEL[kind]}은 더 최근 파일을 쓴다: {path.name}"
                 )
@@ -654,8 +675,11 @@ def _scan_video_packets(
 
     # stderr 를 파이프로 받아 두고 읽지 않으면 버퍼가 차서 멈출 수 있다. 버린다.
     try:
+        popen_extra: dict = {}
+        if os.name == "nt":
+            popen_extra["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         with subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **popen_extra
         ) as proc:
             assert proc.stdout is not None
             if timeout is not None:

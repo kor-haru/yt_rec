@@ -285,6 +285,25 @@ def test_시각이_같으면_큰_파일을_쓴다(tmp_path, toolchain, make_clip
     ]
 
 
+def test_이번_포맷이_디스크에_없으면_낡은_파일을_쓰지_않는다(
+    tmp_path, toolchain, make_clip
+):
+    """yt-dlp 가 이번 시도의 중간 파일을 병합하고 지운 뒤. 지난 시도의 f137 만 남는다.
+
+    매칭이 없으면 후보 전체로 돌아가면 낡은 3초가 다시 고른다.
+    """
+    work_dir, video_id = _stale_work_dir(tmp_path, make_clip)
+    (work_dir / f"{video_id}.f299.mp4").unlink()
+    (work_dir / f"{video_id}.f140.m4a").unlink()
+
+    selection = select_merge_sources(
+        find_intermediates(work_dir, video_id), toolchain, format_ids=("299", "140")
+    )
+
+    assert selection.sources == ()
+    assert any("f137" in note for note in selection.excluded)
+
+
 def test_진행률에_음성_포맷이_빠져도_음성을_잃지_않는다(tmp_path, toolchain, make_clip):
     """걸러내기가 결과를 잃는 원인이 되어서는 안 된다."""
     work_dir, video_id = _stale_work_dir(tmp_path, make_clip)

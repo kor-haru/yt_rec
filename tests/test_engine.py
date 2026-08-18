@@ -1005,6 +1005,76 @@ def test_지난_시도의_낡은_중간_파일을_결과로_내보내지_않는�
     assert verification.duration == pytest.approx(5.0, abs=0.3)
 
 
+@pytest.mark.integration
+def test_yt_dlp_가_이미_병합한_결과는_낡은_중간_파일보다_앞선다(
+    tmp_path, toolchain, make_clip
+):
+    """이번 시도는 병합까지 끝났고 중간 파일은 지워졌다. 지난 시도의 f137 만 남는다.
+
+    남은 f* 를 '마무리가 안 됐다'로 보면 낡은 3초를 다시 묶고, 이번에 받은 5초
+    결과물을 덮거나 지운다.
+    """
+    from yt_rec.recording.merge import merge_streams
+
+    stale = make_clip("stale.mp4", seconds=3)
+    fresh = make_clip("fresh.mp4", seconds=5)
+    audio = make_clip("audio.m4a", seconds=5, kind="audio")
+    completed = tmp_path / "session.mp4"
+    merge_streams([fresh, audio], completed, toolchain)
+    engine = make_engine(
+        tmp_path,
+        toolchain,
+        {
+            "files": {f"{VIDEO_ID}.mp4": str(completed)},
+            "lines": [progress(1000, 1, "299"), progress(500, 1, "140")],
+        },
+    )
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(stale.read_bytes())
+    _prestore(engine, stored_metadata())
+
+    result = engine.record(VIDEO_ID)
+
+    assert result.succeeded, result.message
+    verification = result.verification
+    assert verification.video_stream_count == 1
+    assert verification.video_frames == pytest.approx(150, abs=2), (
+        "이번에 받은 5초여야 한다. 90프레임이면 낡은 3초를 다시 묶은 것이다"
+    )
+    assert verification.duration == pytest.approx(5.0, abs=0.3)
+
+
+@pytest.mark.integration
+def test_복구는_yt_dlp_결과물을_낡은_중간_파일보다_앞세운다(
+    tmp_path, toolchain, make_clip
+):
+    """강제 종료 직후. 포맷 id 기록이 없어도 {id}.mp4 가 더 최근이면 그것을 쓴다."""
+    from yt_rec.recording.merge import merge_streams
+
+    stale = make_clip("stale.mp4", seconds=3)
+    fresh = make_clip("fresh.mp4", seconds=5)
+    audio = make_clip("audio.m4a", seconds=5, kind="audio")
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    stored_metadata().save(work_dir)
+    (work_dir / f"{VIDEO_ID}.f137.mp4").write_bytes(stale.read_bytes())
+    merge_streams(
+        [fresh, audio], work_dir / f"{VIDEO_ID}.mp4", toolchain
+    )
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps({"status": "recording", "started_at": time.time()}), encoding="utf-8"
+    )
+
+    results = RecordingEngine(options, toolchain=toolchain, tz=KST).recover_pending()
+
+    assert len(results) == 1
+    assert results[0].succeeded, results[0].message
+    assert results[0].verification.video_frames == pytest.approx(150, abs=2)
+    assert results[0].verification.duration == pytest.approx(5.0, abs=0.3)
+
+
 # -- C. 누락이 확인되면 중간 파일을 지우지 않는다 ----------------------------------
 
 
@@ -1206,7 +1276,8 @@ def test_녹화_중에는_소유자_표시가_남고_끝나면_사라진다(
             "files": {
                 f"{VIDEO_ID}.f137.mp4": str(video),
                 f"{VIDEO_ID}.f140.m4a": str(audio),
-            }
+            },
+            "lines": [progress(1000, 1, "137")],
         },
     )
     work_dir = engine.work_dir_for(VIDEO_ID)
@@ -1220,6 +1291,7 @@ def test_녹화_중에는_소유자_표시가_남고_끝나면_사라진다(
 
     engine.record(VIDEO_ID)
 
+    assert any(seen), "녹화 중에 소유자 표시가 없었다"
     assert not (work_dir / engine_module.LOCK_FILENAME).exists(), "끝났는데 표시가 남았다"
 
 

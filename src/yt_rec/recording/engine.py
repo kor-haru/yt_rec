@@ -817,12 +817,13 @@ class RecordingEngine:
         denial: DenialCategory | None,
         format_ids: tuple[str, ...] = (),
     ) -> RecordingResult:
-        # 중간 파일이 남아 있다면 그것이 원본이다. yt-dlp 는 스스로 병합에 성공하면
-        # 중간 파일을 지우므로, 남아 있다는 것은 마무리가 안 됐다는 뜻이다.
-        #
         # 후보를 다 모으는 것이 아니라 **이번 시도가 받은 것**만 고른다. 지난 시도가
         # 검증 실패로 남긴 중간 파일이 있는데 사용자가 화질 상한을 낮춰 다시 녹화하면
         # 포맷 id 가 달라져 낡은 파일과 새 파일이 함께 모인다(A).
+        #
+        # yt-dlp 가 스스로 병합에 성공하면 **이번에 받은** 중간 파일만 지운다. 지난
+        # 시도의 f* 는 그대로 남는다. 남은 f* 를 "마무리가 안 됐다"로 보면 낡은
+        # 트랙을 다시 묶고, 이미 있는 {id}.mp4 를 덮거나 지운다.
         candidates = find_intermediates(work_dir, video_id)
         selection = select_merge_sources(
             candidates,
@@ -833,16 +834,31 @@ class RecordingEngine:
         for note in selection.excluded:
             self._emit(LogLine(video_id=video_id, text=f"[yt-rec] 병합에서 제외: {note}"))
         sources = list(selection.sources)
+        completed = _completed_output(work_dir, video_id)
+        if sources and completed is not None:
+            # 복구 경로에는 포맷 id 가 없다. 결과물이 남은 중간 파일보다 오래되지
+            # 않았으면 yt-dlp 가 이미 묶은 쪽을 쓴다.
+            try:
+                if all(completed.stat().st_mtime >= path.stat().st_mtime for path in sources):
+                    self._emit(
+                        LogLine(
+                            video_id=video_id,
+                            text=f"[yt-rec] 이미 병합된 결과를 쓴다: {completed.name}",
+                        )
+                    )
+                    sources = []
+            except OSError:
+                pass
 
         # 이전 시도가 남긴 복구본은 지운다. 남겨 두면 이번에 받은 중간 파일을
         # 병합하지 않고 낡은 파일을 결과로 내보내게 된다. **후보를 모은 뒤에** 지운다 —
         # 먼저 지우면 중간 파일 없이 복구본만 남은 work 디렉터리에서 유일한 결과물을
-        # 없애 버린다.
+        # 없애 버린다. 이미 있는 {id}.mp4 를 쓰기로 했으면 지우지 않는다.
         if sources:
             for stale in work_dir.glob(f"{video_id}.recovered.*"):
                 stale.unlink(missing_ok=True)
 
-        merged = None if sources else _completed_output(work_dir, video_id)
+        merged = None if sources else completed
 
         if merged is None:
             self._emit(StatusChanged(video_id=video_id, status=RecordingStatus.MERGING))
