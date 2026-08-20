@@ -121,7 +121,7 @@ def test_상한에_걸린_조각은_건너뛰도록_지시한다(tmp_path):
 
 def test_화질_상한이_포맷_인자로_들어간다(tmp_path):
     argv = base_engine(tmp_path, max_height=720).build_download_argv(VIDEO_ID)
-    assert argv[argv.index("-f") + 1] == "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"
+    assert argv[argv.index("-f") + 1] == "bv*[height<=720]+ba/b[height<=720]"
 
 
 def test_사용자_설정과_무관하게_동작하도록_설정_파일을_무시한다(tmp_path):
@@ -220,6 +220,48 @@ def test_거부한_인자는_이유와_함께_알린다(tmp_path):
     assert len(notes) == 1
     assert "--fragment-retries infinite" in notes[0]
     assert "재시도 상한" in notes[0]
+
+
+def test_단독_이중_대시는_거부한다(tmp_path):
+    """`--` 가 통과하면 뒤의 엔진 옵션이 전부 URL 이 된다."""
+    notes: list[LogLine] = []
+    engine = base_engine(tmp_path, extra_ytdlp_args=("--", "--cookies", "c.txt"))
+    engine.add_listener(lambda e: notes.append(e) if isinstance(e, LogLine) else None)
+
+    argv = engine.build_download_argv(VIDEO_ID)
+
+    assert "--" not in argv
+    assert argv[1:3] == ["--cookies", "c.txt"]
+    assert "--live-from-start" in argv
+    assert any("--" in e.text and "URL" in e.text for e in notes)
+
+
+def test_메타데이터_조회에도_쿠키와_프록시를_넘긴다(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_fetch(video_id, url, toolchain, work_dir, **kwargs):
+        captured["extra_args"] = list(kwargs.get("extra_args") or ())
+        raise MetadataUnavailableError("blocked", DenialCategory.NETWORK)
+
+    monkeypatch.setattr(engine_module, "fetch_metadata", fake_fetch)
+    engine = base_engine(
+        tmp_path,
+        extra_ytdlp_args=("--cookies", "쿠키.txt", "--proxy", "socks5://127.0.0.1:1080"),
+    )
+    engine._toolchain = DUMMY_TOOLCHAIN
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    metadata, denial = engine._secure_metadata(VIDEO_ID, work_dir)
+
+    assert captured["extra_args"] == [
+        "--cookies",
+        "쿠키.txt",
+        "--proxy",
+        "socks5://127.0.0.1:1080",
+    ]
+    assert metadata is None
+    assert denial is DenialCategory.NETWORK
 
 
 def test_안전과_무관한_추가_인자는_그대로_넘긴다(tmp_path):

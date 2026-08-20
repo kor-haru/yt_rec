@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone, tzinfo
 from pathlib import Path
@@ -184,6 +185,7 @@ def fetch_metadata(
     *,
     timeout: float = 120.0,
     extractor_retries: int = 3,
+    extra_args: Iterable[str] = (),
 ) -> LiveMetadata:
     """방송 정보를 조회한다. 실패하면 :class:`MetadataUnavailableError`.
 
@@ -196,6 +198,7 @@ def fetch_metadata(
 
     argv = [
         str(toolchain.ytdlp),
+        *list(extra_args),
         "--ignore-config",
         "--no-colors",
         "--encoding",

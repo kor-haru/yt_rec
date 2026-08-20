@@ -30,9 +30,11 @@ def test_상한_없음이면_최고_화질을_고른다():
     assert make(max_height=None).format_selector() == "bv*+ba/b"
 
 
-def test_상한_이하에_아무_포맷도_없어도_실패하지_않는_대안이_있다():
-    """라이브가 상한보다 높은 화질로만 송출돼도 마지막 대안이 받아 준다."""
-    assert make(max_height=144).format_selector().endswith("/bv*+ba/b")
+def test_화질_상한에_무제한_대안이_없다():
+    """마지막 `/bv*+ba/b` 는 height 필터를 벗겨 720p 상한에서 1080p를 고른다."""
+    selector = make(max_height=720).format_selector()
+    assert "/bv*+ba/b" not in selector
+    assert "height<=720" in selector
 
 
 def test_최상의_영상과_최상의_오디오를_고른다():

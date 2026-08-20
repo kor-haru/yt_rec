@@ -135,13 +135,13 @@ class RecordingOptions:
 
         상한 이하에서 최상의 영상 + 최상의 오디오를 고른다. 라이브가 상한보다 낮은
         화질로만 송출되면 ``height<=`` 조건이 자연히 그 화질을 고르므로 실패하지
-        않는다. 상한 이하 포맷이 하나도 없는 극단적인 경우에도 마지막 대안
-        (``bv*+ba/b``)이 있어 녹화가 실패하지 않는다.
+        않는다. 상한보다 높은 화질만 있으면 선택식이 맞지 않아 녹화를 시작하지
+        않는다. ``/bv*+ba/b`` 같은 무제한 대안은 상한을 무력화하므로 붙이지 않는다.
         """
         if self.max_height is None:
             return "bv*+ba/b"
         cap = int(self.max_height)
-        return f"bv*[height<={cap}]+ba/b[height<={cap}]/bv*+ba/b"
+        return f"bv*[height<={cap}]+ba/b[height<={cap}]"
 
     def with_(self, **changes: object) -> RecordingOptions:
         """일부 값만 바꾼 사본. (frozen dataclass 라 ``replace`` 를 감싼다)"""

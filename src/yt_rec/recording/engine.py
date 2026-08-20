@@ -113,6 +113,9 @@ _WHY_PARSE = "진행률·로그를 못 읽으면 정지 판정과 조각 기록�
 _WHY_FORMAT = "화질 상한과 컨테이너는 설정(max_height/container)으로 정한다"
 _WHY_CONFIG = "사용자 설정 파일이 무한 재시도 같은 옵션을 되살릴 수 있다"
 _WHY_ENGINE = "엔진이 정하는 값이다"
+_WHY_END_OF_OPTIONS = (
+    "단독 -- 는 이후 엔진 옵션을 URL로 만들어 재시도·출력·시작 지점 보호를 전부 무효화한다"
+)
 
 #: extra_ytdlp_args 로 덮어쓸 수 없는 옵션 -> (값을 받는가, 거부 이유).
 #:
@@ -168,6 +171,7 @@ _ENGINE_OWNED_ARGS: dict[str, tuple[bool, str]] = {
     "--no-mtime": (False, _WHY_ENGINE),
     "--no-playlist": (False, _WHY_ENGINE),
     "--yes-playlist": (False, _WHY_ENGINE),
+    "--": (False, _WHY_END_OF_OPTIONS),
 }
 
 
@@ -177,7 +181,9 @@ def _match_engine_owned(token: str) -> tuple[bool, str] | None:
     ``--flag=값`` 과 ``-oNAME`` 처럼 값이 붙어 오는 형태도 잡아낸다. 값이 이미 붙어
     있으면 다음 토큰을 값으로 먹지 않는다.
     """
-    if not token.startswith("-") or token in ("-", "--"):
+    if token == "--":
+        return False, _WHY_END_OF_OPTIONS
+    if not token.startswith("-") or token == "-":
         return None
 
     name, attached, _value = token.partition("=")
@@ -493,6 +499,9 @@ class RecordingEngine:
         if stored is not None and not stored.placeholder:
             return stored, None
 
+        extra, rejected = _filter_extra_args(self.options.extra_ytdlp_args)
+        for note in rejected:
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] {note}"))
         try:
             metadata = fetch_metadata(
                 video_id,
@@ -500,6 +509,7 @@ class RecordingEngine:
                 self.toolchain,
                 work_dir,
                 extractor_retries=self.options.extractor_retries,
+                extra_args=extra,
             )
         except MetadataUnavailableError as exc:
             category = exc.category
