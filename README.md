@@ -21,6 +21,38 @@
 - **QML을 사용하지 않는다.** Qt Widgets만 사용한다.
 - **GUI는 파일시스템이나 외부 프로세스를 직접 폴링하지 않는다.** 상태 변경은 백엔드가 시그널로 통지한다. 특히 녹화 중인 파일 크기를 `os.stat`으로 읽으면 안 된다 — Windows는 쓰기 핸들이 열린 파일의 크기를 디렉터리 엔트리에 즉시 반영하지 않아 실제보다 훨씬 작은 값이 표시된다.
 
+## 녹화 엔진
+
+`yt_rec.recording` 이 video id 하나를 방송 시작 지점부터 녹화해 재생 가능한 단일
+파일로 마무리한다. GUI 없이도 돌릴 수 있다.
+
+```python
+from pathlib import Path
+from yt_rec.recording import RecordingEngine, RecordingOptions
+
+engine = RecordingEngine(RecordingOptions(output_dir=Path("D:/녹화"), max_height=1080))
+result = engine.record("VIDEO_ID")      # 방송이 끝날 때까지 블로킹
+print(result.status, result.output_path)
+```
+
+손으로 돌려 볼 때는 딸린 명령줄을 쓴다.
+
+```bash
+uv run python -m yt_rec.recording record <VIDEO_ID> -o "D:/녹화" --max-height 1080
+uv run python -m yt_rec.recording verify "D:/녹화/2026-08-11_제목.mp4"
+uv run python -m yt_rec.recording recover -o "D:/녹화"
+```
+
+동작에서 중요한 결정 세 가지는 실제 라이브 녹화에서 겪은 실패에서 나왔다.
+
+- **조각 재시도 상한은 유한하다.** 방송 종료 시점에 마지막 조각 한두 개가 서버에서
+  사라진다. 상한이 없으면 없는 조각을 영원히 다시 요청하며 정지한다(실측 29만 회
+  재시도 / 7시간). 유한 상한을 두면 죽은 조각을 건너뛰고 병합까지 끝낸다.
+- **메타데이터는 녹화를 시작할 때 확보해 보관한다.** 방송 종료 직후 영상이 멤버
+  전용으로 바뀌면 제목을 조회할 수 없어 파일명을 만들지 못한다.
+- **중간 파일은 병합 검증에 성공한 뒤에만 지운다.** 정지한 녹화도 영상·음성 중간
+  파일이 온전하면 `ffmpeg -c copy` 로 살릴 수 있다.
+
 ## 개발
 
 환경 구성과 의존성 관리는 [uv](https://docs.astral.sh/uv/)로 통일한다. pip이나
@@ -55,6 +87,11 @@ uv run pytest
 | `uv run pytest` | 테스트 실행 |
 | `uv add <패키지>` | 런타임 의존성 추가 |
 | `uv add --dev <패키지>` | 개발 의존성 추가 |
+
+`pytest -m "not integration"` 은 yt-dlp/ffmpeg 없이도 돌아간다. 통합 테스트는
+로컬 스텁 서버와 그때그때 만든 합성 클립만 쓰며, 외부 네트워크가 필요 없다.
+실제 라이브가 있어야 확인할 수 있는 항목은 [수동 검증 절차](docs/recording-manual-checks.md)에
+적어 두었다.
 
 ### 실행
 
