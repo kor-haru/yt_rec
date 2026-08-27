@@ -96,7 +96,7 @@ uv run pytest
 ### 실행
 
 ```bash
-uv run yt-rec                        # 백엔드 없이 기동 — 상단 배지에 `연결 안 됨`
+uv run yt-rec                        # 실제 백엔드. 미연결이면 상단 배지에 `연결 안 됨`
 uv run yt-rec --stub empty           # 빈 상태 더미
 uv run yt-rec --stub populated       # 채널·녹화·완료 더미
 uv run yt-rec --stub scenario        # 시작 → 진행 → 완료 → 오류 재생
@@ -104,6 +104,20 @@ uv run yt-rec --stub flood           # 초당 100건 진행 이벤트 부하
 ```
 
 `uv run python -m yt_rec` 로도 같은 진입점이 뜬다.
+
+Google 로그인에는 OAuth 클라이언트 ID/시크릿이 필요하다. 저장소에 커밋하지 않고
+환경 변수 또는 사용자 설정 경로에서 읽는다.
+
+```bash
+# PowerShell
+$env:YT_REC_GOOGLE_CLIENT_ID = "....apps.googleusercontent.com"
+$env:YT_REC_GOOGLE_CLIENT_SECRET = "..."
+# 또는 Google이 내려준 JSON
+$env:YT_REC_GOOGLE_CLIENT_SECRETS = "$env:APPDATA\yt-rec\client_secrets.json"
+```
+
+refresh token 은 Windows Credential Manager 에만 둔다. 녹화 파일 기본 위치는
+`recordings/`, 화질 상한은 1080p 다.
 
 ### 화면 코드가 지켜야 할 계약
 
@@ -168,6 +182,7 @@ uv run yt-rec --stub flood           # 초당 100건 진행 이벤트 부하
 ```python
 if not state.stop_recording("rec-1", reason="사용자가 중지했습니다"):
     ...                                    # 백엔드 미연결. command_rejected 로 사유가 온다
+state.connect_account()                          # 미연결에서도 백엔드가 붙어 있으면 전달
 state.set_watched_channels(["UC...", "UC..."])   # 부분 변경이 아니라 전체 교체
 state.update_settings(output_dir=r"D:\recordings", max_quality="1080p")
 ```

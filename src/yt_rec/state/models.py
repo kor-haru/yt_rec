@@ -44,6 +44,8 @@ __all__ = [
     "CompletedRecording",
     "LogEntry",
     "QuotaStatus",
+    "AccountInfo",
+    "Subscription",
     "AppSnapshot",
 ]
 
@@ -232,6 +234,33 @@ class QuotaStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountInfo:
+    """연결된 Google/YouTube 계정. 계정·채널 관리 화면이 쓴다."""
+
+    label: str = ""
+    """채널명처럼 사용자에게 보여 줄 식별 문구. 미연결이면 빈 문자열."""
+
+    last_synced_at: datetime | None = None
+    """구독 목록을 마지막으로 불러온 시각. 시간대 있음."""
+
+
+@dataclass(frozen=True, slots=True)
+class Subscription:
+    """구독 채널 한 건. 채널 관리 목록의 행이다.
+
+    :class:`WatchedChannel` 은 대시보드 `감시 중` 목록(선택된 채널의 확인
+    상태)이고, 이쪽은 구독 전체와 선택 여부다. 구독이 수백 개여도 이 목록에
+    다 담는다. 화면이 가상 스크롤로 그린다.
+    """
+
+    channel_id: str
+    name: str
+    selected: bool = False
+    unavailable: bool = False
+    """선택돼 있으나 이번 구독 조회에 없었다. 기존 선택은 유지한다."""
+
+
+@dataclass(frozen=True, slots=True)
 class AppSnapshot:
     """어느 시점의 상태 전체. 화면을 처음 그릴 때와 통째로 다시 그릴 때 쓴다."""
 
@@ -248,3 +277,5 @@ class AppSnapshot:
     """아직 확인하지 않은 오류 수. 로그 뷰어를 열면 0이 된다(#12)."""
 
     quota: QuotaStatus = field(default_factory=QuotaStatus)
+    account: AccountInfo = field(default_factory=AccountInfo)
+    subscriptions: tuple[Subscription, ...] = ()

@@ -2,15 +2,11 @@
 
 사용법::
 
-    yt-rec                       # 백엔드 없이 기동 → `연결 안 됨` 표시
+    yt-rec                       # 실제 백엔드. 미연결이면 `연결 안 됨`
     python -m yt_rec --stub empty        # 빈 상태 더미
     python -m yt_rec --stub populated    # 채널·녹화·완료 더미
     python -m yt_rec --stub scenario     # 시작→진행→완료→오류 시나리오 재생
     python -m yt_rec --stub flood        # 초당 100건 진행 이벤트 부하
-
-백엔드(#3, #4)가 붙기 전까지 화면 이슈는 ``--stub`` 으로 개발한다. 실제
-백엔드가 생기면 :func:`build_application` 에서 스텁 대신 그 소스를
-``state.attach(...)`` 하기만 하면 된다.
 """
 
 from __future__ import annotations
@@ -22,7 +18,8 @@ from dataclasses import dataclass
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from .state.store import AppState
+from .backend import create_backend_source
+from .state.store import AppState, EventSource
 from .state.stub import PRESETS, StubEventSource, recording_lifecycle
 from .ui.main_window import MainWindow
 from .ui.settings_store import APPLICATION, ORGANIZATION, WindowSettings
@@ -39,7 +36,7 @@ class AppContext:
     app: QApplication
     state: AppState
     window: MainWindow
-    source: StubEventSource | None = None
+    source: EventSource | None = None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -79,11 +76,17 @@ def build_application(
     state = AppState(emit_interval_ms=args.emit_interval_ms)
     window = MainWindow(state, settings=WindowSettings())
 
-    source: StubEventSource | None = None
+    source: EventSource | None
     if args.stub:
-        source = StubEventSource()
+        stub = StubEventSource()
+        state.attach(stub)
+        _start_stub(stub, args.stub)
+        source = stub
+    else:
+        source = create_backend_source()
         state.attach(source)
-        _start_stub(source, args.stub)
+        state.command_requested.connect(source.handle_command)
+        source.start()
 
     return AppContext(app=app, state=state, window=window, source=source)
 
@@ -104,7 +107,11 @@ def _start_stub(source: StubEventSource, mode: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     context = build_application(argv)
     context.window.show()
-    return context.app.exec()
+    try:
+        return context.app.exec()
+    finally:
+        if context.source is not None:
+            context.source.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover

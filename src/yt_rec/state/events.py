@@ -29,6 +29,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta
 
 from .models import (
+    AccountInfo,
     CompletedRecording,
     ConnectionState,
     LogEntry,
@@ -36,6 +37,7 @@ from .models import (
     Recording,
     RecordingState,
     StopReason,
+    Subscription,
     WatchedChannel,
     WatchState,
 )
@@ -49,6 +51,8 @@ __all__ = [
     "RecordingFinished",
     "LogAppended",
     "QuotaChanged",
+    "AccountChanged",
+    "SubscriptionsChanged",
     "BackendEvent",
     "NaiveDatetimeWarning",
     "naive_datetime_fields",
@@ -131,6 +135,20 @@ class QuotaChanged:
     quota: QuotaStatus = field(default_factory=QuotaStatus)
 
 
+@dataclass(frozen=True, slots=True)
+class AccountChanged:
+    """연결된 계정 정보가 바뀌었다. 미연결이면 빈 :class:`AccountInfo`."""
+
+    account: AccountInfo = field(default_factory=AccountInfo)
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionsChanged:
+    """구독 채널 목록 전체 교체. 채널 관리 화면이 이것을 그린다."""
+
+    subscriptions: tuple[Subscription, ...] = ()
+
+
 BackendEvent = (
     ConnectionChanged
     | WatchStatusChanged
@@ -140,6 +158,8 @@ BackendEvent = (
     | RecordingFinished
     | LogAppended
     | QuotaChanged
+    | AccountChanged
+    | SubscriptionsChanged
 )
 
 

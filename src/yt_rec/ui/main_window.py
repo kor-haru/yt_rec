@@ -17,9 +17,11 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -36,7 +38,6 @@ from .dialogs import (
     ArchiveDialog,
     ChannelsDialog,
     LogDialog,
-    PlaceholderDialog,
     SettingsDialog,
 )
 from .formatting import format_countdown, stop_reason_text, watch_badge_text
@@ -133,7 +134,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._state = state
         self._settings = settings if settings is not None else WindowSettings()
-        self._child_windows: dict[str, PlaceholderDialog] = {}
+        self._child_windows: dict[str, QDialog] = {}
         # 최소 크기는 처음 보일 때 한 번 더 잡는다. 상태 표시줄의 크기 조절
         # 손잡이가 show() 시점에야 폭을 보고하므로(실측 439px → 462px), 생성
         # 시점의 값만 믿으면 상태 표시줄이 창보다 넓어져 손잡이가 잘린다.
@@ -169,8 +170,10 @@ class MainWindow(QMainWindow):
 
         self.dashboard.manage_channels_requested.connect(self.open_channels)
         self.dashboard.open_archive_requested.connect(self.open_archive)
+        self.dashboard.stop_requested.connect(self._confirm_stop)
 
         state.connection_changed.connect(self._on_connection)
+        state.command_rejected.connect(self._on_command_rejected)
         state.watch_changed.connect(self._on_watch)
         state.errors_changed.connect(self._on_errors)
         state.quota_changed.connect(self._on_quota)
@@ -376,30 +379,50 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 진입점
     # ------------------------------------------------------------------
-    def open_channels(self) -> PlaceholderDialog:
+    def open_channels(self) -> QDialog:
         return self._open(ChannelsDialog)
 
-    def open_archive(self) -> PlaceholderDialog:
+    def open_archive(self) -> QDialog:
         return self._open(ArchiveDialog)
 
-    def open_settings(self) -> PlaceholderDialog:
+    def open_settings(self) -> QDialog:
         return self._open(SettingsDialog)
 
-    def open_logs(self) -> PlaceholderDialog:
+    def open_logs(self) -> QDialog:
         dialog = self._open(LogDialog)
         # 로그를 열면 미확인 오류 배지를 해제한다(#12 수용 기준의 기반).
         self._state.mark_errors_seen()
         return dialog
 
-    def open_account(self) -> PlaceholderDialog:
+    def open_account(self) -> QDialog:
         return self._open(AccountDialog)
 
+    def _confirm_stop(self, recording_id: str) -> None:
+        recording = next(
+            (item for item in self._state.recordings if item.recording_id == recording_id),
+            None,
+        )
+        title = recording.title if recording is not None else recording_id
+        answer = QMessageBox.question(
+            self,
+            "녹화 중지",
+            f"‘{title}’ 녹화를 중지할까요?\n지금까지 받은 내용은 파일로 저장됩니다.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._state.stop_recording(recording_id, reason="사용자가 중지했습니다")
+
+    def _on_command_rejected(self, _command: object, reason: str) -> None:
+        # 모달 상자는 테스트와 조작을 막는다. 상태 표시줄에만 알린다.
+        bar = self.statusBar()
+        if bar is not None:
+            bar.showMessage(reason, 8000)
+
     @property
-    def child_windows(self) -> dict[str, PlaceholderDialog]:
+    def child_windows(self) -> dict[str, QDialog]:
         """열려 있는 하위 화면. 테스트에서 확인용."""
         return self._child_windows
 
-    def _open(self, factory: type[PlaceholderDialog]) -> PlaceholderDialog:
+    def _open(self, factory: type[QDialog]) -> QDialog:
         key = factory.__name__
         dialog = self._child_windows.get(key)
         if dialog is None:

@@ -64,6 +64,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from . import commands as cmd
 from . import events as ev
 from .models import (
+    AccountInfo,
     AppSnapshot,
     CompletedRecording,
     ConnectionState,
@@ -72,6 +73,7 @@ from .models import (
     Recording,
     Severity,
     StopReason,
+    Subscription,
     WatchedChannel,
     WatchState,
     WatchStatus,
@@ -113,6 +115,9 @@ class EventSource(QObject):
     def stop(self) -> None:
         """이벤트 공급을 멈춘다. 기본 구현은 아무것도 하지 않는다."""
 
+    def handle_command(self, command: object) -> None:
+        """화면 명령. 기본 구현은 무시한다."""
+
 
 class AppState(QObject):
     """GUI가 참조하는 단일 상태 저장소."""
@@ -140,6 +145,12 @@ class AppState(QObject):
 
     quota_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.QuotaStatus`"""
+
+    account_changed = Signal(object)
+    """payload: :class:`~yt_rec.state.models.AccountInfo`"""
+
+    subscriptions_changed = Signal(object)
+    """payload: ``tuple[Subscription, ...]``"""
 
     snapshot_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.AppSnapshot` — 무엇이든 바뀌면 방출.
@@ -183,6 +194,8 @@ class AppState(QObject):
         self._error_count = 0
         self._unseen_error_count = 0
         self._quota = QuotaStatus()
+        self._account = AccountInfo()
+        self._subscriptions: tuple[Subscription, ...] = ()
 
         self._dirty: set[str] = set()
         self._sources: list[EventSource] = []
@@ -263,6 +276,16 @@ class AppState(QObject):
         self._require_gui_thread("quota")
         return self._quota
 
+    @property
+    def account(self) -> AccountInfo:
+        self._require_gui_thread("account")
+        return self._account
+
+    @property
+    def subscriptions(self) -> tuple[Subscription, ...]:
+        self._require_gui_thread("subscriptions")
+        return self._subscriptions
+
     def snapshot(self) -> AppSnapshot:
         """현재 상태 전체를 한 덩어리로 돌려준다. GUI 스레드 전용."""
         self._require_gui_thread("snapshot()")
@@ -281,6 +304,8 @@ class AppState(QObject):
             error_count=self._error_count,
             unseen_error_count=self._unseen_error_count,
             quota=self._quota,
+            account=self._account,
+            subscriptions=self._subscriptions,
         )
 
     # ------------------------------------------------------------------
@@ -398,7 +423,11 @@ class AppState(QObject):
         self._require_gui_thread("send_command()")
         if not isinstance(command, cmd.GuiCommand):
             raise TypeError(f"알 수 없는 화면 명령: {type(command)!r}")
-        if self._connection is not ConnectionState.CONNECTED:
+        connected = self._connection is ConnectionState.CONNECTED
+        login_while_attached = (
+            isinstance(command, cmd.ConnectAccount) and bool(self._sources)
+        )
+        if not connected and not login_while_attached:
             self.command_rejected.emit(command, "백엔드에 연결되지 않았습니다")
             return False
         self.command_requested.emit(command)
@@ -426,6 +455,18 @@ class AppState(QObject):
         않는다 — 그것은 :class:`~yt_rec.ui.settings_store.WindowSettings` 다.
         """
         return self.send_command(cmd.UpdateSettings(dict(values)))
+
+    def connect_account(self) -> bool:
+        """Google 계정 연결을 시작해 달라. 미연결에서도 백엔드가 붙어 있으면 보낸다."""
+        return self.send_command(cmd.ConnectAccount())
+
+    def disconnect_account(self) -> bool:
+        """Google 계정 연결을 끊으라."""
+        return self.send_command(cmd.DisconnectAccount())
+
+    def refresh_subscriptions(self) -> bool:
+        """구독 목록을 다시 불러 달라."""
+        return self.send_command(cmd.RefreshSubscriptions())
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -511,6 +552,14 @@ class AppState(QObject):
         self._quota = event.quota
         self._dirty.add("quota")
 
+    def _on_account(self, event: ev.AccountChanged) -> None:
+        self._account = event.account
+        self._dirty.add("account")
+
+    def _on_subscriptions(self, event: ev.SubscriptionsChanged) -> None:
+        self._subscriptions = tuple(event.subscriptions)
+        self._dirty.add("subscriptions")
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -520,6 +569,8 @@ class AppState(QObject):
         ev.RecordingFinished: _on_recording_finished,
         ev.LogAppended: _on_log,
         ev.QuotaChanged: _on_quota,
+        ev.AccountChanged: _on_account,
+        ev.SubscriptionsChanged: _on_subscriptions,
     }
 
     # ------------------------------------------------------------------
@@ -559,5 +610,9 @@ class AppState(QObject):
             self.errors_changed.emit(self._error_count, self._unseen_error_count)
         if "quota" in dirty:
             self.quota_changed.emit(self._quota)
+        if "account" in dirty:
+            self.account_changed.emit(self._account)
+        if "subscriptions" in dirty:
+            self.subscriptions_changed.emit(self._subscriptions)
 
         self.snapshot_changed.emit(self._snapshot())

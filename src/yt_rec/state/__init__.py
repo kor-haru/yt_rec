@@ -20,12 +20,16 @@
 """
 
 from .commands import (
+    ConnectAccount,
+    DisconnectAccount,
     GuiCommand,
+    RefreshSubscriptions,
     SetWatchedChannels,
     StopRecording,
     UpdateSettings,
 )
 from .events import (
+    AccountChanged,
     BackendEvent,
     ChannelsChanged,
     ConnectionChanged,
@@ -35,10 +39,12 @@ from .events import (
     RecordingFinished,
     RecordingProgress,
     RecordingStarted,
+    SubscriptionsChanged,
     WatchStatusChanged,
     naive_datetime_fields,
 )
 from .models import (
+    AccountInfo,
     AppSnapshot,
     CompletedRecording,
     CompletionStatus,
@@ -49,6 +55,7 @@ from .models import (
     RecordingState,
     Severity,
     StopReason,
+    Subscription,
     WatchedChannel,
     WatchState,
     WatchStatus,
@@ -56,14 +63,18 @@ from .models import (
 from .store import AppState, EventSource
 
 __all__ = [
+    "AccountChanged",
+    "AccountInfo",
     "AppSnapshot",
     "AppState",
     "BackendEvent",
     "ChannelsChanged",
     "CompletedRecording",
     "CompletionStatus",
+    "ConnectAccount",
     "ConnectionChanged",
     "ConnectionState",
+    "DisconnectAccount",
     "EventSource",
     "GuiCommand",
     "LogAppended",
@@ -76,10 +87,13 @@ __all__ = [
     "RecordingProgress",
     "RecordingStarted",
     "RecordingState",
+    "RefreshSubscriptions",
     "SetWatchedChannels",
     "Severity",
     "StopReason",
     "StopRecording",
+    "Subscription",
+    "SubscriptionsChanged",
     "UpdateSettings",
     "WatchState",
     "WatchStatus",

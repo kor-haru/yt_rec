@@ -29,9 +29,8 @@
 바꾸지 말고, 백엔드가 :mod:`~yt_rec.state.events` 로 되돌려 주는 통지를 기다려
 그린다. 그래야 실패했을 때 화면과 실제가 갈라지지 않는다.
 
-명령 종류는 지금 필요한 세 가지뿐이다. 화면 이슈가 새 조작을 요구하면 그때
-데이터 클래스를 추가하고 :data:`GuiCommand` 에 붙인다. 추측으로 미리 늘리지
-않는다.
+새 조작이 필요하면 데이터 클래스를 추가하고 :data:`GuiCommand` 에 붙인다.
+화면마다 백엔드에 닿는 방법을 따로 만들지 않는다.
 """
 
 from __future__ import annotations
@@ -43,6 +42,9 @@ __all__ = [
     "StopRecording",
     "SetWatchedChannels",
     "UpdateSettings",
+    "ConnectAccount",
+    "DisconnectAccount",
+    "RefreshSubscriptions",
     "GuiCommand",
 ]
 
@@ -89,5 +91,31 @@ class UpdateSettings:
     """읽기 전용으로 다룬다. 보낸 뒤 고치면 받는 쪽이 무엇을 볼지 알 수 없다."""
 
 
-GuiCommand = StopRecording | SetWatchedChannels | UpdateSettings
+@dataclass(frozen=True, slots=True)
+class ConnectAccount:
+    """Google 계정 연결(OAuth)을 시작해 달라.
+
+    미연결 상태에서도 보낸다. 연결이 끝나기 전에는 감시·녹화 명령을 받지
+    못하므로, 이 명령만 백엔드 소스가 붙어 있으면 통과한다.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class DisconnectAccount:
+    """Google 계정 연결을 끊고 저장된 refresh token 을 지우라."""
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshSubscriptions:
+    """구독 채널 목록을 다시 불러 달라."""
+
+
+GuiCommand = (
+    StopRecording
+    | SetWatchedChannels
+    | UpdateSettings
+    | ConnectAccount
+    | DisconnectAccount
+    | RefreshSubscriptions
+)
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

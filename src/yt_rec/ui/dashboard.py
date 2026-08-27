@@ -91,15 +91,21 @@ class _Row(QWidget):
 
 
 class RecordingRow(_Row):
-    """진행 중 녹화 한 건. #9가 카드로 확장한다."""
+    """진행 중 녹화 한 건."""
+
+    stop_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._recording_id = ""
         self.title_label = ElidedLabel("", self)
         self.title_label.setObjectName("rowTitle")
         self.meta_label = ElidedLabel("", self, muted=True)
         self.meta_label.setObjectName("rowMeta")
         self.badge = Badge("", self)
+        self.stop_button = QPushButton("중지", self)
+        self.stop_button.setObjectName("stopButton")
+        self.stop_button.clicked.connect(self._request_stop)
 
         grid = QGridLayout(self)
         grid.setContentsMargins(6, 4, 6, 4)
@@ -107,10 +113,16 @@ class RecordingRow(_Row):
         grid.setVerticalSpacing(2)
         grid.addWidget(self.title_label, 0, 0)
         grid.addWidget(self.badge, 0, 1, Qt.AlignmentFlag.AlignRight)
-        grid.addWidget(self.meta_label, 1, 0, 1, 2)
+        grid.addWidget(self.stop_button, 0, 2, Qt.AlignmentFlag.AlignRight)
+        grid.addWidget(self.meta_label, 1, 0, 1, 3)
         grid.setColumnStretch(0, 1)
 
+    def _request_stop(self) -> None:
+        if self._recording_id:
+            self.stop_requested.emit(self._recording_id)
+
     def update_from(self, recording: Recording) -> None:
+        self._recording_id = recording.recording_id
         self.title_label.setText(recording.title)
         # 크기·경과 시간은 녹화 프로세스가 보고한 값. stat으로 재지 않는다.
         parts = [
@@ -209,6 +221,7 @@ class Dashboard(QWidget):
 
     manage_channels_requested = Signal()
     open_archive_requested = Signal()
+    stop_requested = Signal(str)
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -289,13 +302,18 @@ class Dashboard(QWidget):
         return rows
 
     # ------------------------------------------------------------------
+    def _make_recording_row(self, _recording: Recording) -> RecordingRow:
+        row = RecordingRow()
+        row.stop_requested.connect(self.stop_requested)
+        return row
+
     def _on_recordings(self, recordings) -> None:
         items = list(recordings)
         sync_rows(
             self.recording_list,
             items,
             key_of=lambda r: r.recording_id,
-            create=lambda _r: RecordingRow(),
+            create=self._make_recording_row,
             update=lambda w, r: w.update_from(r),
             registry=self._recording_rows,
         )
