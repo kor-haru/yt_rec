@@ -176,6 +176,22 @@ def test_GUI가_파일시스템_모듈을_직접_쓰지_않는다() -> None:
     assert not offenders, f"파일시스템 모듈 import: {offenders}"
 
 
+def test_소스가_os_scandir을_호출하지_않는다() -> None:
+    """디렉터리 엔트리에 캐시된 크기를 읽으면 진행 중 파일을 오판한다.
+
+    화면·상태뿐 아니라 녹화 백엔드도 ``os.scandir`` 로 바꾸지 않는다.
+    docstring 의 금지 문구는 :func:`code_text` 가 빼므로 검사에 안 걸린다.
+    """
+    pattern = re.compile(r"\bos\.scandir\b|\.scandir\(")
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}:{no}"
+        for path in python_sources()
+        for no, line in enumerate(code_text(path).splitlines(), start=1)
+        if pattern.search(line)
+    ]
+    assert not offenders, f"os.scandir 호출: {offenders}"
+
+
 # ----------------------------------------------------------------------
 # QtWebEngine 금지 (#6, README)
 # ----------------------------------------------------------------------
