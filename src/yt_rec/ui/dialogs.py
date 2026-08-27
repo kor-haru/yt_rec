@@ -19,6 +19,9 @@ from PySide6.QtWidgets import (
 from ..state.store import AppState
 from .widgets import set_muted
 
+from .account import AccountDialog
+from .channels import ChannelsDialog
+
 __all__ = [
     "PlaceholderDialog",
     "ChannelsDialog",
@@ -83,12 +86,6 @@ class PlaceholderDialog(QDialog):
         return self._state
 
 
-class ChannelsDialog(PlaceholderDialog):
-    screen_title = "채널 관리"
-    issue = 8
-    summary = "계정 연결 상태와 구독 채널 중 자동 녹화 대상을 고르는 화면입니다."
-
-
 class ArchiveDialog(PlaceholderDialog):
     screen_title = "보관함"
     issue = 10
@@ -113,7 +110,4 @@ class LogDialog(PlaceholderDialog):
     summary = "오류와 동작 이력을 앱 안에서 확인하고 복사하는 화면입니다."
 
 
-class AccountDialog(PlaceholderDialog):
-    screen_title = "계정"
-    issue = 8
-    summary = "Google 계정 연결과 해제를 다루는 화면입니다."
+

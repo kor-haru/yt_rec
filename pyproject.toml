@@ -12,6 +12,9 @@ dependencies = [
     # PySide6 대신 -Essentials 를 쓰는 이유가 그것이다. PySide6 메타 패키지는
     # PySide6-Addons 를 끌어오고, 거기에 Chromium 이 들어 있다.
     "PySide6-Essentials>=6.7",
+    # Google 공식 OAuth 2.0. 시스템 기본 브라우저 + 로컬 루프백.
+    "google-auth>=2.57.0",
+    "google-auth-oauthlib>=1.4.1",
 ]
 
 [project.scripts]

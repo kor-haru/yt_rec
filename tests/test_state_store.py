@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
 from yt_rec.state.models import (
+    AccountInfo,
     CompletedRecording,
     CompletionStatus,
     ConnectionState,
@@ -20,6 +21,7 @@ from yt_rec.state.models import (
     RecordingState,
     Severity,
     StopReason,
+    Subscription,
     WatchedChannel,
     WatchState,
 )
@@ -35,6 +37,8 @@ def test_기본값은_연결_안_됨(state: AppState) -> None:
     assert state.recordings == ()
     assert state.channels == ()
     assert state.completed == ()
+    assert state.account.label == ""
+    assert state.subscriptions == ()
 
 
 def test_연결_끊기면_감시_상태를_알_수_없음으로_되돌린다(state: AppState) -> None:
@@ -565,3 +569,49 @@ def test_명령은_작업_스레드에서_보낼_수_없다(qapp) -> None:
     thread = _run_in_worker(lambda: store.stop_recording("r1"))
     assert isinstance(thread.error, RuntimeError)
     store.deleteLater()
+
+
+def test_계정과_구독이_이벤트로_반영된다(state: AppState) -> None:
+    synced = now()
+    state.apply(ev.AccountChanged(AccountInfo(label="내 채널", last_synced_at=synced)))
+    state.apply(
+        ev.SubscriptionsChanged(
+            (
+                Subscription(channel_id="UC1", name="하나", selected=True),
+                Subscription(channel_id="UC2", name="둘", unavailable=True, selected=True),
+            )
+        )
+    )
+    assert state.account.label == "내 채널"
+    assert state.account.last_synced_at == synced
+    assert [s.channel_id for s in state.subscriptions] == ["UC1", "UC2"]
+    assert state.subscriptions[1].unavailable is True
+    snap = state.snapshot()
+    assert snap.account.label == "내 채널"
+    assert len(snap.subscriptions) == 2
+
+
+def test_미연결이어도_소스가_있으면_계정_연결_명령을_보낸다(state: AppState) -> None:
+    """연결 버튼은 미연결에서 눌러야 한다. 소스만 붙어 있으면 보낸다."""
+    source = EventSource()
+    state.attach(source)
+    received: list[object] = []
+    state.command_requested.connect(received.append)
+
+    assert state.connection is ConnectionState.DISCONNECTED
+    assert state.connect_account() is True
+    assert received == [cmd.ConnectAccount()]
+
+
+def test_소스가_없으면_계정_연결도_거부된다(state: AppState) -> None:
+    rejected: list[tuple[object, str]] = []
+    state.command_rejected.connect(lambda command, why: rejected.append((command, why)))
+    assert state.connect_account() is False
+    assert len(rejected) == 1
+    assert isinstance(rejected[0][0], cmd.ConnectAccount)
+
+
+def test_미연결에서_채널_선택은_거부된다(state: AppState) -> None:
+    source = EventSource()
+    state.attach(source)
+    assert state.set_watched_channels(["UC1"]) is False

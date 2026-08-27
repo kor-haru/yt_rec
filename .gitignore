@@ -531,6 +531,10 @@ install_kis_mcp.ps1
 # 기본 출력 디렉터리를 저장소 안에 두는 경우
 /recordings/
 
+# Google OAuth 클라이언트 파일. 저장소에 넣지 않는다.
+client_secrets.json
+**/client_secrets.json
+
 # 테스트용 소형 미디어는 예외로 추적한다.
 !tests/fixtures/**/*.mp4
 !tests/fixtures/**/*.m4a

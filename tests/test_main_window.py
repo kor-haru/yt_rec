@@ -6,8 +6,9 @@ from datetime import timedelta
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
+from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
 from yt_rec.state.models import (
     CompletedRecording,
@@ -213,6 +214,38 @@ def test_진행_이벤트가_카드_문구를_갱신한다(
     QApplication.processEvents()
     assert row.badge.text() == "응답 없음"
     assert row.badge.kind() == "error"
+    window.close()
+
+
+def test_중지_확인_후_해당_녹화만_멈추라고_요청한다(
+    state: AppState,
+    stub: StubEventSource,
+    window_settings: WindowSettings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    window = make_window(state, window_settings)
+    stub.emit_event(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    stub.emit_event(
+        ev.RecordingStarted(
+            Recording(
+                recording_id="r1",
+                title="테스트 라이브",
+                state=RecordingState.RECORDING,
+                started_at=now(),
+            )
+        )
+    )
+    QApplication.processEvents()
+    received: list[object] = []
+    state.command_requested.connect(received.append)
+    window.dashboard.recording_rows()["r1"].stop_button.click()
+    QApplication.processEvents()
+    assert received == [cmd.StopRecording("r1", reason="사용자가 중지했습니다")]
+    # 명령은 요청일 뿐. 카드는 아직 남아 있다.
+    assert "r1" in window.dashboard.recording_rows()
     window.close()
 
 

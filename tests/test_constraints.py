@@ -43,12 +43,12 @@ RECORDING_DISPLAY_MODULES = (
 #: 파일 크기를 직접 재는 호출. Windows에서 진행 중 파일의 크기가 실제보다
 #: 훨씬 작게 나오므로 화면 표시 경로에 있어서는 안 된다.
 FORBIDDEN_STAT_ATTRS = frozenset(
-    {"stat", "lstat", "getsize", "st_size", "fstat", "stat_result"}
+    {"stat", "lstat", "getsize", "st_size", "fstat", "stat_result", "scandir"}
 )
 
 FORBIDDEN_STAT_PATTERN = re.compile(
     r"\bos\.stat\b|\bos\.lstat\b|\bos\.fstat\b|\bos\.path\.getsize\b"
-    r"|\.stat\(\)|\bgetsize\b|\bst_size\b"
+    r"|\bos\.scandir\b|\.stat\(\)|\bgetsize\b|\bst_size\b|\bscandir\b"
 )
 
 
@@ -174,6 +174,22 @@ def test_GUI가_파일시스템_모듈을_직접_쓰지_않는다() -> None:
                 if name.split(".")[0] in {"os", "pathlib", "shutil", "glob"}:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} {name}")
     assert not offenders, f"파일시스템 모듈 import: {offenders}"
+
+
+def test_소스가_os_scandir을_호출하지_않는다() -> None:
+    """디렉터리 엔트리에 캐시된 크기를 읽으면 진행 중 파일을 오판한다.
+
+    화면·상태뿐 아니라 녹화 백엔드도 ``os.scandir`` 로 바꾸지 않는다.
+    docstring 의 금지 문구는 :func:`code_text` 가 빼므로 검사에 안 걸린다.
+    """
+    pattern = re.compile(r"\bos\.scandir\b|\.scandir\(")
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}:{no}"
+        for path in python_sources()
+        for no, line in enumerate(code_text(path).splitlines(), start=1)
+        if pattern.search(line)
+    ]
+    assert not offenders, f"os.scandir 호출: {offenders}"
 
 
 # ----------------------------------------------------------------------
@@ -340,6 +356,7 @@ def readme() -> str:
         "stop_recording",
         "set_watched_channels",
         "update_settings",
+        "connect_account",
         "command_rejected",
     ],
 )
@@ -398,6 +415,24 @@ def test_화면이_백엔드에_닿는_경로가_저장소_하나다() -> None:
     assert not offenders, f"화면이 명령 시그널을 직접 방출한다: {offenders}"
 
 
+def test_화면은_백엔드와_녹화_엔진을_직접_부르지_않는다() -> None:
+    """화면은 yt_rec.state 만 참조한다."""
+    offenders: list[str] = []
+    for path in sorted((SRC_ROOT / "ui").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                if name.startswith("yt_rec.backend") or name.startswith("yt_rec.recording"):
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} {name}")
+    assert not offenders, f"화면이 백엔드를 직접 부른다: {offenders}"
+
+
 def test_진입점이_존재한다() -> None:
     assert (SRC_ROOT / "app.py").exists()
     assert (SRC_ROOT / "__main__.py").exists()
@@ -450,6 +485,8 @@ def test_잠금_파일에_QtWebEngine_계열이_없다() -> None:
 def test_잠금_파일이_런타임_의존성을_담는다() -> None:
     packages = locked_packages()
     assert "pyside6-essentials" in packages
+    assert "google-auth" in packages
+    assert "google-auth-oauthlib" in packages
     assert "yt-rec" in packages
 
 
