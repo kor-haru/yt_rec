@@ -160,3 +160,121 @@ def test_쿼터_초과를_구분한다() -> None:
     with pytest.raises(YouTubeError) as caught:
         api.list_subscriptions()
     assert caught.value.kind == "quota"
+
+
+def test_http_요청에_timeout을_넘긴다() -> None:
+    session = ScriptedSession(
+        {
+            "channels": [
+                FakeResponse(200, {"items": []}),
+            ]
+        }
+    )
+    api = YouTubeApi(session)
+    api.find_lives(["UC1"])
+    from yt_rec.backend.youtube import HTTP_TIMEOUT
+
+    assert session.last_timeout == HTTP_TIMEOUT
+
+
+def test_playlist_부분_실패는_auth가_아니면_삼키지_않고_남긴다() -> None:
+    session = ScriptedSession(
+        {
+            "channels": [
+                FakeResponse(
+                    200,
+                    {
+                        "items": [
+                            {
+                                "id": "UC1",
+                                "contentDetails": {"relatedPlaylists": {"uploads": "UU1"}},
+                            },
+                            {
+                                "id": "UC2",
+                                "contentDetails": {"relatedPlaylists": {"uploads": "UU2"}},
+                            },
+                        ]
+                    },
+                )
+            ],
+            "playlistItems": [
+                FakeResponse(500, {"error": {"message": "boom"}}),
+                FakeResponse(200, {"items": [{"contentDetails": {"videoId": "live2"}}]}),
+            ],
+            "videos": [
+                FakeResponse(
+                    200,
+                    {
+                        "items": [
+                            {
+                                "id": "live2",
+                                "snippet": {
+                                    "title": "ok",
+                                    "channelId": "UC2",
+                                    "channelTitle": "둘",
+                                },
+                                "liveStreamingDetails": {"actualStartTime": "2026-01-01T00:00:00Z"},
+                            }
+                        ]
+                    },
+                )
+            ],
+        }
+    )
+    api = YouTubeApi(session)
+    lives = api.find_lives(["UC1", "UC2"])
+    assert [item.video_id for item in lives] == ["live2"]
+    assert "UC1" in api.last_channel_errors
+
+
+def test_playlist_auth_오류는_전파한다() -> None:
+    session = ScriptedSession(
+        {
+            "channels": [
+                FakeResponse(
+                    200,
+                    {
+                        "items": [
+                            {
+                                "id": "UC1",
+                                "contentDetails": {"relatedPlaylists": {"uploads": "UU1"}},
+                            }
+                        ]
+                    },
+                )
+            ],
+            "playlistItems": [
+                FakeResponse(
+                    401,
+                    {"error": {"message": "invalid", "errors": [{"reason": "authError"}]}},
+                )
+            ],
+        }
+    )
+    api = YouTubeApi(session)
+    with pytest.raises(YouTubeError) as caught:
+        api.find_lives(["UC1"])
+    assert caught.value.kind == "auth"
+
+
+def test_RefreshError는_auth로_분류한다() -> None:
+    class RefreshError(Exception):
+        pass
+
+    class Boom:
+        def get(self, url, params=None, timeout=None):
+            raise RefreshError("invalid_grant")
+
+    api = YouTubeApi(Boom())
+    with pytest.raises(YouTubeError) as caught:
+        api.list_subscriptions()
+    assert caught.value.kind == "auth"
+
+
+def test_quota_간격은_채널이_늘면_길어진다() -> None:
+    from yt_rec.backend.youtube import recommended_poll_interval
+
+    six = recommended_poll_interval(6, quota_limit=10_000)
+    one = recommended_poll_interval(1, quota_limit=10_000)
+    assert six >= 60
+    assert six > one

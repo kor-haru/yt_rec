@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,9 +21,11 @@ __all__ = [
     "ENV_CLIENT_ID",
     "ENV_CLIENT_SECRET",
     "ENV_CLIENT_SECRETS",
+    "LOGIN_TIMEOUT_SECONDS",
 ]
 
 YOUTUBE_READONLY = "https://www.googleapis.com/auth/youtube.readonly"
+LOGIN_TIMEOUT_SECONDS = 180
 
 ENV_CLIENT_ID = "YT_REC_GOOGLE_CLIENT_ID"
 ENV_CLIENT_SECRET = "YT_REC_GOOGLE_CLIENT_SECRET"
@@ -55,8 +58,8 @@ def load_client_config() -> dict[str, Any]:
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ClientConfigError(f"client_secrets.json 을 읽지 못했다: {exc}") from exc
+        except (OSError, ValueError) as extra:
+            raise ClientConfigError(f"client_secrets.json 을 읽지 못했다: {extra}") from extra
         if "installed" not in data and "web" not in data:
             raise ClientConfigError("client_secrets.json 에 installed/web 항목이 없다")
         return data
@@ -85,14 +88,30 @@ def _run_installed_app(config: dict[str, Any]) -> Any:
 
     flow = InstalledAppFlow.from_client_config(config, scopes=[YOUTUBE_READONLY])
     # 시스템 기본 브라우저 + 루프백. Chrome 전용이 아니다.
-    return flow.run_local_server(
-        host="127.0.0.1",
-        bind_addr="127.0.0.1",
-        port=0,
-        open_browser=True,
-        access_type="offline",
-        prompt="consent",
-    )
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            box["creds"] = flow.run_local_server(
+                host="127.0.0.1",
+                bind_addr="127.0.0.1",
+                port=0,
+                open_browser=True,
+                access_type="offline",
+                prompt="consent",
+            )
+        except Exception as extra:  # noqa: BLE001 - 로그인 스레드에서 AuthError 로 올린다
+            box["exc"] = extra
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="yt-rec-oauth", daemon=True).start()
+    if not done.wait(LOGIN_TIMEOUT_SECONDS):
+        raise AuthError(f"로그인 대기 {LOGIN_TIMEOUT_SECONDS}초가 지났다")
+    if "exc" in box:
+        raise box["exc"]
+    return box["creds"]
 
 
 class GoogleAuth:
@@ -114,8 +133,8 @@ class GoogleAuth:
             self.credentials = self._flow_runner(config)
         except ClientConfigError:
             raise
-        except Exception as exc:
-            raise AuthError(f"Google 로그인에 실패했다: {exc}") from exc
+        except Exception as extra:
+            raise AuthError(f"Google 로그인에 실패했다: {extra}") from extra
         scopes = list(getattr(self.credentials, "scopes", None) or [])
         if scopes and YOUTUBE_READONLY not in scopes:
             raise AuthError(f"요청하지 않은 권한이 포함돼 있다: {scopes}")
@@ -128,13 +147,16 @@ class GoogleAuth:
         try:
             info = json.loads(blob)
             creds = Credentials.from_authorized_user_info(info, scopes=[YOUTUBE_READONLY])
-        except Exception as exc:
-            raise AuthError(f"저장된 인증 정보를 읽지 못했다: {exc}") from exc
+        except Exception as extra:
+            raise AuthError(f"저장된 인증 정보를 읽지 못했다: {extra}") from extra
         if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-            except Exception as exc:
-                raise AuthError(f"토큰을 갱신하지 못했다: {exc}") from exc
+            except Exception as extra:
+                text = str(extra).lower()
+                if "invalid_grant" in text or "revoked" in text:
+                    raise AuthError(f"토큰을 갱신하지 못했다: {extra}") from extra
+                raise
         if not creds.valid:
             raise AuthError("저장된 인증이 유효하지 않다")
         self.credentials = creds

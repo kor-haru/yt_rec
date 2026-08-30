@@ -130,6 +130,7 @@ class ChannelsDialog(QDialog):
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._pending: list[str] | None = None
         self.setWindowTitle("채널 관리 — yt-rec")
         self.setObjectName("ChannelsDialog")
         self.setMinimumSize(520, 420)
@@ -204,6 +205,9 @@ class ChannelsDialog(QDialog):
 
     def _on_subscriptions(self, subscriptions: tuple[Subscription, ...]) -> None:
         self.model.set_subscriptions(subscriptions)
+        selected_ids = [item.channel_id for item in subscriptions if item.selected]
+        if self._pending is not None and selected_ids == self._pending:
+            self._pending = None
         selected = sum(1 for item in subscriptions if item.selected)
         total = len(subscriptions)
         text = f"{selected}개 선택 / 구독 {total}개"
@@ -217,13 +221,13 @@ class ChannelsDialog(QDialog):
         self.list_view.setEnabled(enabled)
 
     def _on_toggled(self, channel_id: str, selected: bool) -> None:
-        current: list[str] = []
-        seen: set[str] = set()
-        for item in self._state.subscriptions:
-            want = selected if item.channel_id == channel_id else item.selected
-            if want and item.channel_id not in seen:
-                current.append(item.channel_id)
-                seen.add(item.channel_id)
-        if selected and channel_id not in seen:
-            current.append(channel_id)
-        self._state.set_watched_channels(current)
+        if self._pending is None:
+            self._pending = [
+                item.channel_id for item in self._state.subscriptions if item.selected
+            ]
+        if selected:
+            if channel_id not in self._pending:
+                self._pending.append(channel_id)
+        else:
+            self._pending = [cid for cid in self._pending if cid != channel_id]
+        self._state.set_watched_channels(list(self._pending))

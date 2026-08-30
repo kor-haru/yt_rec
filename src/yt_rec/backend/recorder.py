@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,7 @@ from yt_rec.state.models import (
 __all__ = ["EngineRecorder", "translate_engine_event", "quality_label"]
 
 Emit = Callable[[ev.BackendEvent], None]
+ResultHook = Callable[[str, bool], None]
 
 
 def quality_label(max_height: int | None) -> str:
@@ -189,12 +191,15 @@ class EngineRecorder:
         emit: Emit,
         *,
         engine_cls: type[RecordingEngine] = RecordingEngine,
+        on_result: ResultHook | None = None,
     ) -> None:
         self._options = options
         self._emit = emit
         self._engine_cls = engine_cls
+        self._on_result = on_result
         self._lock = threading.Lock()
         self._engines: dict[str, RecordingEngine] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._meta: dict[str, dict[str, str]] = {}
         self._last_progress: dict[str, tuple[int, timedelta]] = {}
 
@@ -253,15 +258,23 @@ class EngineRecorder:
             )
         )
         thread = threading.Thread(
-            target=self._run, args=(video_id, engine), name=f"yt-rec-record-{video_id}", daemon=True
+            target=self._run,
+            args=(video_id, engine),
+            name=f"yt-rec-record-{video_id}",
+            daemon=False,
         )
+        with self._lock:
+            self._threads[video_id] = thread
         thread.start()
 
     def stop(self, recording_id: str) -> None:
         with self._lock:
             engine = self._engines.get(recording_id)
+            thread = self._threads.get(recording_id)
         if engine is not None:
             engine.request_stop()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=600)
 
     def stop_all(self) -> None:
         with self._lock:
@@ -269,14 +282,52 @@ class EngineRecorder:
         for engine in engines:
             engine.request_stop()
 
+    def join_all(self, timeout: float | None = 600) -> None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lock:
+            threads = list(self._threads.values())
+        for thread in threads:
+            remaining = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - time.monotonic())
+            if thread is not threading.current_thread():
+                thread.join(timeout=remaining)
+
+    def recover_pending(self) -> None:
+        engine = self._engine_cls(self._options)
+        results = engine.recover_pending()
+        quality = quality_label(self._options.max_height)
+        for result in results:
+            finished = EngineFinished(
+                video_id=result.video_id,
+                at=result.finished_at or time.time(),
+                result=result,
+            )
+            meta = result.metadata
+            for backend_event in translate_engine_event(
+                finished,
+                title=meta.display_title or result.video_id,
+                channel_id=meta.channel_id or "",
+                channel_name=meta.channel or "",
+                quality=quality,
+            ):
+                self._emit(backend_event)
+            if self._on_result is not None:
+                self._on_result(result.video_id, result.succeeded)
+
     def _run(self, video_id: str, engine: RecordingEngine) -> None:
+        ok = False
         try:
-            engine.record(video_id)
+            result = engine.record(video_id)
+            ok = bool(getattr(result, "succeeded", False))
         finally:
             with self._lock:
                 self._engines.pop(video_id, None)
+                self._threads.pop(video_id, None)
                 self._meta.pop(video_id, None)
                 self._last_progress.pop(video_id, None)
+            if self._on_result is not None:
+                self._on_result(video_id, ok)
 
     def _on_engine_event(self, video_id: str, event: RecordingEvent) -> None:
         with self._lock:

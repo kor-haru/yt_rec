@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..state.models import ConnectionState, QuotaStatus, WatchState, WatchStatus
+from ..state.models import ConnectionState, QuotaStatus, StopReason, WatchState, WatchStatus
 from ..state.store import AppState
 from .dashboard import Dashboard
 from .dialogs import (
@@ -337,8 +337,15 @@ class MainWindow(QMainWindow):
             kind = "warn"
             detail = "백엔드에 연결하는 중입니다."
         elif connection is not ConnectionState.CONNECTED:
-            kind = "error"
-            detail = "백엔드가 기동되지 않았습니다. 감시·녹화가 진행되지 않습니다."
+            if watch.stop_reason is StopReason.AUTH_EXPIRED:
+                kind = "error"
+                detail = stop_reason_text(watch.stop_reason)
+            elif self._state.backend_attached:
+                kind = "warn"
+                detail = "계정이 연결되지 않았습니다. 계정에서 Google 로그인을 하세요."
+            else:
+                kind = "error"
+                detail = "백엔드가 기동되지 않았습니다. 감시·녹화가 진행되지 않습니다."
         elif watch.state is WatchState.WATCHING:
             kind = "ok"
             detail = ""

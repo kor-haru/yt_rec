@@ -10,6 +10,7 @@ from yt_rec.backend.oauth import (
     ENV_CLIENT_SECRETS,
     YOUTUBE_READONLY,
     ClientConfigError,
+    GoogleAuth,
     load_client_config,
 )
 
@@ -53,3 +54,24 @@ def test_비밀이_없으면_오류다(monkeypatch, tmp_path) -> None:
 def test_요청_권한은_readonly_하나다() -> None:
     assert YOUTUBE_READONLY.endswith("youtube.readonly")
     assert "youtube.force-ssl" not in YOUTUBE_READONLY
+
+
+def test_로그인_대기는_시간_제한이_있다(monkeypatch) -> None:
+    import yt_rec.backend.oauth as oauth
+
+    monkeypatch.setattr(oauth, "LOGIN_TIMEOUT_SECONDS", 0.05)
+
+    class Flow:
+        @classmethod
+        def from_client_config(cls, *_a, **_k):
+            return cls()
+
+        def run_local_server(self, **_k):
+            import time
+
+            time.sleep(2)
+            return "never"
+
+    monkeypatch.setattr("google_auth_oauthlib.flow.InstalledAppFlow", Flow)
+    with pytest.raises(oauth.AuthError, match="대기"):
+        oauth._run_installed_app({"installed": {"client_id": "x", "client_secret": "y"}})

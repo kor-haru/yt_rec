@@ -311,6 +311,11 @@ class AppState(QObject):
     # ------------------------------------------------------------------
     # 이벤트 주입
     # ------------------------------------------------------------------
+    @property
+    def backend_attached(self) -> bool:
+        """이벤트 소스가 하나라도 붙어 있는가. 계정 연결과 별개다."""
+        return bool(self._sources)
+
     def attach(self, source: EventSource) -> None:
         """이벤트 소스를 연결한다. 소스가 다른 스레드면 Qt가 큐 연결로 넘긴다.
 
@@ -427,7 +432,10 @@ class AppState(QObject):
         login_while_attached = (
             isinstance(command, cmd.ConnectAccount) and bool(self._sources)
         )
-        if not connected and not login_while_attached:
+        stop_while_attached = (
+            isinstance(command, cmd.StopRecording) and bool(self._sources)
+        )
+        if not connected and not login_while_attached and not stop_while_attached:
             self.command_rejected.emit(command, "백엔드에 연결되지 않았습니다")
             return False
         self.command_requested.emit(command)
@@ -479,10 +487,17 @@ class AppState(QObject):
         if event.state is not ConnectionState.CONNECTED:
             # 백엔드가 없으면 감시 상태를 알 수 없다. 마지막 값을 그대로
             # 보여주면 사용자가 감시 중이라고 오해한다.
+            # AUTH_EXPIRED 등 명시적 중단 사유는 DISCONNECTED 가 덮어쓰지 않는다.
+            preserved = self._watch.stop_reason
+            keep = preserved in (
+                StopReason.AUTH_EXPIRED,
+                StopReason.QUOTA_EXCEEDED,
+                StopReason.NETWORK_DOWN,
+            )
             self._watch = WatchStatus(
-                state=WatchState.UNKNOWN,
+                state=WatchState.STOPPED if keep else WatchState.UNKNOWN,
                 channel_count=self._watch.channel_count,
-                stop_reason=StopReason.BACKEND_DOWN,
+                stop_reason=preserved if keep else StopReason.BACKEND_DOWN,
                 next_check_at=None,
             )
             self._dirty.add("watch")

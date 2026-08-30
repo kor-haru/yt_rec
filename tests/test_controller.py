@@ -163,6 +163,85 @@ def test_로그인_실패는_오류로_남긴다() -> None:
     assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
 
 
+def test_채널_부분_실패는_라이브_없음으로_위장하지_않는다() -> None:
+    selection = MemorySelectionStore(["UC1", "UC2"])
+    youtube = FakeYouTube(subs=[ChannelRef("UC1", "하나"), ChannelRef("UC2", "둘")])
+    youtube.channel_fail["UC1"] = YouTubeError("network", "boom")
+    controller, events, youtube, recorder, selection, tokens = make_controller(
+        selection=selection, youtube=youtube
+    )
+    controller.handle_command(cmd.ConnectAccount())
+    channels = _of(events, ev.ChannelsChanged)[-1].channels
+    by_id = {item.channel_id: item for item in channels}
+    assert "조회 실패" in by_id["UC1"].last_check_result
+    assert "라이브 없음" in by_id["UC2"].last_check_result
+
+
+def test_시작_실패면_같은_라이브를_다시_시도한다() -> None:
+    selection = MemorySelectionStore(["UC1"])
+    youtube = FakeYouTube(
+        subs=[ChannelRef("UC1", "하나")],
+        lives=[LiveBroadcast("vid-retry", "UC1", "라이브", "하나")],
+    )
+    recorder = FakeRecorder()
+    recorder.start_fail = RuntimeError("fail")
+    controller, events, youtube, recorder, selection, tokens = make_controller(
+        selection=selection, youtube=youtube, recorder=recorder
+    )
+    controller.handle_command(cmd.ConnectAccount())
+    assert recorder.started == []
+    recorder.start_fail = None
+    controller.tick()
+    assert recorder.started == ["vid-retry"]
+
+
+def test_완료한_라이브는_재실행해도_다시_시작하지_않는다() -> None:
+    from yt_rec.backend.selection import MemorySeenStore
+
+    seen = MemorySeenStore(done=["vid-old"])
+    selection = MemorySelectionStore(["UC1"])
+    youtube = FakeYouTube(
+        subs=[ChannelRef("UC1", "하나")],
+        lives=[LiveBroadcast("vid-old", "UC1", "라이브", "하나")],
+    )
+    controller, events, youtube, recorder, selection, tokens = make_controller(
+        selection=selection, youtube=youtube, seen=seen
+    )
+    controller.handle_command(cmd.ConnectAccount())
+    assert recorder.started == []
+
+
+def test_복원_네트워크_오류는_토큰을_지우지_않는다() -> None:
+    tokens = MemoryTokenStore("stored")
+    auth = FakeAuth()
+    auth.fail = ConnectionError("dns")
+    controller, events, youtube, recorder, selection, tokens = make_controller(
+        tokens=tokens, auth=auth
+    )
+    controller.start()
+    assert tokens.load() == "stored"
+    assert _of(events, ev.WatchStatusChanged)[-1].stop_reason is StopReason.NETWORK_DOWN
+
+
+def test_복원_invalid_grant는_토큰을_지운다() -> None:
+    tokens = MemoryTokenStore("stored")
+    auth = FakeAuth()
+    auth.fail = AuthError("invalid_grant")
+    controller, events, youtube, recorder, selection, tokens = make_controller(
+        tokens=tokens, auth=auth
+    )
+    controller.start()
+    assert tokens.load() is None
+    assert _of(events, ev.WatchStatusChanged)[-1].stop_reason is StopReason.AUTH_EXPIRED
+
+
+def test_시작_시_미완료_녹화를_복구한다() -> None:
+    recorder = FakeRecorder()
+    controller, events, youtube, rec, selection, tokens = make_controller(recorder=recorder)
+    controller.start()
+    assert recorder.recover_calls == 1
+
+
 def test_채널_선택_명령이_저장되고_감시를_연다() -> None:
     controller, events, youtube, recorder, selection, tokens = make_controller()
     controller.handle_command(cmd.ConnectAccount())
