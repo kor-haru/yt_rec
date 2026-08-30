@@ -45,6 +45,8 @@ class FakeYouTube:
         self.quota_limit = 10_000
         self.fail: YouTubeError | None = None
         self.find_calls: list[tuple[str, ...]] = []
+        self.last_channel_errors: dict[str, str] = {}
+        self.channel_fail: dict[str, YouTubeError] = {}
 
     def load_account_label(self) -> str:
         self.quota_used += 1
@@ -61,7 +63,18 @@ class FakeYouTube:
         self._raise()
         wanted = set(channel_ids)
         self.find_calls.append(tuple(channel_ids))
-        return [item for item in self.lives if item.channel_id in wanted]
+        self.last_channel_errors = {}
+        for channel_id, error in self.channel_fail.items():
+            if channel_id in wanted:
+                if error.kind in ("auth", "quota"):
+                    raise error
+                self.last_channel_errors[channel_id] = str(error)
+        skipped = set(self.last_channel_errors)
+        return [
+            item
+            for item in self.lives
+            if item.channel_id in wanted and item.channel_id not in skipped
+        ]
 
     def _raise(self) -> None:
         if self.fail is not None:
@@ -74,10 +87,21 @@ class FakeRecorder:
         self.stopped: list[str] = []
         self.recording: set[str] = set()
         self.option_updates: list[dict] = []
+        self.recover_calls = 0
+        self.join_calls = 0
+        self.start_fail: Exception | None = None
 
     def start(self, video_id: str, **_kwargs: object) -> None:
+        if self.start_fail is not None:
+            raise self.start_fail
         self.started.append(video_id)
         self.recording.add(video_id)
+
+    def recover_pending(self) -> None:
+        self.recover_calls += 1
+
+    def join_all(self, timeout: float | None = None) -> None:
+        self.join_calls += 1
 
     def stop(self, recording_id: str) -> None:
         self.stopped.append(recording_id)
@@ -109,10 +133,17 @@ class ScriptedSession:
     def __init__(self, table: dict[str, list[FakeResponse]]) -> None:
         self.table = {key: list(value) for key, value in table.items()}
         self.calls: list[tuple[str, dict]] = []
+        self.last_timeout = None
 
-    def get(self, url: str, params: dict | None = None) -> FakeResponse:
+    def get(
+        self,
+        url: str,
+        params: dict | None = None,
+        timeout: object | None = None,
+    ) -> FakeResponse:
         params = params or {}
         self.calls.append((url, dict(params)))
+        self.last_timeout = timeout
         for key, queue in self.table.items():
             if key in url:
                 if not queue:

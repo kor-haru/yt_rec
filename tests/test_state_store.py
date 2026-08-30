@@ -548,6 +548,28 @@ def test_백엔드가_없으면_명령이_거부된다(state: AppState) -> None:
     assert rejected[0][1]
 
 
+def test_AUTH_EXPIRED_직후_DISCONNECTED는_사유를_덮지_않는다(state: AppState) -> None:
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(
+        ev.WatchStatusChanged(
+            state=WatchState.STOPPED, channel_count=1, stop_reason=StopReason.AUTH_EXPIRED
+        )
+    )
+    state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+    assert state.watch.stop_reason is StopReason.AUTH_EXPIRED
+    assert state.watch.state is WatchState.STOPPED
+
+
+def test_백엔드가_붙어_있으면_미연결에서도_녹화를_멈출_수_있다(state: AppState) -> None:
+    source = EventSource()
+    state.attach(source)
+    received: list[object] = []
+    state.command_requested.connect(received.append)
+    assert state.connection is ConnectionState.DISCONNECTED
+    assert state.stop_recording("rec-1") is True
+    assert received == [cmd.StopRecording("rec-1")]
+
+
 def test_명령은_상태를_직접_바꾸지_않는다(state: AppState) -> None:
     """명령은 요청이다. 상태를 정하는 곳은 백엔드 하나여야 한다."""
     state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))

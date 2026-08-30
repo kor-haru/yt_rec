@@ -4,7 +4,7 @@ from PySide6.QtWidgets import QApplication
 
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import ConnectionState, Subscription
+from yt_rec.state.models import ConnectionState, StopReason, Subscription, WatchState
 from yt_rec.state.store import AppState
 from yt_rec.ui.account import AccountDialog
 from yt_rec.ui.channels import ChannelsDialog
@@ -17,6 +17,19 @@ def test_미연결에서_연결_버튼이_명령을_보낸다(state: AppState, s
     dialog.pane.connect_button.click()
     QApplication.processEvents()
     assert received == [cmd.ConnectAccount()]
+    dialog.close()
+
+
+def test_계정_화면에_인증_만료_원인을_보여_준다(state: AppState, stub) -> None:
+    dialog = AccountDialog(state)
+    state.apply(
+        ev.WatchStatusChanged(
+            state=WatchState.STOPPED, channel_count=1, stop_reason=StopReason.AUTH_EXPIRED
+        )
+    )
+    state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+    QApplication.processEvents()
+    assert "만료" in dialog.pane.status_label.text()
     dialog.close()
 
 
@@ -36,6 +49,27 @@ def test_구독_목록을_체크하면_전체_교체_명령을_보낸다(state: 
     dialog.model.toggled.emit("UC2", True)
     QApplication.processEvents()
     assert received == [cmd.SetWatchedChannels(("UC2",))]
+    dialog.close()
+
+
+def test_빠른_토글은_앞선_선택을_잃지_않는다(state: AppState, stub) -> None:
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(
+        ev.SubscriptionsChanged(
+            (
+                Subscription(channel_id="UC1", name="하나"),
+                Subscription(channel_id="UC2", name="둘"),
+                Subscription(channel_id="UC3", name="셋"),
+            )
+        )
+    )
+    received: list[object] = []
+    state.command_requested.connect(received.append)
+    dialog = ChannelsDialog(state)
+    dialog.model.toggled.emit("UC1", True)
+    dialog.model.toggled.emit("UC2", True)
+    QApplication.processEvents()
+    assert received[-1] == cmd.SetWatchedChannels(("UC1", "UC2"))
     dialog.close()
 
 

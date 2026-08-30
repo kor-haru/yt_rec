@@ -12,14 +12,18 @@ from typing import Any, Protocol
 
 __all__ = [
     "API_ROOT",
+    "HTTP_TIMEOUT",
     "YouTubeError",
     "ChannelRef",
     "LiveBroadcast",
     "YouTubeApi",
     "session_from_credentials",
+    "recommended_poll_interval",
 ]
 
 API_ROOT = "https://www.googleapis.com/youtube/v3"
+#: AuthorizedSession.get 에 넘기는 (connect, read) 초.
+HTTP_TIMEOUT = (10.0, 30.0)
 
 _COSTS = {
     "subscriptions": 1,
@@ -67,7 +71,41 @@ class LiveBroadcast:
 
 
 class HttpSession(Protocol):
-    def get(self, url: str, params: dict[str, Any] | None = None) -> Any: ...
+    def get(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | tuple[float, float] | None = None,
+    ) -> Any: ...
+
+
+def recommended_poll_interval(
+    channel_count: int,
+    *,
+    quota_limit: int = 10_000,
+    floor_seconds: float = 60.0,
+    budget_ratio: float = 0.9,
+) -> float:
+    """하루 quota 를 넘기지 않는 최소 폴링 간격(초).
+
+    업로드 플레이리스트를 캐시한 뒤 poll 당 비용은 채널별 playlistItems(1) +
+    videos.list(1) 이다. 6채널·60초면 하루 10,080 단위가 되어 기본 한도를 넘는다.
+    """
+    n = max(0, int(channel_count))
+    if n == 0:
+        return floor_seconds
+    units_per_poll = n + 1
+    budget = max(1.0, float(quota_limit) * budget_ratio)
+    interval = 86400.0 * units_per_poll / budget
+    return max(floor_seconds, interval)
+
+
+def _is_auth_refresh_failure(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    if "invalid_grant" in text or "revoked" in text:
+        return True
+    return name == "RefreshError" and "invalid_grant" in text
 
 
 def session_from_credentials(credentials: Any) -> Any:
@@ -85,6 +123,7 @@ class YouTubeApi:
         self.quota_limit = quota_limit
         self._uploads: dict[str, str] = {}
         self._account_label = ""
+        self.last_channel_errors: dict[str, str] = {}
 
     @property
     def account_label(self) -> str:
@@ -125,6 +164,7 @@ class YouTubeApi:
         uploads 플레이리스트 ID 는 채널마다 캐시한다.
         """
         ids = [cid for cid in channel_ids if cid]
+        self.last_channel_errors = {}
         if not ids:
             return []
         self._resolve_uploads(ids)
@@ -143,7 +183,10 @@ class YouTubeApi:
                         "maxResults": "5",
                     },
                 )
-            except YouTubeError:
+            except YouTubeError as exc:
+                if exc.kind in ("auth", "quota"):
+                    raise
+                self.last_channel_errors[channel_id] = str(exc)
                 continue
             for item in data.get("items") or []:
                 details = item.get("contentDetails") or {}
@@ -221,10 +264,12 @@ class YouTubeApi:
         url = f"{API_ROOT}/{endpoint}"
         cleaned = {k: v for k, v in params.items() if v is not None and v != ""}
         try:
-            response = self._session.get(url, params=cleaned)
+            response = self._session.get(url, params=cleaned, timeout=HTTP_TIMEOUT)
         except YouTubeError:
             raise
         except Exception as exc:
+            if _is_auth_refresh_failure(exc) or type(exc).__name__ == "RefreshError":
+                raise YouTubeError("auth", str(exc)) from exc
             raise YouTubeError("network", str(exc)) from exc
         self.quota_used += _COSTS.get(endpoint, 1)
         status = int(getattr(response, "status_code", 200))

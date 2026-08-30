@@ -19,6 +19,7 @@ from yt_rec.state.models import (
     Recording,
     RecordingState,
     Severity,
+    StopReason,
     WatchedChannel,
     WatchState,
 )
@@ -722,11 +723,38 @@ def test_연결_중을_오류로_단정하지_않는다(
     assert "기동되지 않았습니다" not in window.watch_detail_label.text()
     assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS_CONNECTING
 
-    # 끊긴 것은 여전히 오류로 표시한다.
+    # 백엔드가 없는 끊김은 여전히 오류로 표시한다.
     state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
     QApplication.processEvents()
     assert window.watch_badge.kind() == "error"
     assert window.dashboard.channels_empty.text() == EMPTY_CHANNELS_DISCONNECTED
+    window.close()
+
+
+def test_백엔드가_붙은_미로그인은_기동_실패로_말하지_않는다(
+    state: AppState, stub: StubEventSource, window_settings: WindowSettings
+) -> None:
+    window = make_window(state, window_settings)
+    QApplication.processEvents()
+    assert state.backend_attached is True
+    assert "기동되지 않았습니다" not in window.watch_detail_label.text()
+    assert window.watch_badge.kind() != "error"
+    window.close()
+
+
+def test_인증_만료는_배지에_원인을_남긴다(
+    state: AppState, stub: StubEventSource, window_settings: WindowSettings
+) -> None:
+    window = make_window(state, window_settings)
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(
+        ev.WatchStatusChanged(
+            state=WatchState.STOPPED, channel_count=1, stop_reason=StopReason.AUTH_EXPIRED
+        )
+    )
+    state.apply(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+    QApplication.processEvents()
+    assert "만료" in window.watch_detail_label.text()
     window.close()
 
 

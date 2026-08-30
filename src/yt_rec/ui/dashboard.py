@@ -26,6 +26,7 @@ from ..state.models import (
     ConnectionState,
     Recording,
     RecordingState,
+    StopReason,
     WatchedChannel,
     WatchState,
     WatchStatus,
@@ -354,7 +355,14 @@ class Dashboard(QWidget):
         if self._state.connection is ConnectionState.CONNECTING:
             self.channels_empty.setText(EMPTY_CHANNELS_CONNECTING)
         elif self._state.connection is not ConnectionState.CONNECTED:
-            self.channels_empty.setText(EMPTY_CHANNELS_DISCONNECTED)
+            if watch.stop_reason is StopReason.AUTH_EXPIRED:
+                self.channels_empty.setText(stop_reason_text(watch.stop_reason))
+            elif self._state.backend_attached:
+                self.channels_empty.setText(
+                    "계정이 연결되지 않았습니다. 계정에서 Google 로그인을 하세요."
+                )
+            else:
+                self.channels_empty.setText(EMPTY_CHANNELS_DISCONNECTED)
         elif watch.state is WatchState.STOPPED and watch.stop_reason is not None:
             self.channels_empty.setText(f"{stop_reason_text(watch.stop_reason)} — {EMPTY_CHANNELS}")
         else:

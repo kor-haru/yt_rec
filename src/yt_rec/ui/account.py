@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..state.models import ConnectionState
+from ..state.models import ConnectionState, StopReason, WatchState
 from ..state.store import AppState
-from .formatting import format_timestamp
+from .formatting import format_timestamp, stop_reason_text
 from .widgets import ElidedLabel
 
 __all__ = ["AccountPane", "AccountDialog"]
@@ -63,6 +63,7 @@ class AccountPane(QWidget):
 
         state.connection_changed.connect(self._refresh)
         state.account_changed.connect(self._refresh)
+        state.watch_changed.connect(self._refresh)
         self._refresh()
 
     def _connect(self) -> None:
@@ -83,17 +84,33 @@ class AccountPane(QWidget):
             self.disconnect_button.setEnabled(False)
             self.reload_button.setEnabled(False)
             return
+        watch = self._state.watch
         if connection is ConnectionState.CONNECTED:
             synced = format_timestamp(account.last_synced_at)
             label = account.label or "연결됨"
-            self.status_label.setText(f"{label}  ·  마지막 동기화 {synced}")
+            text = f"{label}  ·  마지막 동기화 {synced}"
+            if watch.state is WatchState.STOPPED and watch.stop_reason not in (
+                None,
+                StopReason.NO_CHANNELS,
+            ):
+                extra = stop_reason_text(watch.stop_reason)
+                if extra:
+                    text = f"{label}  ·  {extra}"
+            self.status_label.setText(text)
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
             self.reload_button.setEnabled(True)
             return
-        self.status_label.setText(
-            "계정이 연결되지 않았습니다. 연결을 누르면 시스템 브라우저에서 Google 로그인을 합니다."
-        )
+        if watch.stop_reason is StopReason.AUTH_EXPIRED:
+            self.status_label.setText("계정 인증이 만료되었습니다. 다시 연결하세요.")
+        elif watch.stop_reason is StopReason.NETWORK_DOWN:
+            self.status_label.setText(
+                "네트워크에 연결할 수 없습니다. 저장된 인증은 유지했습니다."
+            )
+        else:
+            self.status_label.setText(
+                "계정이 연결되지 않았습니다. 연결을 누르면 시스템 브라우저에서 Google 로그인을 합니다."
+            )
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
         self.reload_button.setEnabled(False)
