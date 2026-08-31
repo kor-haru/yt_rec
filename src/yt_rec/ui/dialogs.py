@@ -1,8 +1,6 @@
-"""대시보드에서 진입하는 화면들의 자리 표시자.
+"""대시보드에서 진입하는 아직 구현되지 않은 화면들의 자리 표시자.
 
-각 화면의 내용은 별도 이슈가 채운다. 이 이슈(#6)는 진입점이 실제로 열린다는
-것까지만 보장한다. 화면 담당자는 여기 있는 클래스를 실제 구현으로 바꾸고
-:data:`PLACEHOLDER_SCREENS` 등록만 갱신하면 된다.
+실제 구현을 마친 화면은 전용 모듈에서 가져온다.
 """
 
 from __future__ import annotations
@@ -17,10 +15,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..state.store import AppState
-from .widgets import set_muted
-
 from .account import AccountDialog
 from .channels import ChannelsDialog
+from .logs import LogDialog
+from .widgets import set_muted
 
 __all__ = [
     "PlaceholderDialog",
@@ -102,12 +100,5 @@ class SettingsDialog(PlaceholderDialog):
         # 설정은 모달로 제공하기로 정해져 있다(#11).
         self.setModal(True)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
-
-
-class LogDialog(PlaceholderDialog):
-    screen_title = "로그"
-    issue = 12
-    summary = "오류와 동작 이력을 앱 안에서 확인하고 복사하는 화면입니다."
-
 
 
