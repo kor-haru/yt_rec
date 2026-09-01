@@ -21,6 +21,314 @@
 - **QML을 사용하지 않는다.** Qt Widgets만 사용한다.
 - **GUI는 파일시스템이나 외부 프로세스를 직접 폴링하지 않는다.** 상태 변경은 백엔드가 시그널로 통지한다. 특히 녹화 중인 파일 크기를 `os.stat`으로 읽으면 안 된다 — Windows는 쓰기 핸들이 열린 파일의 크기를 디렉터리 엔트리에 즉시 반영하지 않아 실제보다 훨씬 작은 값이 표시된다.
 
+## 사용법
+
+### 시작하기 전에
+
+yt-rec는 아직 **설치 파일이 없는 초기 개발 버전**이다. 지금은 프로젝트 파일을
+받은 뒤 PowerShell에서 실행해야 한다. 이 안내는 Windows 10과 Windows 11을
+기준으로 한다.
+
+준비물은 다음과 같다.
+
+- 안정적인 인터넷 연결
+- 감시할 채널을 구독한 Google/YouTube 계정
+- 녹화 파일을 저장할 충분한 디스크 공간
+- Windows에 기본으로 포함된 PowerShell
+
+Google에서 내려받은 OAuth JSON 파일에는 비밀 값이 들어 있다. 이 파일과 환경
+변수 값을 Git, GitHub, 메신저, 이메일, 스크린샷으로 공유하지 않는다. yt-rec가
+로그인 뒤 받은 토큰은 Windows 자격 증명 관리자에 저장한다.
+
+### 1. 프로젝트 파일 받기
+
+개발 도구에 익숙하지 않다면 ZIP 파일을 받는 방법이 가장 쉽다.
+
+1. [main 브랜치 ZIP 파일](https://github.com/kor-haru/yt_rec/archive/refs/heads/main.zip)을 받는다.
+2. 받은 파일을 마우스 오른쪽 버튼으로 누르고 **모두 압축 풀기**를 선택한다.
+3. 압축을 푼 `yt_rec-main` 폴더를 연다.
+4. Windows 11은 폴더의 빈 곳을 마우스 오른쪽 버튼으로 누르고 **터미널에서 열기**를
+   선택한다. Windows 10은 파일 탐색기 주소 표시줄에 `powershell`을 입력하고
+   Enter를 누른다.
+
+PowerShell에 다음 명령을 입력했을 때 `True`가 나오면 올바른 폴더다.
+
+```powershell
+Test-Path .\pyproject.toml
+```
+
+Git을 쓰는 사람은 ZIP 대신 다음과 같이 받을 수 있다. `git` 명령이 없다면
+[Git for Windows](https://git-scm.com/download/win)를 먼저 설치한다.
+
+```powershell
+Set-Location "$HOME\Downloads"
+git clone https://github.com/kor-haru/yt_rec.git
+Set-Location .\yt_rec
+```
+
+이후의 모든 명령은 `pyproject.toml`이 있는 프로젝트 폴더에서 실행한다.
+
+### 2. uv 설치하기
+
+[uv](https://docs.astral.sh/uv/getting-started/installation/)는 yt-rec에 필요한
+Python과 프로그램 구성 요소를 준비하는 도구다. PowerShell에서 다음 명령을 한 번
+실행한다.
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+설치가 끝나면 PowerShell을 닫았다가 프로젝트 폴더에서 다시 연다. 다음 명령에
+버전 번호가 나오면 설치된 것이다.
+
+```powershell
+uv --version
+```
+
+설치 과정이 막히면 [uv 설치 프로그램 안내](https://docs.astral.sh/uv/configuration/installer/)를 확인한다.
+
+### 3. yt-rec 구성 요소 설치하기
+
+프로젝트 폴더에서 다음 명령을 실행한다.
+
+```powershell
+uv sync
+```
+
+처음 실행할 때는 Python과 여러 구성 요소를 내려받으므로 시간이 걸릴 수 있다.
+완료될 때까지 PowerShell 창을 닫지 않는다.
+
+### 4. 녹화 도구 설치하기
+
+실제 녹화에는 `yt-dlp`, `ffmpeg`, `ffprobe`라는 외부 프로그램이 필요하다.
+Python 패키지가 아니라 Windows 실행 파일이므로 따로 설치해야 한다.
+
+PowerShell에서 다음 두 명령을 차례로 실행한다. 설치 확인 창이 나타나면 내용을
+확인하고 진행한다.
+
+```powershell
+winget install --id yt-dlp.yt-dlp -e --source winget
+winget install --id Gyan.FFmpeg -e --source winget
+```
+
+PowerShell을 닫았다가 프로젝트 폴더에서 다시 연 뒤 세 명령을 확인한다.
+
+```powershell
+yt-dlp --version
+ffmpeg -version
+ffprobe -version
+```
+
+세 명령 모두 버전 정보를 보여야 한다. WinGet을 쓸 수 없다면
+[yt-dlp 공식 배포 파일](https://github.com/yt-dlp/yt-dlp#release-files)과
+[FFmpeg 공식 Windows 다운로드 안내](https://ffmpeg.org/download.html#build-windows)를 따른다.
+설치 위치와 `PATH`가 어렵다면
+[yt-dlp Windows FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#on-windows-how-should-i-set-up-ffmpeg-and-yt-dlp-where-should-i-put-the-exe-files)를
+참고한다. `ffprobe.exe`도 빠뜨리면 안 된다.
+
+### 5. 가짜 데이터로 화면 먼저 확인하기
+
+Google 로그인 전에 GUI가 정상적으로 열리는지 확인한다.
+
+```powershell
+uv run yt-rec --stub populated
+```
+
+`--stub`은 **가짜 데이터만 보여 주는 안전한 화면 시험 모드**다. Google에
+로그인하지 않고, 채널을 조회하지 않으며, 실제 녹화 파일도 만들지 않는다.
+샘플 채널·녹화·완료 항목이 보이면 기본 실행 환경이 준비된 것이다.
+
+창을 닫은 뒤 다음 명령으로 녹화 시작부터 완료와 오류까지 변하는 화면도 볼 수 있다.
+
+```powershell
+uv run yt-rec --stub scenario
+```
+
+### 6. Google Cloud에서 로그인 파일 준비하기
+
+yt-rec는 구독 채널과 현재 라이브를 읽기 위해 YouTube Data API를 사용한다. 다음
+설정은 처음 한 번만 준비하면 된다.
+메뉴 번역이나 위치는 바뀔 수 있다. 현재 영문 이름은 `Overview`, `Branding`,
+`Audience`, `Clients`, `Data Access`이며, 보이지 않으면 아래 공식 링크에서 연다.
+
+1. [Google Cloud Console](https://console.cloud.google.com/)에 로그인하고 새
+   프로젝트를 만들거나 사용할 프로젝트를 선택한다.
+2. [YouTube Data API v3 활성화 안내](https://developers.google.com/youtube/v3/guides/auth/installed-apps#enable-apis-for-your-project)에
+   따라 **YouTube Data API v3**를 찾아 **Enable(사용)**을 누른다.
+3. **Google Auth Platform**의 `Overview`에서 앱 이름과 사용자 지원 이메일을
+   입력한다. 개인 Gmail 계정은 사용자 유형으로 `External`을 고른다. 자세한 항목은
+   [Google Auth Platform 시작 안내](https://support.google.com/cloud/answer/15544987)를 참고한다.
+4. `Audience`가 `Testing`이면 로그인할 Google 계정을 **Test users**에 추가한다.
+   테스트 상태의 승인은 7일 뒤 만료될 수 있다. 관련 제한은
+   [Audience 안내](https://support.google.com/cloud/answer/15549945)를 참고한다.
+5. `Data Access`에는 다음 읽기 전용 범위만 추가한다. 다른 YouTube 권한은 이 앱에
+   필요하지 않다. [Data Access 안내](https://support.google.com/cloud/answer/15549135)
+   에서 범위 추가 방법을 볼 수 있다.
+
+   ```text
+   https://www.googleapis.com/auth/youtube.readonly
+   ```
+
+6. `Clients`에서 **Create client → Desktop app**을 선택한다. 이름을 붙여 만든 뒤
+   즉시 JSON 파일을 내려받는다. 자세한 순서는
+   [데스크톱 OAuth 클라이언트 만들기](https://developers.google.com/workspace/guides/create-credentials#desktop-app)를
+   따른다.
+
+클라이언트 비밀 값과 전체 JSON은 생성할 때만 내려받을 수 있다. 잃어버렸다면 새
+클라이언트를 만든다. 관리 방법은
+[Google의 클라이언트 비밀 값 안내](https://support.google.com/cloud/answer/15549257#client-secret-handling-and-visibility)와
+[OAuth 보안 정책](https://developers.google.com/identity/protocols/oauth2/policies)을
+참고한다.
+
+### 7. OAuth JSON 파일 놓기
+
+PowerShell에서 다음 명령을 실행하면 yt-rec의 사용자 설정 폴더가 열리고, 폴더가
+없으면 먼저 만들어진다.
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\yt-rec" | Out-Null
+explorer "$env:APPDATA\yt-rec"
+```
+
+파일 탐색기에서 파일 이름을 바꾸기 전에 확장명 표시를 켠다. Windows 11은
+**보기(View) → 표시(Show) → 파일 이름 확장명(File name extensions)**, Windows
+10은 **보기(View) 탭 → 파일 이름 확장명(File name extensions)**을 선택한다.
+그래야 이름이 `client_secrets.json.json`으로 잘못 바뀌는 것을 볼 수 있다.
+
+Google에서 받은 JSON 파일을 열린 폴더로 옮기고 이름을 정확히
+`client_secrets.json`으로 바꾼다. 최종 위치는 다음과 같아야 한다.
+
+```text
+%APPDATA%\yt-rec\client_secrets.json
+```
+
+PowerShell에서 위치와 이름을 확인한다.
+
+```powershell
+Test-Path "$env:APPDATA\yt-rec\client_secrets.json"
+```
+
+결과가 `True`여야 한다.
+
+파일을 다른 안전한 폴더에 보관하려면, 대신 그 파일 경로를 현재 PowerShell에
+지정할 수 있다. 아래 경로는 실제 JSON 파일 경로로 바꾼다.
+
+```powershell
+$env:YT_REC_GOOGLE_CLIENT_SECRETS = "D:\안전한 폴더\다운로드한 파일.json"
+```
+
+이 환경 변수는 현재 PowerShell을 닫으면 사라지므로 다음 실행 때 다시 지정해야
+한다. 비밀 값이 유출됐다면 Google Cloud에서 기존 값을 폐기하고 새 값으로 교체한다.
+
+### 8. 실제 모드로 실행하기
+
+프로젝트 폴더에서 다음 명령을 실행한다.
+
+```powershell
+uv run yt-rec
+```
+
+`--stub`이 없으므로 이번에는 실제 Google 로그인과 자동 녹화 기능이 동작한다.
+PowerShell 창은 앱이 실행되는 동안 함께 열어 둔다.
+
+### 9. 계정과 자동 녹화 설정하기
+
+1. 창 오른쪽 위의 **계정**을 누른 뒤 **연결**을 누른다.
+2. 시스템 기본 브라우저가 열리면 사용할 Google 계정을 고른다. 프로젝트가
+   `Testing` 상태이면 테스트 또는 미확인 앱 경고가 나타날 수 있다. 계속하기 전에
+   방금 만든 앱 이름이 맞고 요청 권한이 YouTube 읽기 전용
+   (`youtube.readonly`)뿐인지 확인한다. 앱 이름이 다르거나 다른 권한도 요구하면
+   진행하지 말고 창을 닫는다. 확인한 뒤 승인하고 앱으로 돌아온다.
+3. 메인 화면에서 **채널 관리**를 누른다.
+4. 자동 녹화할 구독 채널을 체크한다. 체크할 때마다 바로 저장되므로 별도 저장
+   버튼은 없다.
+5. 창 위쪽 상태가 **감시 중 N채널**로 바뀌었는지 확인한다. 별도의 감시 시작
+   버튼은 없다.
+6. 선택한 채널에서 라이브가 발견되면 yt-rec가 자동으로 방송 시작 지점부터 받으며
+   **녹화 중**에 진행 상황을 표시한다.
+7. 오류 수가 늘거나 동작을 자세히 보고 싶으면 오른쪽 위의 **로그**를 연다.
+   수준 필터, 메시지 검색, 선택한 행 복사를 사용할 수 있다.
+8. 앱을 끝낼 때는 메인 창을 닫는다. 진행 중 녹화가 있으면 받은 부분을 마무리하는
+   동안 시간이 걸릴 수 있으므로 PowerShell을 강제로 닫지 않는다.
+
+### 10. 녹화 파일과 복구 결과 확인하기
+
+기본 저장 위치는 프로젝트 폴더 아래의 `recordings` 폴더다.
+기본 화질 상한은 1080p다.
+
+```powershell
+explorer .\recordings
+```
+
+결과 표시는 다음 의미다.
+
+- **정상**: 재생 검증을 통과한 최종 녹화 파일이다.
+- **부분 복구**: 재생 가능한 파일은 만들었지만 일부 방송 구간이 빠졌을 수 있다.
+- **실패**: 다운로드, 병합 또는 검증을 끝내지 못했다. 복구 가능한 중간 파일은
+  `recordings\.yt-rec` 아래에 남겨 두며, 앱을 다음에 실행할 때 자동 복구를
+  시도한다. 이 폴더를 임의로 지우지 않는다.
+
+긴 방송은 디스크를 빠르게 채운다. 녹화 전후로 `recordings` 폴더가 있는 드라이브의
+남은 공간을 확인한다.
+
+### 11. 자주 발생하는 문제
+
+#### `uv`, `yt-dlp`, `ffmpeg`, `ffprobe` 명령을 찾을 수 없음
+
+PowerShell을 모두 닫았다가 다시 연다. 그래도 안 되면 2단계와 4단계의 설치
+명령을 다시 실행하고 각 `--version` 명령부터 확인한다.
+
+#### GUI가 열리지 않음
+
+현재 폴더에서 `Test-Path .\pyproject.toml`이 `True`인지 확인한 뒤 다음 명령을
+차례로 실행한다.
+
+```powershell
+uv sync
+uv run yt-rec --help
+uv run yt-rec --stub populated
+```
+
+`애플리케이션 제어 정책에서 이 파일을 차단했습니다`라는 문구가 나오면 Windows나
+회사·학교의 보안 정책이 uv의 Python 실행을 막은 것이다. 보안 기능을 임의로 끄지
+말고 PC 관리자에게 허용 방법을 문의한다.
+
+#### Google 연결 뒤 다시 `연결 안 됨`으로 돌아옴
+
+- `%APPDATA%\yt-rec\client_secrets.json`의 이름과 위치를 확인한다.
+- YouTube Data API v3 활성화와 `Audience`의 Test users를 확인한다.
+- 테스트 승인이 만료됐다면 **계정 → 연결**로 다시 로그인한다.
+- 자세한 원인은 **로그**에서 확인한다. 비밀 값은 공유하지 않는다.
+
+#### 브라우저 로그인이 끝나지 않음
+
+기본 브라우저와 Windows 방화벽이 로컬 주소 `127.0.0.1` 연결을 막지 않는지
+확인한다. 로그인은 3분 안에 끝내야 한다. 시간이 지났다면 앱에서 **연결**을 다시
+누른다.
+
+#### 채널이 보이지 않거나 라이브 녹화가 시작되지 않음
+
+**계정**에서 연결 상태를 확인하고 **채널 관리 → 다시 불러오기**를 누른다. 자동
+녹화할 채널이 체크되어 있어야 위쪽에 **감시 중 N채널**이 표시된다. API 하루
+할당량을 다 썼다면 로그에 quota 오류가 나타나며, 할당량이 다시 생길 때까지
+기다려야 한다.
+라이브인데도 시작하지 않으면 **로그**에서 네트워크, `yt-dlp`, `ffmpeg` 오류를
+확인한다.
+
+### 아직 사용할 수 없는 기능
+
+버튼은 보이지만 **설정**과 **보관함** 화면은 아직 자리표시자다. 고장 난 것이
+아니며 각각 [이슈 #11](https://github.com/kor-haru/yt_rec/issues/11)과
+[이슈 #10](https://github.com/kor-haru/yt_rec/issues/10)에서 구현할 예정이다.
+
+현재 로그 화면은 앱 안의 조회·필터·검색·복사를 지원한다. 전체 로그 파일,
+파일 회전과 보관 기간, 민감값 자동 가림, 트레이 알림은
+[이슈 #12](https://github.com/kor-haru/yt_rec/issues/12)의 후속 작업이다. 이 기능이
+완성되기 전에는 로그를 공유하기 전에 비밀 값이 없는지 직접 확인한다.
+
+독립 실행형 설치 파일은 [이슈 #5](https://github.com/kor-haru/yt_rec/issues/5)의
+후속 작업이다. 그전까지는 이 문서처럼 소스에서 실행해야 한다.
+
 ## 녹화 엔진
 
 `yt_rec.recording` 이 video id 하나를 방송 시작 지점부터 녹화해 재생 가능한 단일
@@ -93,31 +401,12 @@ uv run pytest
 실제 라이브가 있어야 확인할 수 있는 항목은 [수동 검증 절차](docs/recording-manual-checks.md)에
 적어 두었다.
 
-### 실행
+### GUI 개발 참고
 
-```bash
-uv run yt-rec                        # 실제 백엔드. 미연결이면 상단 배지에 `연결 안 됨`
-uv run yt-rec --stub empty           # 빈 상태 더미
-uv run yt-rec --stub populated       # 채널·녹화·완료 더미
-uv run yt-rec --stub scenario        # 시작 → 진행 → 완료 → 오류 재생
-uv run yt-rec --stub flood           # 초당 100건 진행 이벤트 부하
-```
-
-`uv run python -m yt_rec` 로도 같은 진입점이 뜬다.
-
-Google 로그인에는 OAuth 클라이언트 ID/시크릿이 필요하다. 저장소에 커밋하지 않고
-환경 변수 또는 사용자 설정 경로에서 읽는다.
-
-```bash
-# PowerShell
-$env:YT_REC_GOOGLE_CLIENT_ID = "....apps.googleusercontent.com"
-$env:YT_REC_GOOGLE_CLIENT_SECRET = "..."
-# 또는 Google이 내려준 JSON
-$env:YT_REC_GOOGLE_CLIENT_SECRETS = "$env:APPDATA\yt-rec\client_secrets.json"
-```
-
-refresh token 은 Windows Credential Manager 에만 둔다. 녹화 파일 기본 위치는
-`recordings/`, 화질 상한은 1080p 다.
+GUI 실행과 Google OAuth 준비는 위의 [사용법](#사용법)을 기준으로 한다.
+`uv run python -m yt_rec`도 `uv run yt-rec`와 같은 진입점이다. 빈 화면은
+`uv run yt-rec --stub empty`, 초당 100건 진행 이벤트 부하는
+`uv run yt-rec --stub flood`로 확인한다.
 
 ### 화면 코드가 지켜야 할 계약
 
