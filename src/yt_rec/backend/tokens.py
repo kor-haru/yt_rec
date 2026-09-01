@@ -7,6 +7,7 @@ OS 분기는 :func:`default_token_store` 한 곳에만 있다.
 from __future__ import annotations
 
 import ctypes
+import subprocess
 import sys
 from ctypes import wintypes
 from typing import Protocol
@@ -16,12 +17,17 @@ __all__ = [
     "TokenStoreError",
     "MemoryTokenStore",
     "WindowsCredentialStore",
+    "MacOSKeychainStore",
     "default_token_store",
     "CREDENTIAL_TARGET",
+    "KEYCHAIN_ACCOUNT",
 ]
 
 CREDENTIAL_TARGET = "yt-rec/google-oauth"
-"""Windows Credential Manager 에 쓰는 대상 이름."""
+"""OS 보안 저장소에 쓰는 대상 이름. Windows 는 Credential Manager, macOS 는 Keychain service."""
+
+KEYCHAIN_ACCOUNT = "yt-rec"
+"""macOS Keychain generic password 의 account 필드."""
 
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
@@ -79,13 +85,60 @@ class WindowsCredentialStore:
         _cred_delete(self.target)
 
 
+class MacOSKeychainStore:
+    """macOS Keychain generic password. ``security`` 명령으로만 읽고 쓴다."""
+
+    def __init__(
+        self,
+        service: str = CREDENTIAL_TARGET,
+        account: str = KEYCHAIN_ACCOUNT,
+    ) -> None:
+        if sys.platform != "darwin":
+            raise TokenStoreError("Keychain 은 macOS 에서만 쓴다")
+        self.service = service
+        self.account = account
+
+    def load(self) -> str | None:
+        proc = _security(
+            ["find-generic-password", "-s", self.service, "-a", self.account, "-w"]
+        )
+        if proc.returncode != 0:
+            if _security_not_found(proc):
+                return None
+            raise TokenStoreError(f"Keychain 을 읽지 못했다: {proc.returncode}")
+        return (proc.stdout or "").rstrip("\r\n")
+
+    def save(self, blob: str) -> None:
+        proc = _security(
+            [
+                "add-generic-password",
+                "-U",
+                "-s",
+                self.service,
+                "-a",
+                self.account,
+                "-w",
+                blob,
+            ]
+        )
+        if proc.returncode != 0:
+            raise TokenStoreError(f"Keychain 에 쓰지 못했다: {proc.returncode}")
+
+    def clear(self) -> None:
+        proc = _security(
+            ["delete-generic-password", "-s", self.service, "-a", self.account]
+        )
+        if proc.returncode != 0 and not _security_not_found(proc):
+            raise TokenStoreError(f"Keychain 에서 지우지 못했다: {proc.returncode}")
+
+
 class _UnsupportedTokenStore:
     def load(self) -> str | None:
         return None
 
     def save(self, blob: str) -> None:
         raise TokenStoreError(
-            "이 빌드는 Windows Credential Manager 만 지원한다. "
+            "이 빌드는 Windows Credential Manager 와 macOS Keychain 만 지원한다. "
             "refresh token 을 평문 파일에 저장하지 않는다."
         )
 
@@ -97,7 +150,22 @@ def default_token_store() -> TokenStore:
     """현재 OS 에 맞는 저장소. 호출부가 OS 를 다시 보지 않게 한다."""
     if sys.platform == "win32":
         return WindowsCredentialStore()
+    if sys.platform == "darwin":
+        return MacOSKeychainStore()
     return _UnsupportedTokenStore()
+
+
+def _security(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["security", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _security_not_found(proc: subprocess.CompletedProcess[str]) -> bool:
+    text = f"{proc.stderr or ''}{proc.stdout or ''}".lower()
+    return proc.returncode == 44 or "could not be found" in text or "not found" in text
 
 
 class _CREDENTIAL(ctypes.Structure):

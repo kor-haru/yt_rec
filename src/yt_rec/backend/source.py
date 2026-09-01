@@ -127,7 +127,7 @@ def create_backend_source(
     background: bool = True,
     poll_interval: float = WATCH_INTERVAL_SECONDS,
 ) -> BackendSource:
-    """생산용 소스. 토큰은 Credential Manager, 출력은 recordings/1080p."""
+    """생산용 소스. 토큰은 OS 보안 저장소, 출력은 recordings/1080p."""
 
     box: dict[str, BackendSource] = {}
     seen = FileSeenStore()

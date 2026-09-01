@@ -26,19 +26,21 @@
 ### 시작하기 전에
 
 yt-rec는 아직 **설치 파일이 없는 초기 개발 버전**이다. 지금은 프로젝트 파일을
-받은 뒤 PowerShell에서 실행해야 한다. 이 안내는 Windows 10과 Windows 11을
-기준으로 한다.
+받은 뒤 터미널에서 실행해야 한다. 이 안내는 **Windows 10/11**과 **macOS**를
+기준으로 한다. Linux는 소스 실행은 가능하지만 로그인 토큰의 OS 보안 저장소는
+아직 [이슈 #13](https://github.com/kor-haru/yt_rec/issues/13)이다.
 
 준비물은 다음과 같다.
 
 - 안정적인 인터넷 연결
 - 감시할 채널을 구독한 Google/YouTube 계정
 - 녹화 파일을 저장할 충분한 디스크 공간
-- Windows에 기본으로 포함된 PowerShell
+- Windows: 기본으로 포함된 PowerShell. macOS: 기본으로 포함된 터미널(zsh)
 
 Google에서 내려받은 OAuth JSON 파일에는 비밀 값이 들어 있다. 이 파일과 환경
 변수 값을 Git, GitHub, 메신저, 이메일, 스크린샷으로 공유하지 않는다. yt-rec가
-로그인 뒤 받은 토큰은 Windows 자격 증명 관리자에 저장한다.
+로그인 뒤 받은 토큰은 Windows 자격 증명 관리자 또는 macOS Keychain에 저장한다.
+평문 파일로는 남기지 않는다.
 
 ### 1. 프로젝트 파일 받기
 
@@ -47,23 +49,41 @@ Google에서 내려받은 OAuth JSON 파일에는 비밀 값이 들어 있다. �
 1. [main 브랜치 ZIP 파일](https://github.com/kor-haru/yt_rec/archive/refs/heads/main.zip)을 받는다.
 2. 받은 파일을 마우스 오른쪽 버튼으로 누르고 **모두 압축 풀기**를 선택한다.
 3. 압축을 푼 `yt_rec-main` 폴더를 연다.
-4. Windows 11은 폴더의 빈 곳을 마우스 오른쪽 버튼으로 누르고 **터미널에서 열기**를
-   선택한다. Windows 10은 파일 탐색기 주소 표시줄에 `powershell`을 입력하고
-   Enter를 누른다.
+4. 그 폴더에서 터미널을 연다.
 
-PowerShell에 다음 명령을 입력했을 때 `True`가 나오면 올바른 폴더다.
+   - **Windows 11:** 폴더의 빈 곳을 마우스 오른쪽 버튼으로 누르고 **터미널에서 열기**.
+     Windows 10은 파일 탐색기 주소 표시줄에 `powershell`을 입력하고 Enter.
+   - **macOS:** `yt_rec-main` 폴더를 마우스 오른쪽 버튼으로 누르고 **폴더에서 새로운
+     터미널 시작**. 또는 터미널에서 `cd`로 그 폴더로 이동한다.
+
+폴더가 맞는지 확인한다.
 
 ```powershell
+# Windows (PowerShell)
 Test-Path .\pyproject.toml
 ```
 
-Git을 쓰는 사람은 ZIP 대신 다음과 같이 받을 수 있다. `git` 명령이 없다면
-[Git for Windows](https://git-scm.com/download/win)를 먼저 설치한다.
+```bash
+# macOS
+test -f pyproject.toml && echo ok
+```
+
+`True` 또는 `ok`가 나오면 올바른 폴더다.
+
+Git을 쓰는 사람은 ZIP 대신 다음과 같이 받을 수 있다.
 
 ```powershell
+# Windows — git 이 없으면 Git for Windows (https://git-scm.com/download/win)
 Set-Location "$HOME\Downloads"
 git clone https://github.com/kor-haru/yt_rec.git
 Set-Location .\yt_rec
+```
+
+```bash
+# macOS — git 이 없으면 xcode-select --install 또는 https://git-scm.com/download/mac
+cd ~/Downloads
+git clone https://github.com/kor-haru/yt_rec.git
+cd yt_rec
 ```
 
 이후의 모든 명령은 `pyproject.toml`이 있는 프로젝트 폴더에서 실행한다.
@@ -71,17 +91,23 @@ Set-Location .\yt_rec
 ### 2. uv 설치하기
 
 [uv](https://docs.astral.sh/uv/getting-started/installation/)는 yt-rec에 필요한
-Python과 프로그램 구성 요소를 준비하는 도구다. PowerShell에서 다음 명령을 한 번
-실행한다.
+Python과 프로그램 구성 요소를 준비하는 도구다. 다음 명령을 한 번 실행한다.
 
 ```powershell
+# Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-설치가 끝나면 PowerShell을 닫았다가 프로젝트 폴더에서 다시 연다. 다음 명령에
-버전 번호가 나오면 설치된 것이다.
+```bash
+# macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-```powershell
+설치가 끝나면 터미널을 닫았다가 프로젝트 폴더에서 다시 연다. macOS에서 `uv`를
+찾을 수 없으면 같은 터미널에서 `source "$HOME/.local/bin/env"`를 한 뒤
+`uv --version`을 다시 실행한다. 다음 명령에 버전 번호가 나오면 설치된 것이다.
+
+```text
 uv --version
 ```
 
@@ -91,46 +117,57 @@ uv --version
 
 프로젝트 폴더에서 다음 명령을 실행한다.
 
-```powershell
+```text
 uv sync
 ```
 
 처음 실행할 때는 Python과 여러 구성 요소를 내려받으므로 시간이 걸릴 수 있다.
-완료될 때까지 PowerShell 창을 닫지 않는다.
+완료될 때까지 터미널 창을 닫지 않는다.
 
 ### 4. 녹화 도구 설치하기
 
 실제 녹화에는 `yt-dlp`, `ffmpeg`, `ffprobe`라는 외부 프로그램이 필요하다.
-Python 패키지가 아니라 Windows 실행 파일이므로 따로 설치해야 한다.
+Python 패키지가 아니므로 따로 설치해야 한다.
 
-PowerShell에서 다음 두 명령을 차례로 실행한다. 설치 확인 창이 나타나면 내용을
-확인하고 진행한다.
+**Windows** — PowerShell에서 다음 두 명령을 차례로 실행한다. 설치 확인 창이
+나타나면 내용을 확인하고 진행한다.
 
 ```powershell
 winget install --id yt-dlp.yt-dlp -e --source winget
 winget install --id Gyan.FFmpeg -e --source winget
 ```
 
-PowerShell을 닫았다가 프로젝트 폴더에서 다시 연 뒤 세 명령을 확인한다.
-
-```powershell
-yt-dlp --version
-ffmpeg -version
-ffprobe -version
-```
-
-세 명령 모두 버전 정보를 보여야 한다. WinGet을 쓸 수 없다면
+WinGet을 쓸 수 없다면
 [yt-dlp 공식 배포 파일](https://github.com/yt-dlp/yt-dlp#release-files)과
 [FFmpeg 공식 Windows 다운로드 안내](https://ffmpeg.org/download.html#build-windows)를 따른다.
 설치 위치와 `PATH`가 어렵다면
 [yt-dlp Windows FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#on-windows-how-should-i-set-up-ffmpeg-and-yt-dlp-where-should-i-put-the-exe-files)를
 참고한다. `ffprobe.exe`도 빠뜨리면 안 된다.
 
+**macOS** — [Homebrew](https://brew.sh/)가 없으면 그 사이트 안내대로 먼저 설치한
+뒤 다음을 실행한다.
+
+```bash
+brew install yt-dlp ffmpeg
+```
+
+터미널을 닫았다가 프로젝트 폴더에서 다시 연 뒤 세 명령을 확인한다.
+
+```text
+yt-dlp --version
+ffmpeg -version
+ffprobe -version
+```
+
+세 명령 모두 버전 정보를 보여야 한다. PATH에 없다면 환경 변수
+`YT_REC_YTDLP`, `YT_REC_FFMPEG`, `YT_REC_FFPROBE`로 실행 파일 전체 경로를
+지정할 수 있다.
+
 ### 5. 가짜 데이터로 화면 먼저 확인하기
 
 Google 로그인 전에 GUI가 정상적으로 열리는지 확인한다.
 
-```powershell
+```text
 uv run yt-rec --stub populated
 ```
 
@@ -140,7 +177,7 @@ uv run yt-rec --stub populated
 
 창을 닫은 뒤 다음 명령으로 녹화 시작부터 완료와 오류까지 변하는 화면도 볼 수 있다.
 
-```powershell
+```text
 uv run yt-rec --stub scenario
 ```
 
@@ -182,54 +219,77 @@ yt-rec는 구독 채널과 현재 라이브를 읽기 위해 YouTube Data API를
 
 ### 7. OAuth JSON 파일 놓기
 
-PowerShell에서 다음 명령을 실행하면 yt-rec의 사용자 설정 폴더가 열리고, 폴더가
-없으면 먼저 만들어진다.
+사용자 설정 폴더를 만들고 연다.
 
 ```powershell
+# Windows
 New-Item -ItemType Directory -Force "$env:APPDATA\yt-rec" | Out-Null
 explorer "$env:APPDATA\yt-rec"
 ```
 
-파일 탐색기에서 파일 이름을 바꾸기 전에 확장명 표시를 켠다. Windows 11은
-**보기(View) → 표시(Show) → 파일 이름 확장명(File name extensions)**, Windows
-10은 **보기(View) 탭 → 파일 이름 확장명(File name extensions)**을 선택한다.
-그래야 이름이 `client_secrets.json.json`으로 잘못 바뀌는 것을 볼 수 있다.
-
-Google에서 받은 JSON 파일을 열린 폴더로 옮기고 이름을 정확히
-`client_secrets.json`으로 바꾼다. 최종 위치는 다음과 같아야 한다.
-
-```text
-%APPDATA%\yt-rec\client_secrets.json
+```bash
+# macOS
+mkdir -p "$HOME/Library/Application Support/yt-rec"
+open "$HOME/Library/Application Support/yt-rec"
 ```
 
-PowerShell에서 위치와 이름을 확인한다.
+Google에서 받은 JSON 파일을 열린 폴더로 옮기고 이름을 정확히
+`client_secrets.json`으로 바꾼다.
+
+**Windows**에서는 파일 탐색기에서 확장명 표시를 켠다. Windows 11은
+**보기(View) → 표시(Show) → 파일 이름 확장명**, Windows 10은 **보기 탭 → 파일
+이름 확장명**. 그래야 이름이 `client_secrets.json.json`으로 잘못 바뀌는 것을
+볼 수 있다.
+
+**macOS**에서는 Finder에서 파일을 선택하고 이름 바꾸기를 할 때 `.json`이 두 번
+붙지 않았는지 확인한다.
+
+최종 위치는 다음과 같아야 한다.
+
+```text
+Windows:  %APPDATA%\yt-rec\client_secrets.json
+macOS:    ~/Library/Application Support/yt-rec/client_secrets.json
+```
+
+위치와 이름을 확인한다.
 
 ```powershell
+# Windows
 Test-Path "$env:APPDATA\yt-rec\client_secrets.json"
 ```
 
-결과가 `True`여야 한다.
+```bash
+# macOS
+test -f "$HOME/Library/Application Support/yt-rec/client_secrets.json" && echo ok
+```
 
-파일을 다른 안전한 폴더에 보관하려면, 대신 그 파일 경로를 현재 PowerShell에
-지정할 수 있다. 아래 경로는 실제 JSON 파일 경로로 바꾼다.
+결과가 `True` 또는 `ok`여야 한다.
+
+파일을 다른 안전한 폴더에 보관하려면, 대신 그 파일 경로를 현재 터미널에 지정할
+수 있다. 아래 경로는 실제 JSON 파일 경로로 바꾼다.
 
 ```powershell
+# Windows — 이 창을 닫으면 사라진다
 $env:YT_REC_GOOGLE_CLIENT_SECRETS = "D:\안전한 폴더\다운로드한 파일.json"
 ```
 
-이 환경 변수는 현재 PowerShell을 닫으면 사라지므로 다음 실행 때 다시 지정해야
-한다. 비밀 값이 유출됐다면 Google Cloud에서 기존 값을 폐기하고 새 값으로 교체한다.
+```bash
+# macOS — 이 창을 닫으면 사라진다
+export YT_REC_GOOGLE_CLIENT_SECRETS="$HOME/안전한 폴더/다운로드한 파일.json"
+```
+
+비밀 값이 유출됐다면 Google Cloud에서 기존 값을 폐기하고 새 값으로 교체한다.
 
 ### 8. 실제 모드로 실행하기
 
 프로젝트 폴더에서 다음 명령을 실행한다.
 
-```powershell
+```text
 uv run yt-rec
 ```
 
 `--stub`이 없으므로 이번에는 실제 Google 로그인과 자동 녹화 기능이 동작한다.
-PowerShell 창은 앱이 실행되는 동안 함께 열어 둔다.
+터미널 창은 앱이 실행되는 동안 함께 열어 둔다.
 
 ### 9. 계정과 자동 녹화 설정하기
 
@@ -249,7 +309,7 @@ PowerShell 창은 앱이 실행되는 동안 함께 열어 둔다.
 7. 오류 수가 늘거나 동작을 자세히 보고 싶으면 오른쪽 위의 **로그**를 연다.
    수준 필터, 메시지 검색, 선택한 행 복사를 사용할 수 있다.
 8. 앱을 끝낼 때는 메인 창을 닫는다. 진행 중 녹화가 있으면 받은 부분을 마무리하는
-   동안 시간이 걸릴 수 있으므로 PowerShell을 강제로 닫지 않는다.
+   동안 시간이 걸릴 수 있으므로 터미널을 강제로 닫지 않는다.
 
 ### 10. 녹화 파일과 복구 결과 확인하기
 
@@ -257,7 +317,13 @@ PowerShell 창은 앱이 실행되는 동안 함께 열어 둔다.
 기본 화질 상한은 1080p다.
 
 ```powershell
+# Windows
 explorer .\recordings
+```
+
+```bash
+# macOS
+open recordings
 ```
 
 결과 표시는 다음 의미다.
@@ -275,36 +341,38 @@ explorer .\recordings
 
 #### `uv`, `yt-dlp`, `ffmpeg`, `ffprobe` 명령을 찾을 수 없음
 
-PowerShell을 모두 닫았다가 다시 연다. 그래도 안 되면 2단계와 4단계의 설치
-명령을 다시 실행하고 각 `--version` 명령부터 확인한다.
+터미널을 모두 닫았다가 다시 연다. 그래도 안 되면 2단계와 4단계의 설치 명령을
+다시 실행하고 각 `--version` 명령부터 확인한다. macOS에서 `uv`만 없다면
+`source "$HOME/.local/bin/env"` 또는 Homebrew로 설치한 경우 `brew --prefix`가
+PATH에 있는지 확인한다.
 
 #### GUI가 열리지 않음
 
-현재 폴더에서 `Test-Path .\pyproject.toml`이 `True`인지 확인한 뒤 다음 명령을
-차례로 실행한다.
+현재 폴더에 `pyproject.toml`이 있는지 확인한 뒤 다음 명령을 차례로 실행한다.
 
-```powershell
+```text
 uv sync
 uv run yt-rec --help
 uv run yt-rec --stub populated
 ```
 
-`애플리케이션 제어 정책에서 이 파일을 차단했습니다`라는 문구가 나오면 Windows나
-회사·학교의 보안 정책이 uv의 Python 실행을 막은 것이다. 보안 기능을 임의로 끄지
-말고 PC 관리자에게 허용 방법을 문의한다.
+Windows에서 `애플리케이션 제어 정책에서 이 파일을 차단했습니다`라는 문구가
+나오면 Windows나 회사·학교의 보안 정책이 uv의 Python 실행을 막은 것이다. 보안
+기능을 임의로 끄지 말고 PC 관리자에게 허용 방법을 문의한다.
 
 #### Google 연결 뒤 다시 `연결 안 됨`으로 돌아옴
 
-- `%APPDATA%\yt-rec\client_secrets.json`의 이름과 위치를 확인한다.
+- Windows: `%APPDATA%\yt-rec\client_secrets.json`
+- macOS: `~/Library/Application Support/yt-rec/client_secrets.json`
 - YouTube Data API v3 활성화와 `Audience`의 Test users를 확인한다.
 - 테스트 승인이 만료됐다면 **계정 → 연결**로 다시 로그인한다.
 - 자세한 원인은 **로그**에서 확인한다. 비밀 값은 공유하지 않는다.
 
 #### 브라우저 로그인이 끝나지 않음
 
-기본 브라우저와 Windows 방화벽이 로컬 주소 `127.0.0.1` 연결을 막지 않는지
-확인한다. 로그인은 3분 안에 끝내야 한다. 시간이 지났다면 앱에서 **연결**을 다시
-누른다.
+기본 브라우저가 로컬 주소 `127.0.0.1` 연결을 막지 않는지 확인한다. Windows는
+방화벽, macOS는 **시스템 설정 → 네트워크 → 방화벽**에서 확인한다. 로그인은
+3분 안에 끝내야 한다. 시간이 지났다면 앱에서 **연결**을 다시 누른다.
 
 #### 채널이 보이지 않거나 라이브 녹화가 시작되지 않음
 
@@ -338,17 +406,17 @@ uv run yt-rec --stub populated
 from pathlib import Path
 from yt_rec.recording import RecordingEngine, RecordingOptions
 
-engine = RecordingEngine(RecordingOptions(output_dir=Path("D:/녹화"), max_height=1080))
+engine = RecordingEngine(RecordingOptions(output_dir=Path("recordings"), max_height=1080))
 result = engine.record("VIDEO_ID")      # 방송이 끝날 때까지 블로킹
 print(result.status, result.output_path)
 ```
 
-손으로 돌려 볼 때는 딸린 명령줄을 쓴다.
+손으로 돌려 볼 때는 딸린 명령줄을 쓴다. `-o` 경로는 쓰는 컴퓨터에 맞게 바꾼다.
 
 ```bash
-uv run python -m yt_rec.recording record <VIDEO_ID> -o "D:/녹화" --max-height 1080
-uv run python -m yt_rec.recording verify "D:/녹화/2026-08-11_제목.mp4"
-uv run python -m yt_rec.recording recover -o "D:/녹화"
+uv run python -m yt_rec.recording record <VIDEO_ID> -o recordings --max-height 1080
+uv run python -m yt_rec.recording verify "recordings/2026-08-11_제목.mp4"
+uv run python -m yt_rec.recording recover -o recordings
 ```
 
 동작에서 중요한 결정 세 가지는 실제 라이브 녹화에서 겪은 실패에서 나왔다.
