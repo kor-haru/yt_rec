@@ -25,6 +25,7 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -425,6 +426,10 @@ class RecordingEngine:
 
         프로세스가 죽거나 강제 종료된 뒤 다시 켰을 때 부르면 된다.
 
+        이미 검증까지 끝난 녹화는 결과 파일을 다시 만들지 않는다. 종료 상태를
+        저장한 뒤 정리 직전에 죽었으면 남은 중간 파일만 치운다. 이 정리는
+        ffmpeg/yt-dlp 없이 한다.
+
         **지금 녹화 중인 work 디렉터리는 건드리지 않는다.** 앱을 두 개 띄우거나 녹화
         도중에 이 함수를 부르면, 살아 있는 중간 파일을 병합해 엉뚱한 결과를 만들고
         상태 파일을 덮어쓴다. Windows 는 열린 파일 unlink 가 실패해 피해가 제한되지만
@@ -435,15 +440,17 @@ class RecordingEngine:
         if not root.is_dir():
             return []
 
-        # 도구가 없으면 **아무것도 하지 않는다.** 한 건이라도 손대면 그 녹화의 종료
-        # 상태가 저장되어, ffmpeg 를 다시 설치해도 다시 복구되지 않는다.
+        # 끝나지 않은 녹화는 도구 없이 마무리하지 않는다. 한 건이라도 종료 상태를
+        # 못 박으면 ffmpeg 를 다시 설치해도 복구가 그 녹화를 영구히 건너뛴다.
+        # 이미 완료된 녹화의 찌꺼기 정리는 도구가 필요 없으므로 목록은 본다.
+        toolchain_error: BinaryNotFoundError | None = None
         try:
             _ = self.toolchain
         except BinaryNotFoundError as exc:
-            self._emit(LogLine(video_id="", text=f"[yt-rec] 복구를 미룬다: {exc}"))
-            return []
+            toolchain_error = exc
 
         results: list[RecordingResult] = []
+        postpone = False
         for work_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             # 한 건이 실패해도 나머지 복구는 계속한다.
             try:
@@ -458,6 +465,11 @@ class RecordingEngine:
                     continue
                 state = self._load_state(work_dir)
                 if state and _is_terminal(state.get("status")):
+                    self._cleanup_completed_leftovers(work_dir, state)
+                    continue
+                if toolchain_error is not None:
+                    if _needs_finalize(work_dir, work_dir.name):
+                        postpone = True
                     continue
                 metadata = LiveMetadata.load(work_dir) or LiveMetadata.placeholder_for(
                     work_dir.name
@@ -483,6 +495,10 @@ class RecordingEngine:
                 self._emit(
                     LogLine(video_id=work_dir.name, text=f"[yt-rec] 복구 실패: {exc}")
                 )
+        if postpone and toolchain_error is not None:
+            self._emit(
+                LogLine(video_id="", text=f"[yt-rec] 복구를 미룬다: {toolchain_error}")
+            )
         return results
 
     # -- 메타데이터 ------------------------------------------------------------
@@ -1054,15 +1070,49 @@ class RecordingEngine:
         if save_state:
             self._save_state(work_dir, result)
         if cleanup and save_state and not self.options.keep_intermediates:
-            try:
-                _cleanup_intermediates(work_dir, video_id)
-            except OSError:
-                # 정리 실패는 결과를 뒤집지 않는다. 결과 파일은 이미 제자리에 있고
-                # 상태도 저장됐다. 남은 중간 파일은 디스크만 차지한다.
-                pass
+            # 정리 실패는 결과를 뒤집지 않는다. 결과 파일은 이미 제자리에 있고
+            # 상태도 저장됐다. 남은 중간 파일은 다음 recover_pending() 이 다시 치운다.
+            self._try_cleanup_intermediates(work_dir, video_id, protect=output_path)
         self._emit(StatusChanged(video_id=video_id, status=status, detail=message))
         self._emit(RecordingFinished(video_id=video_id, result=result))
         return result
+
+    def _cleanup_completed_leftovers(self, work_dir: Path, state: dict) -> None:
+        """끝난 녹화의 남은 중간 파일만 치운다. 결과 파일을 다시 만들지 않는다."""
+        if self.options.keep_intermediates:
+            return
+        if state.get("status") != RecordingStatus.COMPLETED.value:
+            return
+        verification = state.get("verification")
+        if not isinstance(verification, dict) or verification.get("complete") is not True:
+            return
+        raw = state.get("output_path")
+        protect = Path(raw) if raw else None
+        self._try_cleanup_intermediates(work_dir, work_dir.name, protect=protect)
+
+    def _try_cleanup_intermediates(
+        self, work_dir: Path, video_id: str, *, protect: Path | None
+    ) -> None:
+        """중간 파일을 치운다. 실패해도 예외를 흘리지 않고 로그로만 남긴다."""
+        try:
+            failed = _cleanup_intermediates(work_dir, video_id, protect=protect)
+        except OSError as exc:
+            self._emit(
+                LogLine(
+                    video_id=video_id,
+                    text=f"[yt-rec] 중간 파일을 치우지 못했다: {exc}",
+                )
+            )
+            return
+        if not failed:
+            return
+        names = ", ".join(path.name for path in failed)
+        self._emit(
+            LogLine(
+                video_id=video_id,
+                text=f"[yt-rec] 중간 파일을 치우지 못했다: {names}",
+            )
+        )
 
     # -- 상태 파일 -------------------------------------------------------------
 
@@ -1220,25 +1270,89 @@ def _completed_output(work_dir: Path, video_id: str) -> Path | None:
     return None
 
 
-def _cleanup_intermediates(work_dir: Path, video_id: str) -> None:
-    """검증에 성공한 뒤에만 부른다. 메타데이터·상태·로그는 남긴다."""
+#: work 디렉터리에 남겨 두는 엔진 소관 파일. 중간 산출물이 아니다.
+_PROTECTED_WORK_NAMES = frozenset(
+    {STATE_FILENAME, LOG_FILENAME, "metadata.json", LOCK_FILENAME}
+)
+
+
+def _is_leftover_name(name: str, video_id: str) -> bool:
+    """검증 성공 후 지워도 되는 중간 파일 이름인가.
+
+    ``{id}.f*`` 미디어와 같은 줄기의 ``.part`` / ``.ytdl``, 이 녹화의 ``-Frag*``
+    만 해당한다. 병합된 ``{id}.mp4`` 는 중간 파일이 아니다.
+    """
+    if name in _PROTECTED_WORK_NAMES:
+        return False
+    if name.startswith(f"{video_id}."):
+        rest = name[len(video_id) + 1 :]
+        if rest.startswith("f"):
+            return True
+        return name.endswith(".part") or name.endswith(".ytdl") or "-Frag" in name
+    return name.startswith(f"{video_id}-") and "-Frag" in name
+
+
+def _needs_finalize(work_dir: Path, video_id: str) -> bool:
+    """끝나지 않은 녹화에 마무리할 파일이 있는가. 파일을 바꾸지 않는다."""
+    if _completed_output(work_dir, video_id) is not None:
+        return True
+    if not work_dir.is_dir():
+        return False
+    for path in work_dir.iterdir():
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            continue
+        if _is_leftover_name(path.name, video_id):
+            return True
+    return False
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """두 경로가 같은 파일을 가리키는가. 판단할 수 없으면 아니라고 본다."""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        try:
+            return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+                os.path.abspath(str(right))
+            )
+        except OSError:
+            return False
+
+
+def _cleanup_intermediates(
+    work_dir: Path, video_id: str, *, protect: Path | None = None
+) -> list[Path]:
+    """검증에 성공한 뒤에만 부른다. 메타데이터·상태·로그·최종 결과는 남긴다.
+
+    지우지 못한 경로를 돌려준다. 한 파일의 ``OSError`` 로 나머지를 포기하지
+    않고, 빈 목록이 아니면 성공으로 위장하지도 않는다.
+    """
+    if not work_dir.is_dir():
+        return []
+
+    failed: list[Path] = []
     for path in list(work_dir.iterdir()):
-        if not path.is_file():
-            continue
         name = path.name
-        if not name.startswith(f"{video_id}."):
+        if not _is_leftover_name(name, video_id):
             continue
-        if name in (STATE_FILENAME, LOG_FILENAME):
+        try:
+            info = path.stat()
+        except OSError:
+            failed.append(path)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        if protect is not None and _same_path(path, protect):
             continue
         try:
             path.unlink()
         except OSError:
-            pass
-    for leftover in work_dir.glob(f"{video_id}*-Frag*"):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
+            failed.append(path)
+    return failed
 
 
 def _pump_output(process: subprocess.Popen, sink: queue.Queue) -> None:

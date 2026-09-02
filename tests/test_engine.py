@@ -380,6 +380,8 @@ def test_검증에_성공하면_중간_파일을_치운다(
     tmp_path, toolchain, sample_streams, monkeypatch
 ):
     video, audio = sample_streams
+    dummy = tmp_path / "leftover.bin"
+    dummy.write_bytes(b"leftover")
     engine = make_engine(
         tmp_path,
         toolchain,
@@ -387,6 +389,9 @@ def test_검증에_성공하면_중간_파일을_치운다(
             "files": {
                 f"{VIDEO_ID}.f137.mp4": str(video),
                 f"{VIDEO_ID}.f140.m4a": str(audio),
+                f"{VIDEO_ID}.f137.mp4.part": str(dummy),
+                f"{VIDEO_ID}.f137.mp4.ytdl": str(dummy),
+                f"{VIDEO_ID}.f137.mp4-Frag2867": str(dummy),
             },
             "lines": [progress(1000, 1)],
         },
@@ -399,6 +404,9 @@ def test_검증에_성공하면_중간_파일을_치운다(
     assert result.succeeded
     assert not (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
     assert not (work_dir / f"{VIDEO_ID}.f140.m4a").exists()
+    assert not (work_dir / f"{VIDEO_ID}.f137.mp4.part").exists()
+    assert not (work_dir / f"{VIDEO_ID}.f137.mp4.ytdl").exists()
+    assert not (work_dir / f"{VIDEO_ID}.f137.mp4-Frag2867").exists()
     # 메타데이터와 상태는 남긴다.
     assert (work_dir / "metadata.json").exists()
     assert (work_dir / STATE_FILENAME).exists()
@@ -819,15 +827,20 @@ def test_상태를_저장한_뒤에_중간_파일을_치운다(
 
     with pytest.raises(KeyboardInterrupt):
         engine.record(VIDEO_ID)
+    monkeypatch.undo()
 
     # 결과 파일과 종료 상태가 남았다. 중간 파일은 아직 그대로다(지우기 전에 죽었으니).
     state = json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))
     assert state["status"] in ("completed", "partial")
     assert Path(state["output_path"]).exists()
-    assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
+    leftover = work_dir / f"{VIDEO_ID}.f137.mp4"
+    assert leftover.exists()
 
-    # 다시 켜도 이 녹화를 다시 마무리하지 않는다 — 같은 파일을 두 번 만들지 않는다.
+    # 다시 켜면 결과 파일을 다시 만들지 않고 남은 중간 파일만 치운다.
     assert RecordingEngine(engine.options, toolchain=toolchain).recover_pending() == []
+    assert not leftover.exists()
+    assert not (work_dir / f"{VIDEO_ID}.f140.m4a").exists()
+    assert Path(state["output_path"]).exists()
     assert len(list((tmp_path / "녹화").glob("*.mp4"))) == 1
 
 
@@ -853,11 +866,15 @@ def test_정리에_실패해도_성공한_결과를_뒤집지_않는다(
         raise OSError("다른 프로세스가 파일을 붙잡고 있다")
 
     monkeypatch.setattr(engine_module, "_cleanup_intermediates", 잠겨_있다)
+    events = []
+    engine.add_listener(events.append)
 
     result = engine.record(VIDEO_ID)
 
     assert result.succeeded
     assert result.output_path.exists()
+    notes = [e.text for e in events if isinstance(e, LogLine)]
+    assert any("치우지 못했다" in text for text in notes)
 
 
 def test_상태_파일은_임시_파일을_교체해_쓴다(tmp_path, monkeypatch):
@@ -1358,6 +1375,173 @@ def test_도구가_없으면_복구를_미룬다(tmp_path, monkeypatch):
         "status"
     ] == "recording", "종료 상태를 못 박으면 다시 복구되지 않는다"
     assert (work_dir / f"{VIDEO_ID}.f137.mp4").exists()
+
+
+# -- 검증 완료 후 중간 파일 찌꺼기 (#19) -------------------------------------------
+
+
+_LEFTOVER_NAMES = (
+    f"{VIDEO_ID}.f137.mp4",
+    f"{VIDEO_ID}.f140.m4a",
+    f"{VIDEO_ID}.f137.mp4.part",
+    f"{VIDEO_ID}.f137.mp4.ytdl",
+    f"{VIDEO_ID}.f137.mp4-Frag2867",
+)
+
+
+def _plant_completed_leftovers(
+    tmp_path: Path,
+    *,
+    status: str = "completed",
+    complete: bool = True,
+    keep_intermediates: bool = False,
+) -> tuple[RecordingOptions, Path, Path]:
+    """완료 상태와 찌꺼기만 심는다. ffmpeg 없이 복구 정리를 본다."""
+    options = RecordingOptions(
+        output_dir=tmp_path / "녹화", keep_intermediates=keep_intermediates
+    )
+    output_dir = options.output_dir
+    output_dir.mkdir(parents=True)
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    output_path = output_dir / "결과.mp4"
+    output_path.write_bytes(b"final-output")
+    (work_dir / f"{VIDEO_ID}.mp4").write_bytes(b"merged-in-work")
+    stored_metadata().save(work_dir)
+    for name in _LEFTOVER_NAMES:
+        (work_dir / name).write_bytes(b"leftover")
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "status": status,
+                "output_path": str(output_path),
+                "verification": {"complete": complete, "playable": True},
+                "started_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return options, work_dir, output_path
+
+
+def test_완료된_녹화의_찌꺼기는_복구가_치우고_결과는_다시_만들지_않는다(tmp_path):
+    options, work_dir, output_path = _plant_completed_leftovers(tmp_path)
+    events = []
+    engine = RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN)
+    engine.add_listener(events.append)
+
+    assert engine.recover_pending() == []
+
+    for name in _LEFTOVER_NAMES:
+        assert not (work_dir / name).exists(), name
+    assert output_path.exists()
+    assert output_path.read_bytes() == b"final-output"
+    assert (work_dir / f"{VIDEO_ID}.mp4").exists(), "병합된 {id}.mp4 는 중간 파일이 아니다"
+    assert (work_dir / "metadata.json").exists()
+    assert (work_dir / STATE_FILENAME).exists()
+    assert len(list((tmp_path / "녹화").glob("*.mp4"))) == 1
+    assert not any(isinstance(e, RecordingFinished) for e in events)
+
+
+@pytest.mark.parametrize(
+    "status,complete",
+    [
+        ("partial", True),
+        ("completed", False),
+        ("partial", False),
+        ("failed", True),
+    ],
+)
+def test_부분_복구나_검증_실패면_중간_파일을_남긴다(tmp_path, status, complete):
+    options, work_dir, output_path = _plant_completed_leftovers(
+        tmp_path, status=status, complete=complete
+    )
+
+    assert RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN).recover_pending() == []
+
+    for name in _LEFTOVER_NAMES:
+        assert (work_dir / name).exists(), name
+    assert output_path.exists()
+
+
+def test_keep_intermediates_면_완료여도_중간_파일을_남긴다(tmp_path):
+    options, work_dir, output_path = _plant_completed_leftovers(
+        tmp_path, keep_intermediates=True
+    )
+
+    assert RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN).recover_pending() == []
+
+    for name in _LEFTOVER_NAMES:
+        assert (work_dir / name).exists(), name
+    assert output_path.exists()
+
+
+def test_도구가_없어도_완료된_찌꺼기는_치운다(tmp_path, monkeypatch):
+    options, work_dir, output_path = _plant_completed_leftovers(tmp_path)
+    monkeypatch.setattr(engine_module, "resolve_toolchain", _missing("ffmpeg", "ffmpeg"))
+
+    assert RecordingEngine(options).recover_pending() == []
+
+    for name in _LEFTOVER_NAMES:
+        assert not (work_dir / name).exists(), name
+    assert output_path.exists()
+    assert json.loads((work_dir / STATE_FILENAME).read_text(encoding="utf-8"))[
+        "status"
+    ] == "completed"
+
+
+def test_최종_결과는_찌꺼기처럼_보여도_지우지_않는다(tmp_path):
+    options = RecordingOptions(output_dir=tmp_path / "녹화")
+    work_dir = options.resolved_work_root() / VIDEO_ID
+    work_dir.mkdir(parents=True)
+    protected = work_dir / f"{VIDEO_ID}.f137.mp4"
+    protected.write_bytes(b"this-is-the-result")
+    other = work_dir / f"{VIDEO_ID}.f140.m4a"
+    other.write_bytes(b"leftover")
+    (work_dir / STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "output_path": str(protected),
+                "verification": {"complete": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN).recover_pending() == []
+
+    assert protected.exists()
+    assert protected.read_bytes() == b"this-is-the-result"
+    assert not other.exists()
+
+
+def test_정리에_실패한_찌꺼기는_다시_치울_수_있게_남긴다(tmp_path, monkeypatch):
+    options, work_dir, output_path = _plant_completed_leftovers(tmp_path)
+    locked = work_dir / f"{VIDEO_ID}.f137.mp4"
+    real_unlink = Path.unlink
+
+    def 일부만_잠겨_있다(self, *args, **kwargs):
+        if self.name == locked.name:
+            raise OSError("다른 프로세스가 파일을 붙잡고 있다")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", 일부만_잠겨_있다)
+    events = []
+    engine = RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN)
+    engine.add_listener(events.append)
+
+    assert engine.recover_pending() == []
+
+    assert locked.exists()
+    assert not (work_dir / f"{VIDEO_ID}.f140.m4a").exists()
+    assert output_path.exists()
+    notes = [e.text for e in events if isinstance(e, LogLine)]
+    assert any("치우지 못했다" in text and locked.name in text for text in notes)
+
+    monkeypatch.undo()
+    assert RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN).recover_pending() == []
+    assert not locked.exists()
 
 
 # -- 저심각도: 자식 프로세스 트리 -------------------------------------------------
