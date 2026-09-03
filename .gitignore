@@ -470,9 +470,20 @@ $RECYCLE.BIN/
 
 # End of https://www.toptal.com/developers/gitignore/api/python,venv,ssh,windows,linux,macos,vim,emacs,dotenv,visualstudiocode,pycharm
 
-# claude
+# 로컬 에이전트 상태 (세션·인증·메모리는 공유하지 않는다)
 .claude
 .omc
+.omx
+.agent_tmp
+.grok
+.cursor
+.agents
+.gemini
+.windsurf
+.aider*
+AGENTS.md.local*
+CLAUDE.md.local*
+*.local-untracked
 
 # superpowers 설계/플랜 산출물 (사적 도구 — 리포 추적 제외)
 docs/superpowers/
@@ -484,7 +495,7 @@ docs_ignore/
 mcp/
 
 # Local Codex settings
-.codex/
+.codex
 
 # Local reference dumps and cloned source snapshots
 ref/
@@ -541,4 +552,4 @@ client_secrets.json
 !tests/fixtures/**/*.webm
 
 ### 로컬 도구 상태 ###
-.serena/
+.serena
