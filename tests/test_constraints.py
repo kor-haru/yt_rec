@@ -531,6 +531,45 @@ def test_가상환경이_추적되지_않는다() -> None:
     assert ".venv" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude",
+        ".omc",
+        ".omx",
+        ".agent_tmp",
+        ".codex",
+        ".grok",
+        ".cursor",
+        ".agents",
+        ".serena",
+        ".mcp.json",
+        "AGENTS.md.local-untracked",
+        "AGENTS.md.local",
+    ],
+)
+def test_로컬_에이전트_상태가_추적되지_않는다(path: str) -> None:
+    """세션·인증·로컬 지시 파일은 ``git add .`` 에도 안 올라가야 한다."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", path],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"{path} 가 .gitignore 에 걸리지 않는다: {result.stdout}"
+
+
+def test_공유_에이전트_규칙은_추적한다() -> None:
+    """``AGENTS.md`` 는 저장소 작업 규칙이다. 로컬 전용 파일만 무시한다."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", "AGENTS.md"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, f"AGENTS.md 가 무시된다: {result.stdout}"
+
+
 def test_잠금_파일은_추적_대상이다() -> None:
     """잠금 파일이 실수로 무시되면 재현성이 사라진다."""
     result = subprocess.run(
