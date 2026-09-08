@@ -4,7 +4,9 @@
 
 ## 상태
 
-초기 개발 단계. 기능 요건과 착수 순서는 [이슈](https://github.com/kor-haru/yt_rec/issues)에서 관리한다.
+Google 계정 연결, 채널 선택, 자동 녹화, 설정, 보관함, 로그와 트레이 동작을 제공한다.
+네이티브 실행 파일은 자동 빌드로 검증하며, 정식 서명 배포와 운영체제별 실제 로그인·녹화
+검증 현황은 [이슈](https://github.com/kor-haru/yt_rec/issues)에서 관리한다.
 
 ## 기술 선택
 
@@ -25,10 +27,9 @@
 
 ### 시작하기 전에
 
-yt-rec는 아직 **설치 파일이 없는 초기 개발 버전**이다. 지금은 프로젝트 파일을
-받은 뒤 터미널에서 실행해야 한다. 이 안내는 **Windows 10/11**과 **macOS**를
-기준으로 한다. Linux는 소스 실행은 가능하지만 로그인 토큰의 OS 보안 저장소는
-아직 [이슈 #13](https://github.com/kor-haru/yt_rec/issues/13)이다.
+실행 파일을 받았다면 아래 **실행 파일로 시작하기**를 따른다. Python이나 별도
+미디어 도구를 설치할 필요가 없다. 소스 ZIP을 받았다면 **1. 프로젝트 파일 받기**부터
+진행한다. 두 방법 모두 Google OAuth 준비와 첫 로그인은 필요하다.
 
 준비물은 다음과 같다.
 
@@ -39,8 +40,40 @@ yt-rec는 아직 **설치 파일이 없는 초기 개발 버전**이다. 지금�
 
 Google에서 내려받은 OAuth JSON 파일에는 비밀 값이 들어 있다. 이 파일과 환경
 변수 값을 Git, GitHub, 메신저, 이메일, 스크린샷으로 공유하지 않는다. yt-rec가
-로그인 뒤 받은 토큰은 Windows 자격 증명 관리자 또는 macOS Keychain에 저장한다.
-평문 파일로는 남기지 않는다.
+로그인 뒤 받은 토큰은 Windows 자격 증명 관리자, macOS Keychain 또는 Linux
+Secret Service에 저장한다. 보안 저장소를 사용할 수 없다면 계정 화면에서
+**이번 실행에서만 로그인 유지**를 선택할 수 있다. 이 경우 앱을 다시 열 때 로그인한다.
+평문 토큰 파일은 만들지 않는다.
+
+### 실행 파일로 시작하기
+
+1. [Desktop bundle 빌드 목록](https://github.com/kor-haru/yt_rec/actions/workflows/desktop.yml)에서
+   성공한 빌드를 연다. 아래쪽 **Artifacts**에서 자신의 컴퓨터에 맞는 파일을 받는다.
+   다운로드에는 GitHub 로그인이 필요하다. 아직 성공한 빌드가 없으면 아래 소스 실행을 사용한다.
+2. 받은 압축 파일을 푼다. 안에 ZIP이나 `tar.gz`가 한 번 더 있으면 그것도 푼다.
+   Windows는 `windows-2022`(Intel/AMD 64비트), Apple Silicon Mac은 `macos-15`,
+   Intel Mac은 `macos-15-intel`, Linux는 자신의 CPU에 맞는 `ubuntu-22.04` 또는
+   `ubuntu-22.04-arm`을 선택한다.
+3. 풀린 폴더 전체를 계속 사용할 위치에 둔다. Windows는 그 안의 **yt-rec.exe**,
+   macOS는 **yt-rec.app**, Linux는 **yt-rec**를 실행한다. 실행 파일만 따로 옮기면 안 된다.
+   macOS의 앱은 응용 프로그램 폴더에 옮긴 뒤 실행할 수 있다.
+4. 창이 열리면 아래 **6. Google 로그인 준비하기**로 이동한다. 이미 OAuth JSON이
+   있다면 **7. OAuth JSON 가져오기**부터 시작한다.
+
+자동 빌드 파일은 아직 정식 서명·공증 릴리스가 아니다. 운영체제나 조직 정책이 실행을
+차단하면 관리자에게 확인한다. Linux는 그래픽 데스크톱과 Secret Service(예: GNOME
+Keyring)가 필요하며, `secret-tool`이 없다면 배포판의 `libsecret-tools` 패키지를 설치한다.
+
+### 창을 닫아도 녹화가 계속되는 이유
+
+시계 옆 트레이(Windows/Linux) 또는 위쪽 메뉴 막대(macOS)에 yt-rec 아이콘이 있으면
+창의 **X**는 창만 숨긴다. 아이콘을 누르면 다시 열 수 있다. 앱을 완전히 끝내려면
+아이콘 메뉴의 **종료** 또는 메인 창의 **앱 → 종료**를 누른다. 녹화 중이라면 확인 창이
+나오고, 받은 영상의 저장·병합이 끝날 때까지 종료 안내가 표시된다.
+
+트레이를 지원하지 않는 환경에서는 창을 닫으면 종료 절차로 들어간다. **시작 시 창 숨김**을
+켜도 트레이가 없으면 창이 보인다. 설정의 **로그인 시 자동 시작**은 다음 컴퓨터 로그인부터
+적용된다. 자동 시작을 켠 뒤 실행 파일이나 소스 폴더를 옮겼다면 설정을 껐다가 다시 켠다.
 
 ### 1. 프로젝트 파일 받기
 
@@ -185,6 +218,8 @@ uv run yt-rec --stub scenario
 
 yt-rec는 구독 채널과 현재 라이브를 읽기 위해 YouTube Data API를 사용한다. 다음
 설정은 처음 한 번만 준비하면 된다.
+Google Cloud 프로젝트를 관리하는 계정과 실제로 녹화에 사용할 Google 계정은 달라도 된다.
+프로젝트 관리자는 OAuth 앱을 한 번 등록하고, 사용자는 로그인 화면에서 자기 계정을 고른다.
 메뉴 번역이나 위치는 바뀔 수 있다. 현재 영문 이름은 `Overview`, `Branding`,
 `Audience`, `Clients`, `Data Access`이며, 보이지 않으면 아래 공식 링크에서 연다.
 
@@ -195,9 +230,12 @@ yt-rec는 구독 채널과 현재 라이브를 읽기 위해 YouTube Data API를
 3. **Google Auth Platform**의 `Overview`에서 앱 이름과 사용자 지원 이메일을
    입력한다. 개인 Gmail 계정은 사용자 유형으로 `External`을 고른다. 자세한 항목은
    [Google Auth Platform 시작 안내](https://support.google.com/cloud/answer/15544987)를 참고한다.
-4. `Audience`가 `Testing`이면 로그인할 Google 계정을 **Test users**에 추가한다.
+4. 개발 계정과 다른 개인 계정으로 로그인하려면 `Audience`를 **External**로 둔다.
+   `Testing`이면 실제로 로그인할 다른 Google 계정을 **Test users**에 추가한다.
    테스트 상태의 승인은 7일 뒤 만료될 수 있다. 관련 제한은
    [Audience 안내](https://support.google.com/cloud/answer/15549945)를 참고한다.
+   Test users에 없는 계정까지 이용하게 하려면 앱 게시와 필요한 Google 검증을 준비해야 한다.
+   앱의 로그인 버튼만 바꾸어 Google의 대상 사용자 제한을 없앨 수는 없다.
 5. `Data Access`에는 다음 읽기 전용 범위만 추가한다. 다른 YouTube 권한은 이 앱에
    필요하지 않다. [Data Access 안내](https://support.google.com/cloud/answer/15549135)
    에서 범위 추가 방법을 볼 수 있다.
@@ -217,68 +255,17 @@ yt-rec는 구독 채널과 현재 라이브를 읽기 위해 YouTube Data API를
 [OAuth 보안 정책](https://developers.google.com/identity/protocols/oauth2/policies)을
 참고한다.
 
-### 7. OAuth JSON 파일 놓기
+### 7. OAuth JSON 가져오기
 
-사용자 설정 폴더를 만들고 연다.
+1. 앱을 연다. 소스로 실행한다면 프로젝트 폴더의 터미널에서 `uv run yt-rec`를 실행한다.
+2. 오른쪽 위 **계정 → OAuth JSON 가져오기**를 누른다.
+3. Google에서 내려받은 **Desktop app** JSON을 선택한다. 파일 이름은 바꾸지 않아도 된다.
+4. 앱이 파일 형식을 확인하고 사용자 설정 폴더에 저장한다. 웹 앱용 파일이나 클라이언트 ID만
+   적힌 파일은 사용할 수 없다. Google에서 받은 클라이언트 ID와 secret이 포함된 JSON을 사용한다.
 
-```powershell
-# Windows
-New-Item -ItemType Directory -Force "$env:APPDATA\yt-rec" | Out-Null
-explorer "$env:APPDATA\yt-rec"
-```
-
-```bash
-# macOS
-mkdir -p "$HOME/Library/Application Support/yt-rec"
-open "$HOME/Library/Application Support/yt-rec"
-```
-
-Google에서 받은 JSON 파일을 열린 폴더로 옮기고 이름을 정확히
-`client_secrets.json`으로 바꾼다.
-
-**Windows**에서는 파일 탐색기에서 확장명 표시를 켠다. Windows 11은
-**보기(View) → 표시(Show) → 파일 이름 확장명**, Windows 10은 **보기 탭 → 파일
-이름 확장명**. 그래야 이름이 `client_secrets.json.json`으로 잘못 바뀌는 것을
-볼 수 있다.
-
-**macOS**에서는 Finder에서 파일을 선택하고 이름 바꾸기를 할 때 `.json`이 두 번
-붙지 않았는지 확인한다.
-
-최종 위치는 다음과 같아야 한다.
-
-```text
-Windows:  %APPDATA%\yt-rec\client_secrets.json
-macOS:    ~/Library/Application Support/yt-rec/client_secrets.json
-```
-
-위치와 이름을 확인한다.
-
-```powershell
-# Windows
-Test-Path "$env:APPDATA\yt-rec\client_secrets.json"
-```
-
-```bash
-# macOS
-test -f "$HOME/Library/Application Support/yt-rec/client_secrets.json" && echo ok
-```
-
-결과가 `True` 또는 `ok`여야 한다.
-
-파일을 다른 안전한 폴더에 보관하려면, 대신 그 파일 경로를 현재 터미널에 지정할
-수 있다. 아래 경로는 실제 JSON 파일 경로로 바꾼다.
-
-```powershell
-# Windows — 이 창을 닫으면 사라진다
-$env:YT_REC_GOOGLE_CLIENT_SECRETS = "D:\안전한 폴더\다운로드한 파일.json"
-```
-
-```bash
-# macOS — 이 창을 닫으면 사라진다
-export YT_REC_GOOGLE_CLIENT_SECRETS="$HOME/안전한 폴더/다운로드한 파일.json"
-```
-
-비밀 값이 유출됐다면 Google Cloud에서 기존 값을 폐기하고 새 값으로 교체한다.
+계정 화면의 **Google Auth Platform 열기**로 설정 화면에 갈 수도 있다.
+이전에 `YT_REC_GOOGLE_CLIENT_SECRETS` 환경변수로 별도 경로를 지정했다면 앱의 안내에 따라
+그 변수를 해제하고 다시 실행한 뒤 가져온다. JSON과 토큰은 GitHub에 올리지 않는다.
 
 ### 8. 실제 모드로 실행하기
 
@@ -294,7 +281,8 @@ uv run yt-rec
 ### 9. 계정과 자동 녹화 설정하기
 
 1. 창 오른쪽 위의 **계정**을 누른 뒤 **연결**을 누른다.
-2. 시스템 기본 브라우저가 열리면 사용할 Google 계정을 고른다. 프로젝트가
+2. 시스템 기본 브라우저가 열리면 사용할 Google 계정을 고른다. 개발 계정과 다른 계정은
+   **다른 계정 사용**을 누르고 로그인한다. 프로젝트가
    `Testing` 상태이면 테스트 또는 미확인 앱 경고가 나타날 수 있다. 계속하기 전에
    방금 만든 앱 이름이 맞고 요청 권한이 YouTube 읽기 전용
    (`youtube.readonly`)뿐인지 확인한다. 앱 이름이 다르거나 다른 권한도 요구하면
@@ -308,33 +296,33 @@ uv run yt-rec
    **녹화 중**에 진행 상황을 표시한다.
 7. 오류 수가 늘거나 동작을 자세히 보고 싶으면 오른쪽 위의 **로그**를 연다.
    수준 필터, 메시지 검색, 선택한 행 복사를 사용할 수 있다.
-8. 앱을 끝낼 때는 메인 창을 닫는다. 진행 중 녹화가 있으면 받은 부분을 마무리하는
+8. 계정을 바꾸려면 **계정 → 연결 해제** 후 **연결**을 누르고 다른 계정을 고른다.
+9. 앱을 끝낼 때는 **앱 → 종료**를 누른다. 진행 중 녹화가 있으면 받은 부분을 마무리하는
    동안 시간이 걸릴 수 있으므로 터미널을 강제로 닫지 않는다.
 
 ### 10. 녹화 파일과 복구 결과 확인하기
 
-기본 저장 위치는 프로젝트 폴더 아래의 `recordings` 폴더다.
-기본 화질 상한은 1080p다.
+처음 설치한 앱의 기본 저장 위치는 사용자 홈 폴더의 `Videos/yt-rec`다.
+이전 버전에서 저장한 위치는 유지된다. **설정**에서 저장 위치와 남은 용량을 확인하고
+**보관함 열기**에서 파일을 찾는다. 기본 화질 상한은 1080p다.
 
-```powershell
-# Windows
-explorer .\recordings
-```
+보관함은 제목·채널 검색과 날짜·크기 정렬을 지원한다. 항목을 선택한 뒤 **재생**,
+**폴더 열기**, **경로 복사**로 파일을 사용할 수 있다. 다른 폴더로 옮기거나 삭제한 파일은
+누락 상태로 표시되며, 앱을 다시 열어도 완료 이력은 남는다.
 
-```bash
-# macOS
-open recordings
-```
+설정에서는 저장 위치, 최대 화질, 동시 녹화 수, 확인 주기, 자동 시작, 시작 시 창 숨김,
+로그 보관 기간과 알림을 바꿀 수 있다. **저장**을 눌러야 적용된다. 녹화 중 저장 위치나
+화질을 바꾸면 다음 녹화부터 적용되고, 현재 녹화는 기존 설정으로 마무리된다.
 
 결과 표시는 다음 의미다.
 
 - **정상**: 재생 검증을 통과한 최종 녹화 파일이다.
 - **부분 복구**: 재생 가능한 파일은 만들었지만 일부 방송 구간이 빠졌을 수 있다.
 - **실패**: 다운로드, 병합 또는 검증을 끝내지 못했다. 복구 가능한 중간 파일은
-  `recordings\.yt-rec` 아래에 남겨 두며, 앱을 다음에 실행할 때 자동 복구를
+  설정한 저장 위치의 `.yt-rec` 아래에 남겨 두며, 앱을 다음에 실행할 때 자동 복구를
   시도한다. 이 폴더를 임의로 지우지 않는다.
 
-긴 방송은 디스크를 빠르게 채운다. 녹화 전후로 `recordings` 폴더가 있는 드라이브의
+긴 방송은 디스크를 빠르게 채운다. 녹화 전후로 저장 폴더가 있는 드라이브의
 남은 공간을 확인한다.
 
 ### 11. 자주 발생하는 문제
@@ -383,19 +371,14 @@ Windows에서 `애플리케이션 제어 정책에서 이 파일을 차단했습
 라이브인데도 시작하지 않으면 **로그**에서 네트워크, `yt-dlp`, `ffmpeg` 오류를
 확인한다.
 
-### 아직 사용할 수 없는 기능
+### 로그와 오류 알림
 
-버튼은 보이지만 **설정**과 **보관함** 화면은 아직 자리표시자다. 고장 난 것이
-아니며 각각 [이슈 #11](https://github.com/kor-haru/yt_rec/issues/11)과
-[이슈 #10](https://github.com/kor-haru/yt_rec/issues/10)에서 구현할 예정이다.
-
-현재 로그 화면은 앱 안의 조회·필터·검색·복사를 지원한다. 전체 로그 파일,
-파일 회전과 보관 기간, 민감값 자동 가림, 트레이 알림은
-[이슈 #12](https://github.com/kor-haru/yt_rec/issues/12)의 후속 작업이다. 이 기능이
-완성되기 전에는 로그를 공유하기 전에 비밀 값이 없는지 직접 확인한다.
-
-독립 실행형 설치 파일은 [이슈 #5](https://github.com/kor-haru/yt_rec/issues/5)의
-후속 작업이다. 그전까지는 이 문서처럼 소스에서 실행해야 한다.
+상단 **로그** 버튼의 숫자는 아직 확인하지 않은 오류다. 100건 이상은 `99+`로 보이고
+버튼에 마우스를 올리면 정확한 건수를 확인할 수 있다. 로그를 열면 미확인 표시가 해제된다.
+로그 화면에서 수준·검색어로 필터링하고 선택 행을 복사하거나 전체 로그 폴더를 열 수 있다.
+토큰·인증 값은 자동으로 가려지고, 로그 파일은 크기와 설정한 보관 기간에 따라 정리된다.
+녹화 실패나 감시 중단 시 트레이 알림을 보내며 **설정**에서 알림을 끌 수 있다.
+운영체제의 알림 금지·집중 모드가 켜져 있으면 알림이 안 보일 수 있다.
 
 ## 녹화 엔진
 
@@ -475,6 +458,25 @@ GUI 실행과 Google OAuth 준비는 위의 [사용법](#사용법)을 기준으
 `uv run python -m yt_rec`도 `uv run yt-rec`와 같은 진입점이다. 빈 화면은
 `uv run yt-rec --stub empty`, 초당 100건 진행 이벤트 부하는
 `uv run yt-rec --stub flood`로 확인한다.
+
+### 독립 실행 파일 만들기
+
+대상 운영체제와 같은 OS·CPU에서 다음 명령을 실행한다. `uv.lock`의 앱 의존성을 쓰고,
+PyInstaller만 빌드 시 임시로 설치한다. 고정 버전의 yt-dlp, Deno, FFmpeg/ffprobe를 내려받아
+SHA256을 확인하고, 라이선스·빌드 기록과 함께 묶는다. macOS는 Xcode Command Line Tools의
+clang과 make로 FFmpeg를 소스 빌드한다. 새로운 런타임 의존성은 추가하지 않는다.
+
+```text
+uv sync --frozen
+uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py
+```
+
+완성 파일은 `dist/yt-rec-<OS>-<CPU>.zip` 또는 `.tar.gz`이고, 같은 폴더의
+`smoke-<OS>-<CPU>.json`은 GUI 렌더, 번들 도구 실행, 합성 영상·음성 병합과 재생 검증 결과다.
+검사는 임시 폴더와 스텁만 사용하므로 실제 Google 계정이나 사용자 녹화를 건드리지 않는다.
+이 검사는 실제 OAuth·라이브 녹화 검증을 대신하지 않는다. 운영체제별 실제 설치·로그인·녹화와
+로그아웃 후 자동 시작 확인은 [수동 검증 절차](docs/recording-manual-checks.md)에 따라 수행한다.
+공개 배포 전 라이선스와 서명·공증 준비 사항은 [번들 구성 안내](packaging/THIRD_PARTY.md)를 확인한다.
 
 ### 화면 코드가 지켜야 할 계약
 

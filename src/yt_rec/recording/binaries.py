@@ -1,7 +1,6 @@
 """외부 실행 파일(yt-dlp, ffmpeg, ffprobe) 경로를 한 곳에서 해결한다.
 
-지금은 PATH에서 찾는다. 번들링(#5)이 도입되면 :func:`_bundle_dirs` 에 번들 디렉터리를
-추가하는 것만으로 전환이 끝나고, 이 모듈을 쓰는 나머지 코드는 손대지 않는다.
+독립 실행형 앱은 함께 배포한 도구를 먼저 사용하고 소스 실행은 PATH에서 찾는다.
 
 환경 변수로 개별 경로를 덮어쓸 수 있다 (개발·테스트용):
 ``YT_REC_YTDLP``, ``YT_REC_FFMPEG``, ``YT_REC_FFPROBE``.
@@ -59,8 +58,7 @@ class Toolchain:
 def _bundle_dirs() -> list[Path]:
     """번들된 실행 파일을 찾을 후보 디렉터리.
 
-    #5(패키징)가 들어오기 전까지는 대부분 비어 있다. PyInstaller 로 얼린 경우에만
-    임시 추출 경로와 실행 파일 옆 ``bin/`` 을 후보로 본다.
+    PyInstaller의 내부 경로와 실행 파일 옆 ``bin/`` 을 후보로 본다.
     """
     dirs: list[Path] = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -72,6 +70,13 @@ def _bundle_dirs() -> list[Path]:
         dirs.append(exe_dir / "bin")
         dirs.append(exe_dir)
     return dirs
+
+
+def prepare_bundled_environment() -> None:
+    """Let bundled yt-dlp find its bundled Deno runtime as a child process."""
+    directories = [str(path) for path in _bundle_dirs() if path.name == "bin" and path.is_dir()]
+    if directories:
+        os.environ["PATH"] = os.pathsep.join([*directories, os.environ.get("PATH", "")])
 
 
 def find_executable(tool: str, *, search_dirs: list[Path] | None = None) -> Path | None:
