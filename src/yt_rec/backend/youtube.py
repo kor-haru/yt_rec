@@ -10,6 +10,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from yt_rec.recording.ownership import validate_video_id
+
 __all__ = [
     "API_ROOT",
     "HTTP_TIMEOUT",
@@ -156,6 +158,26 @@ class YouTubeApi:
         snippet = items[0].get("snippet") or {}
         self._account_label = str(snippet.get("title") or items[0].get("id") or "")
         return self._account_label
+
+    def get_live(self, video_id: str) -> LiveBroadcast | None:
+        """Check only the notified video with one videos.list request; no scan."""
+        validate_video_id(video_id)
+        payload = self._get("videos", {"part": "snippet,liveStreamingDetails", "id": video_id})
+        for item in payload.get("items") or []:
+            if item.get("id") != video_id:
+                continue
+            snippet = item.get("snippet") or {}
+            live = item.get("liveStreamingDetails") or {}
+            if (snippet.get("liveBroadcastContent") != "live"
+                    or not snippet.get("channelId")
+                    or not live.get("actualStartTime") or live.get("actualEndTime")):
+                return None
+            return LiveBroadcast(
+                video_id=video_id, channel_id=str(snippet["channelId"]),
+                title=str(snippet.get("title") or video_id),
+                channel_name=str(snippet.get("channelTitle") or ""),
+            )
+        return None
 
     def find_lives(self, channel_ids: Sequence[str]) -> list[LiveBroadcast]:
         """선택된 채널의 *현재 송출 중* 라이브만 돌려준다.

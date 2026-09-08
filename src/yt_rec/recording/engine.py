@@ -67,6 +67,7 @@ from .merge import (
 from .metadata import LiveMetadata, fetch_metadata
 from .naming import reserve_unique_path
 from .options import RecordingOptions
+from .ownership import RecordingOwnedError, VideoLease, validate_video_id
 from .progress import (
     PROGRESS_TEMPLATE,
     LineSplitter,
@@ -246,11 +247,13 @@ class RecordingEngine:
         toolchain: Toolchain | None = None,
         on_event: EventCallback | None = None,
         tz: tzinfo | None = None,
+        ownership_root: Path | None = None,
     ) -> None:
         self.options = options
         self._toolchain = toolchain
         self._listeners: list[EventCallback] = []
         self._tz = tz
+        self._ownership_root = ownership_root
         self._stop = threading.Event()
         self._process: subprocess.Popen | None = None
         self._process_lock = threading.Lock()
@@ -330,7 +333,16 @@ class RecordingEngine:
         """
         started_at = time.time()
         try:
-            return self._record(video_id, started_at)
+            validate_video_id(video_id)
+        except ValueError as exc:
+            return self._aborted(video_id, started_at, str(exc), read_metadata=False)
+        try:
+            # Acquire before metadata, work-dir writes, download or finalization.
+            # All current GUI/CLI callers enter here, irrespective of output_dir.
+            with VideoLease(video_id, root=self._ownership_root):
+                return self._record(video_id, started_at)
+        except RecordingOwnedError as exc:
+            return self._aborted(video_id, started_at, str(exc), read_metadata=False)
         except BinaryNotFoundError as exc:
             # 어느 바이너리가 없는지 그대로 담는다. 사용자가 PATH 를 고칠 수 있어야 한다.
             return self._aborted(video_id, started_at, f"녹화를 시작할 수 없다: {exc}")
@@ -344,6 +356,9 @@ class RecordingEngine:
         # record() 가 결과로 바꾼다. work 디렉터리를 만들기 전이라 흔적도 남지 않는다.
         _ = self.toolchain
         work_dir = self.work_dir_for(video_id)
+        if _lock_owner(work_dir) is not None:
+            # Best-effort compatibility for an older process in the same folder.
+            raise RecordingOwnedError("이 폴더에서 이전 녹화가 아직 진행 중입니다")
         work_dir.mkdir(parents=True, exist_ok=True)
         # 이 디렉터리를 지금 쓰고 있다고 표시한다. recover_pending() 이 이 표시를 보고
         # 살아 있는 녹화의 중간 파일을 병합하지 않는다.
@@ -406,7 +421,9 @@ class RecordingEngine:
             format_ids=download.format_ids,
         )
 
-    def _aborted(self, video_id: str, started_at: float, message: str) -> RecordingResult:
+    def _aborted(
+        self, video_id: str, started_at: float, message: str, *, read_metadata: bool = True
+    ) -> RecordingResult:
         """시작하지도 못한 실패를 결과로 만든다. **상태 파일은 건드리지 않는다.**
 
         도구가 없거나 준비 단계에서 죽은 것은 환경 문제다. 여기서 종료 상태를 못 박으면
@@ -417,7 +434,8 @@ class RecordingEngine:
         result = RecordingResult(
             video_id=video_id,
             status=RecordingStatus.FAILED,
-            metadata=LiveMetadata.load(work_dir) or LiveMetadata.placeholder_for(video_id),
+            metadata=(LiveMetadata.load(work_dir) if read_metadata else None)
+            or LiveMetadata.placeholder_for(video_id),
             work_dir=work_dir,
             started_at=started_at,
             finished_at=time.time(),
@@ -441,8 +459,8 @@ class RecordingEngine:
         **지금 녹화 중인 work 디렉터리는 건드리지 않는다.** 앱을 두 개 띄우거나 녹화
         도중에 이 함수를 부르면, 살아 있는 중간 파일을 병합해 엉뚱한 결과를 만들고
         상태 파일을 덮어쓴다. Windows 는 열린 파일 unlink 가 실패해 피해가 제한되지만
-        POSIX 에서는 그대로 지워진다. 그래서 소유권 표시(:data:`LOCK_FILENAME`)를 보고
-        살아 있는 소유자가 있으면 건너뛴다.
+        POSIX 에서는 그대로 지워진다. 그래서 출력 폴더와 무관한 영상별 OS lease를
+        먼저 얻고, 구버전 호환용 소유권 표시(:data:`LOCK_FILENAME`)도 확인한다.
         """
         root = self.options.resolved_work_root()
         if not root.is_dir():
@@ -461,7 +479,10 @@ class RecordingEngine:
         postpone = False
         for work_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             # 한 건이 실패해도 나머지 복구는 계속한다.
+            lease = None
             try:
+                lease = VideoLease(work_dir.name, root=self._ownership_root)
+                lease.acquire()
                 owner = _lock_owner(work_dir)
                 if owner is not None:
                     self._emit(
@@ -507,10 +528,15 @@ class RecordingEngine:
                         denial=None,
                     )
                 )
+            except RecordingOwnedError:
+                self._emit(LogLine(video_id=work_dir.name, text="[yt-rec] 다른 녹화 또는 복구가 사용 중이라 건너뜁니다"))
             except Exception as exc:  # noqa: BLE001
                 self._emit(
                     LogLine(video_id=work_dir.name, text=f"[yt-rec] 복구 실패: {exc}")
                 )
+            finally:
+                if lease is not None:
+                    lease.close()
         if postpone and toolchain_error is not None:
             self._emit(
                 LogLine(video_id="", text=f"[yt-rec] 복구를 미룬다: {toolchain_error}")
