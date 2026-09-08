@@ -34,6 +34,7 @@ def load_archive(
     output_dir = Path(output_dir).absolute()
     root = Path(work_root) if work_root is not None else output_dir / ".yt-rec"
     items = []
+    readable_parents: dict[Path, bool] = {}
     for state_path in root.glob("*/state.json"):
         try:
             raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -73,14 +74,26 @@ def load_archive(
             elif completion is CompletionStatus.PARTIAL:
                 notes.append("일부 구간이 누락되었거나 완전성을 확인하지 못했습니다. 정확한 누락 시각은 저장 기록에 없습니다.")
             size = -1
+            file_missing = False
             if path is not None:
                 try:
                     info = path.stat()
                     if not stat.S_ISREG(info.st_mode):
-                        raise FileNotFoundError(str(path))
+                        raise OSError("저장된 경로가 파일이 아닙니다")
                     size = info.st_size
-                except OSError:
-                    notes.append("저장된 위치에 파일이 없거나 접근할 수 없습니다.")
+                except OSError as exc:
+                    if isinstance(exc, FileNotFoundError):
+                        if path.parent not in readable_parents:
+                            try:
+                                os.listdir(path.parent)
+                                readable_parents[path.parent] = True
+                            except OSError:
+                                readable_parents[path.parent] = False
+                        file_missing = readable_parents[path.parent]
+                    notes.append(
+                        "저장된 위치에 파일이 없습니다." if file_missing else
+                        "파일 유무를 확인하지 못했습니다. 저장 폴더·드라이브 연결·접근 권한을 확인하세요."
+                    )
                     completion = CompletionStatus.MISSING
             elif completion in {CompletionStatus.COMPLETED, CompletionStatus.PARTIAL}:
                 notes.append("저장된 파일 경로가 없습니다.")
@@ -97,6 +110,7 @@ def load_archive(
                 status=completion,
                 output_path=str(path) if path is not None else None,
                 note="\n".join(dict.fromkeys(note for note in notes if note)),
+                file_missing=file_missing,
             ))
         except (OSError, ValueError, TypeError, OverflowError) as exc:
             items.append(CompletedRecording(
@@ -109,8 +123,15 @@ def load_archive(
     return tuple(sorted(items, key=lambda item: item.finished_at.timestamp() if item.finished_at else 0, reverse=True))
 
 
+def archive_key(item: CompletedRecording) -> tuple[str, str, str]:
+    """같은 영상의 다른 저장 위치와 후속 녹화를 함께 숨기지 않는다."""
+    path = os.path.normcase(os.path.abspath(item.output_path)) if item.output_path else ""
+    stamp = item.finished_at.astimezone(timezone.utc).isoformat() if item.finished_at else ""
+    return item.recording_id, path, stamp
+
+
 class ArchiveStore:
-    """사용했던 출력 폴더만 기억한다. 녹화별 state.json이 이력 원본이다."""
+    """출력 폴더와 보관함 제외목록만 저장한다. 녹화 원본은 변경하지 않는다."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else default_settings_path().with_name("archive-roots.json")
@@ -126,6 +147,18 @@ class ArchiveStore:
         ):
             raise ValueError("저장된 보관함 폴더 목록 형식이 올바르지 않습니다")
         self._roots: list[dict[str, str]] = roots
+        self.dismissed_path = self.path.with_suffix(".dismissed.json")
+        try:
+            dismissed = json.loads(self.dismissed_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            dismissed = []
+        if not isinstance(dismissed, list) or any(
+            not isinstance(key, list) or len(key) != 3
+            or not all(isinstance(part, str) for part in key)
+            for key in dismissed
+        ):
+            raise ValueError("저장된 보관함 제외목록 형식이 올바르지 않습니다")
+        self._dismissed = {tuple(key) for key in dismissed}
 
     def remember(self, output_dir: Path, *, work_root: Path | None = None) -> None:
         output = Path(output_dir).absolute()
@@ -147,7 +180,21 @@ class ArchiveStore:
         for root in self._roots:
             for item in load_archive(Path(root["output_dir"]), work_root=Path(root["work_root"])):
                 items[(item.recording_id, item.output_path)] = item
-        return tuple(sorted(items.values(), key=lambda item: item.finished_at.timestamp() if item.finished_at else 0, reverse=True))
+        return self.visible(tuple(sorted(items.values(), key=lambda item: item.finished_at.timestamp() if item.finished_at else 0, reverse=True)))
+
+    def visible(self, items: tuple[CompletedRecording, ...]) -> tuple[CompletedRecording, ...]:
+        return tuple(item for item in items if archive_key(item) not in self._dismissed)
+
+    def dismiss(self, items: tuple[CompletedRecording, ...]) -> None:
+        """제외목록 저장 성공 후에만 메모리를 갱신한다. 파일은 삭제하지 않는다."""
+        dismissed = self._dismissed | {archive_key(item) for item in items}
+        if dismissed == self._dismissed:
+            return
+        self.dismissed_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.dismissed_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(sorted(dismissed), ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self.dismissed_path)
+        self._dismissed = dismissed
 
 
 def open_archive_path(path: str, *, reveal: bool = False) -> None:

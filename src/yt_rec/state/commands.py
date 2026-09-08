@@ -38,6 +38,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .models import CompletedRecording
+
 __all__ = [
     "StopRecording",
     "SetWatchedChannels",
@@ -46,6 +48,7 @@ __all__ = [
     "DisconnectAccount",
     "RefreshSubscriptions",
     "RefreshArchive",
+    "DismissArchive",
     "OpenRecordingPath",
     "GuiCommand",
 ]
@@ -128,6 +131,14 @@ class OpenRecordingPath:
     reveal: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class DismissArchive:
+    """확인한 항목을 보관함에서만 제외해 달라. 실제 파일은 건드리지 않는다."""
+
+    recordings: tuple[CompletedRecording, ...] = ()
+    missing_only: bool = False
+
+
 GuiCommand = (
     StopRecording
     | SetWatchedChannels
@@ -136,6 +147,7 @@ GuiCommand = (
     | DisconnectAccount
     | RefreshSubscriptions
     | RefreshArchive
+    | DismissArchive
     | OpenRecordingPath
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

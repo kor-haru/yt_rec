@@ -161,6 +161,7 @@ class AppState(QObject):
     settings_save_failed = Signal(str)
 
     archive_changed = Signal(object)
+    archive_dismiss_finished = Signal(object)
     """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
 
     snapshot_changed = Signal(object)
@@ -475,7 +476,7 @@ class AppState(QObject):
         usable_while_attached = (
             isinstance(command, (
                 cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
-                cmd.RefreshArchive, cmd.OpenRecordingPath,
+                cmd.RefreshArchive, cmd.OpenRecordingPath, cmd.DismissArchive,
             )) and bool(self._sources)
         )
         if not connected and not usable_while_attached:
@@ -526,6 +527,10 @@ class AppState(QObject):
     def open_recording_path(self, path: str, *, reveal: bool = False) -> bool:
         """완료 파일 재생 또는 파일 위치 열기를 요청한다."""
         return self.send_command(cmd.OpenRecordingPath(path, reveal=reveal))
+
+    def dismiss_archive(self, recordings: Iterable[CompletedRecording], *, missing_only: bool = False) -> bool:
+        """확인한 완료 항목의 이력만 제외하도록 요청한다. 파일 삭제가 아니다."""
+        return self.send_command(cmd.DismissArchive(tuple(recordings), missing_only=missing_only))
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -643,6 +648,9 @@ class AppState(QObject):
     def _on_settings_failed(self, event: ev.SettingsSaveFailed) -> None:
         self.settings_save_failed.emit(event.message)
 
+    def _on_archive_dismiss_finished(self, event: ev.ArchiveDismissFinished) -> None:
+        self.archive_dismiss_finished.emit(event)
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -651,6 +659,7 @@ class AppState(QObject):
         ev.RecordingProgress: _on_recording_progress,
         ev.RecordingFinished: _on_recording_finished,
         ev.CompletedChanged: _on_completed,
+        ev.ArchiveDismissFinished: _on_archive_dismiss_finished,
         ev.LogAppended: _on_log,
         ev.QuotaChanged: _on_quota,
         ev.AccountChanged: _on_account,

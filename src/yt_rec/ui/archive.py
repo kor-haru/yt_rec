@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableView,
     QVBoxLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..state.models import CompletedRecording, CompletionStatus
+from ..state.events import ArchiveDismissFinished
 from ..state.store import AppState
 from .formatting import completion_status_text, format_bytes, format_duration, to_local
 
@@ -90,6 +92,7 @@ class ArchiveDialog(QDialog):
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._dismiss_pending = False
         self.setObjectName("ArchiveDialog")
         self.setWindowTitle("보관함 — yt-rec")
         self.setMinimumSize(720, 440)
@@ -139,6 +142,20 @@ class ArchiveDialog(QDialog):
         self.detail_label.setMaximumHeight(110)
         layout.addWidget(self.detail_label)
 
+        cleanup = QHBoxLayout()
+        self.dismiss_button = QPushButton("이력에서 제거", self)
+        self.cleanup_button = QPushButton("파일 없는 이력 정리", self)
+        self.dismiss_button.setToolTip("선택한 항목을 보관함에서만 숨깁니다. 실제 파일은 삭제하지 않습니다")
+        self.cleanup_button.setToolTip("전체 보관함에서 파일 없음이 확인된 항목만 정리합니다. 연결되지 않은 드라이브·접근 오류는 제외합니다")
+        cleanup.addWidget(self.dismiss_button)
+        cleanup.addWidget(self.cleanup_button)
+        cleanup.addStretch()
+        layout.addLayout(cleanup)
+        self.action_label = QLabel(self)
+        self.action_label.setWordWrap(True)
+        self.action_label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.action_label)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
         self.play_button = QPushButton("재생", self)
         self.reveal_button = QPushButton("파일 위치 열기", self)
@@ -156,7 +173,11 @@ class ArchiveDialog(QDialog):
         self.play_button.clicked.connect(self.play_selected)
         self.reveal_button.clicked.connect(self.reveal_selected)
         self.copy_button.clicked.connect(self.copy_selected)
+        self.dismiss_button.clicked.connect(self.dismiss_selected)
+        self.cleanup_button.clicked.connect(self.cleanup_missing)
         state.archive_changed.connect(self._on_archive)
+        state.recordings_changed.connect(self._selection_changed)
+        state.archive_dismiss_finished.connect(self._on_dismiss_finished)
         self._on_archive(state.archive)
         if state.backend_attached:
             state.refresh_archive()
@@ -198,6 +219,10 @@ class ArchiveDialog(QDialog):
         self.play_button.setEnabled(can_open)
         self.reveal_button.setEnabled(has_path and item.status is not CompletionStatus.MISSING and self._state.backend_attached)
         self.copy_button.setEnabled(has_path)
+        can_dismiss = self._state.backend_attached and not self._dismiss_pending
+        active_ids = {recording.recording_id for recording in self._state.recordings}
+        self.dismiss_button.setEnabled(can_dismiss and item is not None and item.recording_id not in active_ids)
+        self.cleanup_button.setEnabled(can_dismiss and bool(self._missing_items()))
         if item is None:
             self.detail_label.setText("녹화를 선택하면 저장 위치와 복구 내용을 볼 수 있습니다.")
         else:
@@ -218,3 +243,55 @@ class ArchiveDialog(QDialog):
         item = self._selected()
         if item and item.output_path:
             QApplication.clipboard().setText(item.output_path)
+
+    def _missing_items(self) -> tuple[CompletedRecording, ...]:
+        active_ids = {item.recording_id for item in self._state.recordings}
+        return tuple(item for item in self._state.archive
+                     if item.file_missing and item.recording_id not in active_ids)
+
+    def dismiss_selected(self) -> None:
+        item = self._selected()
+        if item is not None and self.dismiss_button.isEnabled():
+            self._request_dismiss((item,), missing_only=False)
+
+    def cleanup_missing(self) -> None:
+        items = self._missing_items()
+        if items and self.cleanup_button.isEnabled():
+            self._request_dismiss(items, missing_only=True)
+
+    def _confirm_dismiss(self, items: tuple[CompletedRecording, ...], *, missing_only: bool) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("보관함 이력 정리")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        subject = (f"검색 결과와 관계없이 전체 보관함에서 파일이 없는 {len(items)}건의 이력을 제거할까요?"
+                   if missing_only else f"‘{items[0].title}’ 항목을 이력에서 제거할까요?")
+        box.setText(subject + "\n\n실제 영상과 녹화 조각은 삭제하지 않습니다.\n"
+                    "제거한 항목은 새로고침하거나 앱을 다시 열어도 보관함에 나타나지 않습니다.")
+        if missing_only:
+            box.setInformativeText("진행 중인 녹화, 연결되지 않은 드라이브, 접근 권한 등으로 파일 유무를 확인하지 못한 항목은 제외합니다.")
+        remove = box.addButton("이력에서 제거", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is remove
+
+    def _request_dismiss(self, items: tuple[CompletedRecording, ...], *, missing_only: bool) -> None:
+        if not self._confirm_dismiss(items, missing_only=missing_only):
+            return
+        self._dismiss_pending = True
+        self.action_label.setText("보관함 이력을 정리하는 중입니다…")
+        self._selection_changed()
+        if not self._state.dismiss_archive(items, missing_only=missing_only):
+            self._on_dismiss_finished(ArchiveDismissFinished(error="백엔드에 연결되지 않아 이력을 제거하지 못했습니다."))
+
+    def _on_dismiss_finished(self, result: ArchiveDismissFinished) -> None:
+        self._dismiss_pending = False
+        if result.error:
+            self.action_label.setText(result.error)
+        elif result.removed_count:
+            self.action_label.setText(f"{result.removed_count}건을 이력에서 제거했습니다. 실제 영상과 녹화 조각은 그대로 두었습니다.")
+        else:
+            self.action_label.setText("제거한 이력이 없습니다. 파일이 복원되었거나 녹화·이력 상태가 바뀌었을 수 있습니다. 새로고침 후 확인하세요.")
+        self._selection_changed()

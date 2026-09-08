@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from yt_rec.backend import archive as backend
 from yt_rec.state import commands as cmd, events as ev
-from yt_rec.state.models import CompletedRecording, CompletionStatus
+from yt_rec.state.models import CompletedRecording, CompletionStatus, Recording
 from yt_rec.state.store import MAX_COMPLETED, AppState, EventSource
 from yt_rec.ui.archive import ArchiveDialog
 
@@ -32,6 +32,160 @@ def save_record(root: Path, video_id: str, **changes: object) -> Path:
     }
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize("condition,confirmed", [
+    ("missing", True), ("permission", False), ("parent_permission", False),
+    ("disconnected", False), ("directory", False),
+])
+def test_bulk_cleanup_requires_missing_file_and_readable_parent(tmp_path, monkeypatch, condition, confirmed):
+    output = tmp_path / "unmounted" / "video.mp4" if condition == "disconnected" else tmp_path / "video.mp4"
+    save_record(tmp_path, "vid", output_path=str(output))
+    if condition == "permission":
+        original_stat = Path.stat
+        def denied_stat(path, *args, **kwargs):
+            if path == output:
+                raise PermissionError("access denied")
+            return original_stat(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "stat", denied_stat)
+    elif condition == "parent_permission":
+        def denied_listdir(_path):
+            raise PermissionError("parent access denied")
+        monkeypatch.setattr(backend.os, "listdir", denied_listdir)
+    elif condition == "directory":
+        output.mkdir()
+    item, = backend.load_archive(tmp_path)
+    assert item.status is CompletionStatus.MISSING
+    assert item.file_missing is confirmed
+    assert ("확인하지 못했습니다" in item.note) is (not confirmed)
+
+
+def test_dismiss_restart_preserves_files_and_distinguishes_same_video_paths(tmp_path):
+    root_a, root_b = tmp_path / "한글, 첫 폴더", tmp_path / "second"
+    first_state = save_record(root_a, "same", status="partial")
+    second_state = save_record(root_b, "same")
+    video = root_a / "same.mp4"
+    video.write_bytes(b"partial media")
+    fragment = first_state.parent / "fragment-001.ts"
+    fragment.write_bytes(b"recoverable fragment")
+    seen = tmp_path / "seen-videos.json"
+    seen.write_text('["same"]', encoding="utf-8")
+    protected = {path: path.read_bytes() for path in (first_state, second_state, video, fragment, seen)}
+    store = backend.ArchiveStore(tmp_path / "roots.json")
+    store.remember(root_a)
+    store.remember(root_b)
+    roots_before = store.path.read_bytes()
+    selected = next(item for item in store.load() if item.output_path == str(video))
+    store.dismiss((selected,))
+    store.dismiss((selected,))
+    assert len(store.load()) == 1
+    restarted = backend.ArchiveStore(store.path)
+    assert restarted.load()[0].output_path == str(root_b / "same.mp4")
+    assert all(path.read_bytes() == before for path, before in protected.items())
+    assert store.path.read_bytes() == roots_before
+    # A new recording to the same location is a new history entry.
+    save_record(root_a, "same", finished_at=2000)
+    assert len(restarted.load()) == 2
+
+
+def test_dismiss_write_failure_preserves_previous_exclusions_and_memory(tmp_path, monkeypatch):
+    save_record(tmp_path, "one")
+    save_record(tmp_path, "two")
+    store = backend.ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    one, two = store.load()
+    store.dismiss((one,))
+    saved = store.dismissed_path.read_bytes()
+    def cannot_replace(*_args):
+        raise PermissionError("exclude list is read-only")
+    monkeypatch.setattr(backend.os, "replace", cannot_replace)
+    with pytest.raises(PermissionError):
+        store.dismiss((two,))
+    assert store.load() == (two,)
+    assert backend.ArchiveStore(store.path).load() == (two,)
+    assert store.dismissed_path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("contents", ["broken", "{}", '[["only-id"]]', '[["id", null, "date"]]'])
+def test_corrupt_dismiss_list_is_not_silently_overwritten(tmp_path, contents):
+    path = tmp_path / "roots.json"
+    dismissed = path.with_suffix(".dismissed.json")
+    dismissed.write_text(contents, encoding="utf-8")
+    with pytest.raises(ValueError):
+        backend.ArchiveStore(path)
+    assert dismissed.read_text(encoding="utf-8") == contents
+
+
+def test_archive_cleanup_confirmation_cancellation_and_persisted_result(state, monkeypatch):
+    source = EventSource()
+    state.attach(source)
+    missing = CompletedRecording("missing", "옮긴 영상", status=CompletionStatus.MISSING,
+                                 output_path="Z:/한글, 영상.mp4", file_missing=True)
+    inaccessible = CompletedRecording("offline", "외장 영상", status=CompletionStatus.MISSING,
+                                      output_path="Y:/video.mp4")
+    active = CompletedRecording("active", "진행 중", file_missing=True)
+    state.apply(ev.CompletedChanged((missing, inaccessible, active)))
+    state.apply(ev.RecordingStarted(Recording(recording_id="active", title="진행 중")))
+    dialog = ArchiveDialog(state)
+    commands = []
+    state.command_requested.connect(commands.append)
+    dialog.table.selectRow(0)
+    assert dialog.dismiss_button.isEnabled() and dialog.cleanup_button.isEnabled()
+    def cancel_confirmation(box):
+        assert box.defaultButton().text() == "취소"
+        assert box.textFormat() is Qt.TextFormat.PlainText
+        assert "실제 영상과 녹화 조각은 삭제하지 않습니다" in box.text()
+        box.defaultButton().click()
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", cancel_confirmation)
+    dialog.dismiss_selected()
+    assert not commands
+    assert len(state.archive) == 3
+
+    def accept_bulk_confirmation(box):
+        assert "전체 보관함에서 파일이 없는 1건" in box.text()
+        assert "연결되지 않은 드라이브" in box.informativeText()
+        next(button for button in box.buttons() if button.text() == "이력에서 제거").click()
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", accept_bulk_confirmation)
+    dialog.search_edit.setText("외장")
+    dialog.cleanup_missing()
+    assert commands == [cmd.DismissArchive((missing,), missing_only=True)]
+    assert len(state.archive) == 3
+    assert "정리하는 중" in dialog.action_label.text()
+    assert not dialog.cleanup_button.isEnabled()
+    state.apply(ev.ArchiveDismissFinished(error="제외목록을 저장하지 못했습니다"))
+    assert len(state.archive) == 3
+    assert "저장하지 못했습니다" in dialog.action_label.text()
+    assert "제거했습니다" not in dialog.action_label.text()
+    assert dialog.cleanup_button.isEnabled()
+    state.apply(ev.CompletedChanged((inaccessible, active)))
+    state.apply(ev.ArchiveDismissFinished(removed_count=1))
+    assert "1건을 이력에서 제거했습니다" in dialog.action_label.text()
+    assert not dialog.cleanup_button.isEnabled()
+    dialog.close()
+
+
+def test_archive_manual_dismiss_uses_selected_generation_and_excludes_active(state, monkeypatch):
+    state.attach(EventSource())
+    completed = CompletedRecording("same", "첫 파일", output_path="D:/one.mp4")
+    other = CompletedRecording("same", "다른 파일", output_path="D:/two.mp4")
+    state.apply(ev.CompletedChanged((completed, other)))
+    dialog = ArchiveDialog(state)
+    commands = []
+    state.command_requested.connect(commands.append)
+    monkeypatch.setattr(dialog, "_confirm_dismiss", lambda *_args, **_kwargs: True)
+    dialog.table.selectRow(0)
+    selected = dialog._selected()
+    dialog.dismiss_selected()
+    assert commands == [cmd.DismissArchive((selected,))]
+    assert state.archive == (completed, other)
+    state.apply(ev.ArchiveDismissFinished())
+    state.apply(ev.RecordingStarted(Recording(recording_id="same", title="다시 녹화 중")))
+    assert not dialog.dismiss_button.isEnabled()
+    dialog.dismiss_selected()
+    assert len(commands) == 1
+    dialog.close()
 
 
 def test_history_restores_real_size_media_duration_missing_partial_and_bad_records(tmp_path: Path) -> None:
