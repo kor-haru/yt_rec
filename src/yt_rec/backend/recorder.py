@@ -7,7 +7,6 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from yt_rec.recording.engine import RecordingEngine
@@ -204,16 +203,13 @@ class EngineRecorder:
         self._last_progress: dict[str, tuple[int, timedelta]] = {}
 
     def update_options(self, values: Mapping[str, Any]) -> None:
-        changes: dict[str, Any] = {}
-        if "output_dir" in values and values["output_dir"]:
-            changes["output_dir"] = Path(str(values["output_dir"]))
-        if "max_height" in values:
-            height = values["max_height"]
-            changes["max_height"] = int(height) if height is not None else None
-        if "live_from_start" in values:
-            changes["live_from_start"] = bool(values["live_from_start"])
-        if changes:
-            self._options = self._options.with_(**changes)
+        with self._lock:
+            self._options = self._options.with_(**dict(values))
+
+    @property
+    def options(self) -> RecordingOptions:
+        with self._lock:
+            return self._options
 
     def is_recording(self, video_id: str) -> bool:
         with self._lock:
@@ -226,10 +222,12 @@ class EngineRecorder:
         channel_id: str = "",
         channel_name: str = "",
         title: str = "",
-    ) -> None:
+    ) -> bool:
         with self._lock:
             if video_id in self._engines:
-                return
+                return False
+            if len(self._engines) >= self._options.max_recordings:
+                return False
             quality = quality_label(self._options.max_height)
             meta = {
                 "title": title or video_id,
@@ -251,7 +249,7 @@ class EngineRecorder:
                     title=title or video_id,
                     channel_id=channel_id,
                     channel_name=channel_name,
-                    quality=quality_label(self._options.max_height),
+                    quality=quality,
                     state=RecordingState.STARTING,
                     started_at=datetime.now(timezone.utc),
                 )
@@ -266,6 +264,7 @@ class EngineRecorder:
         with self._lock:
             self._threads[video_id] = thread
         thread.start()
+        return True
 
     def stop(self, recording_id: str) -> None:
         with self._lock:

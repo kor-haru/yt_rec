@@ -61,6 +61,8 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
+from yt_rec.recording.options import RecordingOptions
+
 from . import commands as cmd
 from . import events as ev
 from .models import (
@@ -152,6 +154,11 @@ class AppState(QObject):
     subscriptions_changed = Signal(object)
     """payload: ``tuple[Subscription, ...]``"""
 
+    settings_changed = Signal(object)
+    """payload: 저장·적용된 RecordingOptions"""
+
+    settings_save_failed = Signal(str)
+
     snapshot_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.AppSnapshot` — 무엇이든 바뀌면 방출.
 
@@ -196,6 +203,7 @@ class AppState(QObject):
         self._quota = QuotaStatus()
         self._account = AccountInfo()
         self._subscriptions: tuple[Subscription, ...] = ()
+        self._settings: RecordingOptions | None = None
 
         self._dirty: set[str] = set()
         self._sources: list[EventSource] = []
@@ -285,6 +293,11 @@ class AppState(QObject):
     def subscriptions(self) -> tuple[Subscription, ...]:
         self._require_gui_thread("subscriptions")
         return self._subscriptions
+
+    @property
+    def settings(self) -> RecordingOptions | None:
+        self._require_gui_thread("settings")
+        return self._settings
 
     def snapshot(self) -> AppSnapshot:
         """현재 상태 전체를 한 덩어리로 돌려준다. GUI 스레드 전용."""
@@ -435,7 +448,10 @@ class AppState(QObject):
         stop_while_attached = (
             isinstance(command, cmd.StopRecording) and bool(self._sources)
         )
-        if not connected and not login_while_attached and not stop_while_attached:
+        settings_while_attached = (
+            isinstance(command, cmd.UpdateSettings) and bool(self._sources)
+        )
+        if not connected and not login_while_attached and not stop_while_attached and not settings_while_attached:
             self.command_rejected.emit(command, "백엔드에 연결되지 않았습니다")
             return False
         self.command_requested.emit(command)
@@ -575,6 +591,13 @@ class AppState(QObject):
         self._subscriptions = tuple(event.subscriptions)
         self._dirty.add("subscriptions")
 
+    def _on_settings(self, event: ev.SettingsChanged) -> None:
+        self._settings = event.options
+        self._dirty.add("settings")
+
+    def _on_settings_failed(self, event: ev.SettingsSaveFailed) -> None:
+        self.settings_save_failed.emit(event.message)
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -586,6 +609,8 @@ class AppState(QObject):
         ev.QuotaChanged: _on_quota,
         ev.AccountChanged: _on_account,
         ev.SubscriptionsChanged: _on_subscriptions,
+        ev.SettingsChanged: _on_settings,
+        ev.SettingsSaveFailed: _on_settings_failed,
     }
 
     # ------------------------------------------------------------------
@@ -629,5 +654,7 @@ class AppState(QObject):
             self.account_changed.emit(self._account)
         if "subscriptions" in dirty:
             self.subscriptions_changed.emit(self._subscriptions)
+        if "settings" in dirty:
+            self.settings_changed.emit(self._settings)
 
         self.snapshot_changed.emit(self._snapshot())

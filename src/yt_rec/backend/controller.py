@@ -5,6 +5,9 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from yt_rec.recording.options import RecordingOptions, save_settings, validate_output_dir
 
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
@@ -44,6 +47,8 @@ class WatchController:
         clock: Callable[[], datetime] | None = None,
         poll_interval: float = WATCH_INTERVAL_SECONDS,
         seen: object | None = None,
+        options: RecordingOptions | None = None,
+        settings_saver: Callable[[RecordingOptions], object] = save_settings,
     ) -> None:
         self._emit = emit
         self._auth = auth
@@ -53,6 +58,13 @@ class WatchController:
         self._youtube_factory = youtube_factory
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.poll_interval = poll_interval
+        self._options = options or getattr(
+            recorder, "options", RecordingOptions(output_dir=Path("recordings"))
+        )
+        self._settings_saver = settings_saver
+        self._requested_poll_interval = (
+            options.poll_interval_seconds if options is not None else poll_interval
+        )
         self._seen = seen if seen is not None else MemorySeenStore()
         self._lock = threading.Lock()
         self._youtube: object | None = None
@@ -62,6 +74,7 @@ class WatchController:
         self._last_poll_at: datetime | None = None
 
     def start(self) -> None:
+        self._emit(ev.SettingsChanged(self._options))
         recover = getattr(self._recorder, "recover_pending", None)
         if recover is not None:
             recover()
@@ -113,9 +126,25 @@ class WatchController:
                 case cmd.StopRecording(recording_id=rid):
                     self._recorder.stop(rid)
                 case cmd.UpdateSettings(values=values):
-                    updater = getattr(self._recorder, "update_options", None)
-                    if updater is not None:
-                        updater(values)
+                    self._update_settings_locked(dict(values))
+
+    def _update_settings_locked(self, values: dict[str, object]) -> None:
+        try:
+            updated = self._options.with_(**values)
+            directory = validate_output_dir(updated.output_dir)
+            updated = updated.with_(output_dir=directory)
+            self._settings_saver(updated)
+            self._recorder.update_options(updated.to_dict())
+        except (OSError, ValueError, TypeError) as exc:
+            self._emit(ev.SettingsSaveFailed(str(exc)))
+            return
+        self._options = updated
+        self._requested_poll_interval = updated.poll_interval_seconds
+        self._emit(ev.SettingsChanged(updated))
+        if self._connected:
+            # 다음 예정 시각과 API 요청이 새 간격을 함께 사용한다.
+            self._last_poll_at = None
+            self._poll_locked()
 
     def tick(self) -> None:
         if not self._lock.acquire(blocking=False):
@@ -242,7 +271,10 @@ class WatchController:
         selected = tuple(self._selection.load())
         now = self._clock()
         limit = int(getattr(self._youtube, "quota_limit", 10_000) or 10_000)
-        interval = recommended_poll_interval(len(selected), quota_limit=limit)
+        interval = max(
+            self._requested_poll_interval,
+            recommended_poll_interval(len(selected), quota_limit=limit),
+        )
         self.poll_interval = interval
         next_at = now + timedelta(seconds=interval)
         if not selected:
@@ -316,12 +348,15 @@ class WatchController:
             return
         self._seen.mark_started(live.video_id)
         try:
-            self._recorder.start(
+            started = self._recorder.start(
                 live.video_id,
                 channel_id=live.channel_id,
                 channel_name=live.channel_name or self._names.get(live.channel_id, ""),
                 title=live.title,
             )
+            if started is False:
+                # 동시 녹화 상한이면 다음 감시 주기에 다시 시도한다.
+                self._seen.unmark_started(live.video_id)
         except Exception as extra:
             self._seen.unmark_started(live.video_id)
             self._log(Severity.ERROR, f"녹화를 시작하지 못했다: {extra}")

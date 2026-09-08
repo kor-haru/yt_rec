@@ -5,11 +5,10 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
-from pathlib import Path
 
-from PySide6.QtCore import QTimer, Slot
+from PySide6.QtCore import QThread, QTimer, Slot
 
-from yt_rec.recording.options import RecordingOptions, load_settings
+from yt_rec.recording.options import RecordingOptions, default_settings_path, load_settings, save_settings
 from yt_rec.state.store import EventSource
 
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
@@ -48,6 +47,7 @@ class BackendSource(EventSource):
         self._worker: threading.Thread | None = None
         self._poll_pending = False
         self._poll_flag = threading.Lock()
+        self._stopping = False
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
@@ -67,7 +67,11 @@ class BackendSource(EventSource):
             timer.start()
             self._poll_timer = timer
 
-    def stop(self) -> None:
+    def begin_shutdown(self) -> None:
+        """GUI 스레드에서 새 작업을 차단하고 종료를 요청한다. 기다리지 않는다."""
+        if self._stopping:
+            return
+        self._stopping = True
         if self._poll_timer is not None:
             self._poll_timer.stop()
         recorder = getattr(self._controller, "_recorder", None)
@@ -76,14 +80,32 @@ class BackendSource(EventSource):
             if stop_all is not None:
                 stop_all()
         if self._background:
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
             self._queue.put(_SENTINEL)
+
+    def stop(self) -> None:
+        """종료 요청 뒤 작업 스레드를 기다린다. GUI 밖에서 호출할 수 있다."""
+        if not self._stopping:
+            if QThread.currentThread() is not self.thread():
+                raise RuntimeError("GUI 스레드에서 begin_shutdown()을 먼저 호출하세요")
+            self.begin_shutdown()
+        recorder = getattr(self._controller, "_recorder", None)
+        if self._background:
             worker = self._worker
             if worker is not None and worker is not threading.current_thread():
-                worker.join(timeout=30)
+                worker.join()
         if recorder is not None:
+            # 종료 요청 당시 API 조회 중이었다면 뒤늦게 생긴 녹화도 멈춘다.
+            stop_all = getattr(recorder, "stop_all", None)
+            if stop_all is not None:
+                stop_all()
             joiner = getattr(recorder, "join_all", None)
             if joiner is not None:
-                joiner(timeout=600)
+                joiner(timeout=None)
 
     def tick(self) -> None:
         self._run(self._controller.tick, coalesce_poll=True)
@@ -92,6 +114,8 @@ class BackendSource(EventSource):
         self.tick()
 
     def _run(self, work: Callable[[], None], *, coalesce_poll: bool = False) -> None:
+        if self._stopping:
+            return
         if not self._background:
             work()
             return
@@ -125,9 +149,9 @@ class BackendSource(EventSource):
 def create_backend_source(
     *,
     background: bool = True,
-    poll_interval: float = WATCH_INTERVAL_SECONDS,
+    poll_interval: float | None = None,
 ) -> BackendSource:
-    """생산용 소스. 토큰은 OS 보안 저장소, 출력은 recordings/1080p."""
+    """생산용 소스. 앱 전체가 같은 사용자 설정과 출력 위치를 쓴다."""
 
     box: dict[str, BackendSource] = {}
     seen = FileSeenStore()
@@ -141,10 +165,26 @@ def create_backend_source(
         else:
             seen.unmark_started(video_id)
 
-    options = load_settings(
-        default=RecordingOptions(output_dir=Path("recordings"), max_height=1080)
-    )
+    options = load_settings()
+    if not default_settings_path().exists():
+        options.output_dir.mkdir(parents=True, exist_ok=True)
     recorder = EngineRecorder(options, emit, on_result=on_result)  # type: ignore[arg-type]
+
+    def persist_settings(updated: RecordingOptions) -> None:
+        previous = recorder.options
+        autostart_changed = updated.autostart != previous.autostart
+        if autostart_changed:
+            from yt_rec.desktop import set_autostart
+
+            set_autostart(updated.autostart)
+        try:
+            save_settings(updated)
+        except OSError:
+            if autostart_changed:
+                set_autostart(previous.autostart)
+            raise
+
+    effective_interval = options.poll_interval_seconds if poll_interval is None else poll_interval
 
     def youtube_factory(credentials: object) -> YouTubeApi:
         return YouTubeApi(session_from_credentials(credentials))
@@ -156,13 +196,16 @@ def create_backend_source(
         selection=FileSelectionStore(),
         recorder=recorder,
         youtube_factory=youtube_factory,  # type: ignore[arg-type]
-        poll_interval=poll_interval,
+        poll_interval=effective_interval,
         seen=seen,
+        options=options,
+        settings_saver=persist_settings,
     )
     source = BackendSource(
         controller,
         background=background,
-        poll_interval_ms=int(poll_interval * 1000) if poll_interval > 0 else 0,
+        # 짧은 타이머는 일정을 확인할 뿐 API는 controller가 실제 간격대로 호출한다.
+        poll_interval_ms=1000 if effective_interval > 0 else 0,
     )
     box["source"] = source
     return source

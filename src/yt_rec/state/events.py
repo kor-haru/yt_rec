@@ -28,6 +28,8 @@ import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta
 
+from yt_rec.recording.options import RecordingOptions
+
 from .models import (
     AccountInfo,
     CompletedRecording,
@@ -53,6 +55,8 @@ __all__ = [
     "QuotaChanged",
     "AccountChanged",
     "SubscriptionsChanged",
+    "SettingsChanged",
+    "SettingsSaveFailed",
     "BackendEvent",
     "NaiveDatetimeWarning",
     "naive_datetime_fields",
@@ -149,6 +153,18 @@ class SubscriptionsChanged:
     subscriptions: tuple[Subscription, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SettingsChanged:
+    """저장·적용된 설정. 시작 시에는 복원한 설정을 알린다."""
+
+    options: RecordingOptions
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsSaveFailed:
+    message: str
+
+
 BackendEvent = (
     ConnectionChanged
     | WatchStatusChanged
@@ -160,6 +176,8 @@ BackendEvent = (
     | QuotaChanged
     | AccountChanged
     | SubscriptionsChanged
+    | SettingsChanged
+    | SettingsSaveFailed
 )
 
 

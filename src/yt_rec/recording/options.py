@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -18,6 +20,8 @@ __all__ = [
     "default_settings_path",
     "load_settings",
     "save_settings",
+    "validate_output_dir",
+    "output_free_bytes",
 ]
 
 #: GUI 콤보박스용 화질 상한 프리셋. ``None`` 은 상한 없음.
@@ -49,6 +53,14 @@ class RecordingOptions:
 
     #: 영상 화질 상한(세로 해상도). ``None`` 이면 상한 없음.
     max_height: int | None = 1080
+
+    #: 앱 설정. 조각 병렬 다운로드 수와 동시 방송 수는 별개다.
+    max_recordings: int = 2
+    poll_interval_seconds: int = 120
+    autostart: bool = False
+    start_hidden: bool = False
+    log_retention_days: int = 14
+    notifications_enabled: bool = True
 
     #: 최종 컨테이너. ``mp4`` 또는 ``mkv``.
     container: str = "mp4"
@@ -107,6 +119,21 @@ class RecordingOptions:
     extra_ytdlp_args: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
+        for name, low, high in (
+            ("max_recordings", 1, 16),
+            ("poll_interval_seconds", 30, 3600),
+            ("log_retention_days", 1, 365),
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f"{name}: {low}~{high} 사이의 정수를 입력하세요")
+        for name in ("autostart", "start_hidden", "notifications_enabled"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name}: 켜기 또는 끄기만 가능합니다")
+        if self.max_height is not None and (
+            type(self.max_height) is not int or self.max_height <= 0
+        ):
+            raise ValueError("max_height: 화질 상한은 양의 정수여야 합니다")
         if self.fragment_retries < 0:
             raise ValueError("fragment_retries 는 음수일 수 없다")
         if self.total_retries < 0:
@@ -158,6 +185,8 @@ class RecordingOptions:
 
     @classmethod
     def from_dict(cls, data: dict) -> RecordingOptions:
+        if not isinstance(data, dict):
+            raise ValueError("설정은 JSON 객체여야 합니다")
         known = {f for f in cls.__dataclass_fields__}
         kwargs = {k: v for k, v in data.items() if k in known}
         kwargs["output_dir"] = Path(kwargs["output_dir"])
@@ -167,6 +196,25 @@ class RecordingOptions:
             kwargs["work_root"] = None
         kwargs["extra_ytdlp_args"] = tuple(kwargs.get("extra_ytdlp_args") or ())
         return cls(**kwargs)
+
+
+def validate_output_dir(path: str | Path) -> Path:
+    """기존 디렉터리에 실제 임시 파일을 만들어 쓰기 권한을 확인한다."""
+    if not str(path).strip():
+        raise ValueError("저장 위치를 선택하세요")
+    directory = Path(path).expanduser().resolve()
+    if not directory.is_dir():
+        raise ValueError("저장 위치: 존재하는 폴더를 선택하세요")
+    try:
+        with tempfile.TemporaryFile(dir=directory):
+            pass
+    except OSError as exc:
+        raise ValueError(f"저장 위치에 쓸 수 없습니다: {exc}") from exc
+    return directory
+
+
+def output_free_bytes(path: str | Path) -> int:
+    return shutil.disk_usage(Path(path).expanduser()).free
 
 
 def default_settings_path() -> Path:

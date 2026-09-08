@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -18,6 +17,7 @@ from ..state.store import AppState
 from .account import AccountDialog
 from .channels import ChannelsDialog
 from .logs import LogDialog
+from .settings import SettingsDialog
 from .widgets import set_muted
 
 __all__ = [
@@ -88,17 +88,5 @@ class ArchiveDialog(PlaceholderDialog):
     screen_title = "보관함"
     issue = 10
     summary = "완료된 녹화를 찾아보고 파일에 접근하는 화면입니다."
-
-
-class SettingsDialog(PlaceholderDialog):
-    screen_title = "설정"
-    issue = 11
-    summary = "저장 위치와 녹화 옵션을 조정하는 다이얼로그입니다."
-
-    def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
-        super().__init__(state, parent)
-        # 설정은 모달로 제공하기로 정해져 있다(#11).
-        self.setModal(True)
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
 
 
