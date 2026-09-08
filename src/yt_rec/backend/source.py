@@ -5,12 +5,18 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QThread, QTimer, Slot
 
 from yt_rec.recording.options import RecordingOptions, default_settings_path, load_settings, save_settings
+from yt_rec.logs import LogStore, sanitize_event
+from yt_rec.state import commands as cmd
+from yt_rec.state import events as ev
+from yt_rec.state.models import LogEntry, Severity
 from yt_rec.state.store import EventSource
 
+from .archive import ArchiveStore, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
@@ -37,6 +43,8 @@ class BackendSource(EventSource):
         *,
         background: bool = False,
         poll_interval_ms: int = WATCH_INTERVAL_SECONDS * 1000,
+        log_store: LogStore | None = None,
+        archive_store: ArchiveStore | None = None,
     ) -> None:
         super().__init__()
         self._controller = controller
@@ -48,10 +56,67 @@ class BackendSource(EventSource):
         self._poll_pending = False
         self._poll_flag = threading.Lock()
         self._stopping = False
+        self.log_store = log_store
+        self._archive_store = archive_store
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
-        self._run(lambda: self._controller.handle_command(command))  # type: ignore[arg-type]
+        def handle() -> None:
+            if isinstance(command, cmd.RefreshArchive):
+                self._refresh_archive()
+            elif isinstance(command, cmd.OpenRecordingPath):
+                try:
+                    open_archive_path(command.path, reveal=command.reveal)
+                except (OSError, ValueError) as exc:
+                    self._warning(f"파일을 열지 못했습니다: {exc}")
+            else:
+                self._controller.handle_command(command)  # type: ignore[arg-type]
+        self._run(handle)
+
+    def publish(self, event: object) -> None:
+        """백엔드 사건을 가리고 저장한 다음 화면에 전달한다."""
+        event = sanitize_event(event)
+        if isinstance(event, ev.LogAppended) and self.log_store is not None:
+            try:
+                self.log_store.append(event.entry)
+            except OSError as exc:
+                self._warning(f"로그를 저장하지 못했습니다: {exc}", persist=False)
+        self.event_ready.emit(event)
+        if isinstance(event, ev.SettingsChanged):
+            if self.log_store is not None:
+                try:
+                    self.log_store.set_retention_days(event.options.log_retention_days)
+                except OSError as exc:
+                    self._warning(f"로그 보관 기간을 적용하지 못했습니다: {exc}", persist=False)
+            if self._archive_store is not None:
+                try:
+                    self._archive_store.remember(
+                        event.options.output_dir, work_root=event.options.work_root
+                    )
+                except OSError as exc:
+                    self._warning(f"보관함 위치를 저장하지 못했습니다: {exc}")
+                self._refresh_archive()
+
+    def _warning(self, message: str, *, persist: bool = True) -> None:
+        event = ev.LogAppended(LogEntry(
+            at=datetime.now(timezone.utc), severity=Severity.WARNING,
+            source="backend", message=message,
+        ))
+        if persist:
+            self.publish(event)
+        else:
+            self.event_ready.emit(sanitize_event(event))
+
+    def _refresh_archive(self) -> None:
+        try:
+            if self._archive_store is not None:
+                recordings = self._archive_store.load()
+            else:
+                options = self._controller._options
+                recordings = load_archive(options.output_dir, work_root=options.work_root)
+            self.publish(ev.CompletedChanged(recordings))
+        except (OSError, ValueError) as exc:
+            self._warning(f"보관함을 불러오지 못했습니다: {exc}")
 
     def start(self) -> None:
         if self._background and self._worker is None:
@@ -106,6 +171,11 @@ class BackendSource(EventSource):
             joiner = getattr(recorder, "join_all", None)
             if joiner is not None:
                 joiner(timeout=None)
+        if self.log_store is not None:
+            try:
+                self.log_store.close()
+            except OSError as exc:
+                self._warning(f"로그 파일을 닫지 못했습니다: {exc}", persist=False)
 
     def tick(self) -> None:
         self._run(self._controller.tick, coalesce_poll=True)
@@ -143,7 +213,11 @@ class BackendSource(EventSource):
                 return
             fn = item
             assert callable(fn)
-            fn()
+            try:
+                fn()
+            except Exception as exc:
+                # 한 명령의 실패가 이후 로그인·녹화 명령까지 끊지 않게 한다.
+                self._warning(f"백엔드 작업을 완료하지 못했습니다: {exc}")
 
 
 def create_backend_source(
@@ -155,19 +229,24 @@ def create_backend_source(
 
     box: dict[str, BackendSource] = {}
     seen = FileSeenStore()
+    startup_warnings: list[str] = []
 
     def emit(event: object) -> None:
-        box["source"].event_ready.emit(event)
+        box["source"].publish(event)
 
     def on_result(video_id: str, ok: bool) -> None:
         if ok:
             seen.mark_done(video_id)
         else:
             seen.unmark_started(video_id)
+        box["source"]._run(box["source"]._refresh_archive)
 
     options = load_settings()
     if not default_settings_path().exists():
-        options.output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            options.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            startup_warnings.append(f"기본 녹화 폴더를 만들지 못했습니다. 설정에서 폴더를 선택하세요: {exc}")
     recorder = EngineRecorder(options, emit, on_result=on_result)  # type: ignore[arg-type]
 
     def persist_settings(updated: RecordingOptions) -> None:
@@ -207,5 +286,16 @@ def create_backend_source(
         # 짧은 타이머는 일정을 확인할 뿐 API는 controller가 실제 간격대로 호출한다.
         poll_interval_ms=1000 if effective_interval > 0 else 0,
     )
+    try:
+        source._archive_store = ArchiveStore()
+    except (OSError, ValueError) as exc:
+        startup_warnings.append(f"저장된 보관함 위치를 불러오지 못했습니다. 현재 폴더만 표시합니다: {exc}")
+    try:
+        source.log_store = LogStore(retention_days=options.log_retention_days)
+    except OSError as exc:
+        startup_warnings.append(f"로그 파일을 열지 못했습니다: {exc}")
+    # attach 뒤에 전달해야 첫 경고가 사라지지 않는다.
+    for message in startup_warnings:
+        QTimer.singleShot(0, lambda message=message: source._warning(message))
     box["source"] = source
     return source
