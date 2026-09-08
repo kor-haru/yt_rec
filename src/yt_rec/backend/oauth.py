@@ -76,7 +76,8 @@ def _validate_client_config(data: object) -> dict[str, Any]:
         allowed = {default}
         if key == "auth_uri":
             allowed.add("https://accounts.google.com/o/oauth2/v2/auth")
-        if installed.get(key, default) not in allowed:
+        endpoint = installed.get(key, default)
+        if not isinstance(endpoint, str) or endpoint not in allowed:
             raise ClientConfigError("Google 공식 인증 주소가 아닌 OAuth 설정은 사용할 수 없습니다.")
     return {"installed": {**endpoints, **installed}}
 

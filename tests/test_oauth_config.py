@@ -108,6 +108,7 @@ def test_로그인_대기는_시간_제한이_있다(monkeypatch) -> None:
     {"installed": {"client_id": "x"}},
     {"installed": {"client_id": "x", "client_secret": ""}},
     {"installed": {"client_id": "x", "client_secret": "y", "token_uri": "https://example.com/token"}},
+    {"installed": {"client_id": "x", "client_secret": "y", "auth_uri": []}},
 ])
 def test_잘못된_JSON은_기존_설정을_덮어쓰지_않는다(monkeypatch, tmp_path, config) -> None:
     import yt_rec.backend.oauth as oauth
