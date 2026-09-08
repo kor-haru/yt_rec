@@ -62,6 +62,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
 from yt_rec.recording.options import RecordingOptions
+from ..logs import sanitize_event
 
 from . import commands as cmd
 from . import events as ev
@@ -202,6 +203,7 @@ class AppState(QObject):
         self._completed: list[CompletedRecording] = []
         self._archive: tuple[CompletedRecording, ...] = ()
         self._logs: list[LogEntry] = []
+        self._log_directory: str | None = None
         self._error_count = 0
         self._unseen_error_count = 0
         self._quota = QuotaStatus()
@@ -346,8 +348,25 @@ class AppState(QObject):
         스레드에서 부르면 GUI 스레드의 갱신과 뒤엉킨다.
         """
         self._require_gui_thread("attach()")
+        log_store = getattr(source, "log_store", None)
+        if log_store is not None:
+            self._log_directory = str(log_store.directory)
+            if not self._logs:
+                try:
+                    self._logs = list(log_store.read_recent(MAX_LOGS))
+                except OSError:
+                    self._logs = [LogEntry(at=_now(), severity=Severity.WARNING,
+                                           source="logs", message="이전 로그를 읽지 못했습니다")]
+                self._error_count = sum(entry.severity is Severity.ERROR for entry in self._logs)
+                self._dirty.update({"logs", "errors"})
+                self._schedule_emit()
         source.event_ready.connect(self._on_source_event)
         self._sources.append(source)
+
+    @property
+    def log_directory(self) -> str | None:
+        self._require_gui_thread("log_directory")
+        return self._log_directory
 
     def detach(self, source: EventSource) -> None:
         """연결을 끊는다. 마지막 소스가 빠지면 `연결 안 됨` 으로 되돌린다.
@@ -402,6 +421,7 @@ class AppState(QObject):
         아니라 예외인지는 모듈 docstring `스레드 계약` 에 적어 두었다.
         """
         self._require_gui_thread("apply()")
+        event = sanitize_event(event)
         handler = self._HANDLERS.get(type(event))
         if handler is None:
             raise TypeError(f"알 수 없는 백엔드 이벤트: {type(event)!r}")

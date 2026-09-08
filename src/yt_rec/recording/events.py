@@ -162,7 +162,7 @@ class StallDetected(RecordingEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class LogLine(RecordingEvent):
-    """yt-dlp 원문 출력 한 줄. 로그 뷰어(#12)용."""
+    """비밀값을 제거한 yt-dlp 출력 한 줄. 로그 뷰어(#12)용."""
 
     text: str
 

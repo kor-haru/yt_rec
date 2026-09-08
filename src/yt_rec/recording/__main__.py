@@ -13,6 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from yt_rec.logs import redact
+
 from .binaries import BinaryNotFoundError, resolve_toolchain
 from .engine import RecordingEngine
 from .events import ProgressReported, RecordingEvent, RecordingFinished
@@ -33,7 +35,7 @@ def _print_event(event: RecordingEvent) -> None:
     elif isinstance(event, RecordingFinished):
         sys.stderr.write("\n")
     else:
-        sys.stderr.write(f"\n{type(event).__name__}: {event}\n")
+        sys.stderr.write(f"\n{type(event).__name__}: {redact(str(event))}\n")
 
 
 def _report(verification) -> None:
@@ -53,7 +55,7 @@ def _report(verification) -> None:
         f"음성 {verification.audio_stream_count}"
     )
     for issue in verification.issues:
-        print(f"  - {issue}")
+        print(f"  - {redact(issue)}")
 
 
 def main(argv: list[str] | None = None) -> int:

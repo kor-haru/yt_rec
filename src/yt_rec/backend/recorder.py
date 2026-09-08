@@ -13,6 +13,7 @@ from yt_rec.recording.engine import RecordingEngine
 from yt_rec.recording.events import (
     FragmentRetried,
     FragmentSkipped,
+    LogLine,
     MetadataReady,
     ProgressReported,
     RecordingEvent,
@@ -75,6 +76,14 @@ def translate_engine_event(
     """엔진 사건을 상태 계층 이벤트로 옮긴다. 파일 크기를 다시 재지 않는다."""
     recording_id = event.video_id
     at = _aware(event.at)
+    if isinstance(event, LogLine):
+        from yt_rec.logs import redact
+
+        text = redact(event.text)
+        level = Severity.ERROR if "ERROR" in text.upper() else (
+            Severity.WARNING if "WARNING" in text.upper() else Severity.INFO
+        )
+        return [ev.LogAppended(LogEntry(at=at, severity=level, source=recording_id, message=text))]
     if isinstance(event, MetadataReady):
         meta_title = event.metadata.display_title or title
         meta_channel = event.metadata.channel or channel_name

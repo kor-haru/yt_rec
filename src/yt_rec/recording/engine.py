@@ -29,10 +29,13 @@ import stat
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from datetime import tzinfo
 from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable
+
+from yt_rec.logs import RotatingLog, redact
 
 from .binaries import BinaryNotFoundError, Toolchain, resolve_toolchain
 from .errors import (
@@ -265,6 +268,10 @@ class RecordingEngine:
             self._listeners.remove(callback)
 
     def _emit(self, event: RecordingEvent) -> None:
+        if isinstance(event, LogLine):
+            event = replace(event, text=redact(event.text))
+        elif isinstance(event, StatusChanged):
+            event = replace(event, detail=redact(event.detail))
         for listener in list(self._listeners):
             try:
                 listener(event)
@@ -405,6 +412,7 @@ class RecordingEngine:
         도구가 없거나 준비 단계에서 죽은 것은 환경 문제다. 여기서 종료 상태를 못 박으면
         이전 시도가 남긴 중간 파일을 :meth:`recover_pending` 이 영구히 건너뛴다.
         """
+        message = redact(message)
         work_dir = self.work_dir_for(video_id)
         result = RecordingResult(
             video_id=video_id,
@@ -465,6 +473,14 @@ class RecordingEngine:
                     continue
                 state = self._load_state(work_dir)
                 if state and _is_terminal(state.get("status")):
+                    try:
+                        with RotatingLog(
+                            work_dir / LOG_FILENAME,
+                            retention_days=getattr(self.options, "log_retention_days", 14),
+                        ):
+                            pass  # 종료된 녹화의 만료 로그도 앱 재시작 시 정리한다.
+                    except OSError:
+                        self._emit(LogLine(video_id=work_dir.name, text="[yt-rec] 만료 로그를 정리하지 못했다"))
                     self._cleanup_completed_leftovers(work_dir, state)
                     continue
                 if toolchain_error is not None:
@@ -656,7 +672,9 @@ class RecordingEngine:
         per_format_bytes: dict[str, int] = {}
         stopping = False
         try:
-            with log_path.open("a", encoding="utf-8") as log:
+            with RotatingLog(
+                log_path, retention_days=getattr(self.options, "log_retention_days", 14)
+            ) as log:
                 while True:
                     try:
                         line = lines.get(timeout=1.0)
@@ -733,8 +751,9 @@ class RecordingEngine:
             self._emit(ProgressReported(video_id=video_id, snapshot=snapshot))
             return
 
-        log.write(line + "\n")
-        self._emit(LogLine(video_id=video_id, text=line))
+        safe_line = redact(line)
+        log.write(safe_line + "\n")
+        self._emit(LogLine(video_id=video_id, text=safe_line))
 
         if _POSTPROCESSOR_LINE.match(line):
             # 후처리(병합·타임스탬프 보정)에는 진행률이 나오지 않는다. 몇 GB 를 다시
@@ -1045,6 +1064,13 @@ class RecordingEngine:
         cleanup: bool = False,
         save_state: bool = True,
     ) -> RecordingResult:
+        message = redact(message)
+        if verification is not None:
+            verification = replace(
+                verification,
+                issues=tuple(redact(item) for item in verification.issues),
+                demux_errors=tuple(redact(item) for item in verification.demux_errors),
+            )
         result = RecordingResult(
             video_id=video_id,
             status=status,
