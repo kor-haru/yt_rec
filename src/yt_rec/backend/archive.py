@@ -153,7 +153,7 @@ class ArchiveStore:
 def open_archive_path(path: str, *, reveal: bool = False) -> None:
     """로컬 미디어를 기본 앱으로 열거나 파일 관리자로 보여 준다.
 
-    Linux 파일 관리자 공통 선택 규약이 없으므로 포함 폴더를 연다.
+    Linux는 FileManager1 선택 요청을 먼저 보내고, 지원하지 않으면 포함 폴더를 연다.
     잘못된 기록이 실행 파일이나 URL을 열지 못하도록 미디어 파일만 받는다.
     """
     target = Path(path)
@@ -167,6 +167,24 @@ def open_archive_path(path: str, *, reveal: bool = False) -> None:
         else:
             os.startfile(str(target))
     else:
+        if sys.platform != "darwin" and reveal:
+            # https://wiki.freedesktop.org/www/Specifications/file-manager-interface/
+            # URI 인코딩으로 공백·쉼표·한글을 D-Bus 배열 구분자와 분리한다.
+            try:
+                subprocess.run(
+                    [
+                        "dbus-send", "--session", "--print-reply", "--reply-timeout=2000",
+                        "--dest=org.freedesktop.FileManager1",
+                        "/org/freedesktop/FileManager1",
+                        "org.freedesktop.FileManager1.ShowItems",
+                        f"array:string:{target.as_uri()}", "string:",
+                    ],
+                    check=True, timeout=3, capture_output=True,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass  # D-Bus 도구·세션·지원 파일 관리자가 없으면 폴더는 열어 준다.
+            else:
+                return
         argv = (
             ["open", *(["-R"] if reveal else []), str(target)]
             if sys.platform == "darwin"

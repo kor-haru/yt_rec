@@ -123,7 +123,46 @@ def test_file_manager_routes_preserve_unicode_and_spaces(tmp_path: Path, monkeyp
     elif platform == "darwin":
         assert launched == [["open", "-R", str(path)], ["open", str(path)]]
     else:
-        assert launched == [["xdg-open", str(path.parent)], ["xdg-open", str(path)]]
+        assert launched[0][0] == "dbus-send"
+        assert launched[0][-2:] == [f"array:string:{path.as_uri()}", "string:"]
+        assert launched[1] == ["xdg-open", str(path)]
+
+
+def test_linux_selection_encodes_uri_without_shell_or_array_delimiter_injection(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "한글 🎧, #100% '방송'.mp4"
+    path.write_bytes(b"ok")
+    launched = []
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    monkeypatch.setattr(backend.subprocess, "run", lambda args, **kwargs: launched.append((args, kwargs)))
+    backend.open_archive_path(str(path), reveal=True)
+    assert len(launched) == 1
+    argv, options = launched[0]
+    assert "--session" in argv and "--print-reply" in argv
+    assert "--reply-timeout=2000" in argv
+    assert argv[-3:] == ["org.freedesktop.FileManager1.ShowItems", f"array:string:{path.as_uri()}", "string:"]
+    assert all(character not in argv[-2] for character in (" ", ",", "#", "'", "🎧"))
+    assert "%2C" in argv[-2] and "%23" in argv[-2] and "%25" in argv[-2]
+    assert options == {"check": True, "timeout": 3, "capture_output": True}
+
+
+@pytest.mark.parametrize("failure", [
+    FileNotFoundError("dbus-send missing"),
+    subprocess.CalledProcessError(1, "dbus-send"),
+    subprocess.TimeoutExpired("dbus-send", 3),
+])
+def test_linux_selection_falls_back_to_parent_for_unavailable_service(tmp_path: Path, monkeypatch, failure: Exception) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"ok")
+    launched = []
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    def run(argv, **kwargs):
+        launched.append(argv)
+        if argv[0] == "dbus-send":
+            raise failure
+    monkeypatch.setattr(backend.subprocess, "run", run)
+    backend.open_archive_path(str(path), reveal=True)
+    assert len(launched) == 2
+    assert launched[1] == ["xdg-open", str(path.parent)]
 
 
 def test_file_actions_reject_missing_files_urls_and_executables(tmp_path: Path) -> None:
