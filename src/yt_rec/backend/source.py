@@ -95,7 +95,7 @@ class BackendSource(EventSource):
                     )
                 except OSError as exc:
                     self._warning(f"보관함 위치를 저장하지 못했습니다: {exc}")
-                self._refresh_archive()
+            self._refresh_archive()
 
     def _warning(self, message: str, *, persist: bool = True) -> None:
         event = ev.LogAppended(LogEntry(

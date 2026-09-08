@@ -43,6 +43,8 @@ from .events import (
     RecordingProgress,
     RecordingStarted,
     SubscriptionsChanged,
+    SettingsChanged,
+    SettingsSaveFailed,
     WatchStatusChanged,
     naive_datetime_fields,
 )
@@ -95,6 +97,8 @@ __all__ = [
     "RefreshSubscriptions",
     "RefreshArchive",
     "SetWatchedChannels",
+    "SettingsChanged",
+    "SettingsSaveFailed",
     "Severity",
     "StopReason",
     "StopRecording",

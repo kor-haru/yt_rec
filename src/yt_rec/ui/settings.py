@@ -41,6 +41,7 @@ class SettingsDialog(QDialog):
         directory_row = QHBoxLayout()
         self.output_edit = QLineEdit(self)
         self.output_edit.setObjectName("outputDirectory")
+        self.output_edit.setAccessibleName("녹화 저장 위치")
         directory_row.addWidget(self.output_edit)
         self.browse_button = QPushButton("폴더 선택…", self)
         self.browse_button.clicked.connect(self._browse)

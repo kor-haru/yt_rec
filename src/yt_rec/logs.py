@@ -73,6 +73,17 @@ def sanitize_event(event: object) -> object:
         return replace(event, recording=replace(event.recording, detail=redact(event.recording.detail)))
     if isinstance(event, ev.RecordingFinished):
         return replace(event, completed=replace(event.completed, note=redact(event.completed.note)))
+    if isinstance(event, ev.CompletedChanged):
+        return replace(event, completed=tuple(
+            replace(item, note=redact(item.note)) for item in event.completed
+        ))
+    if isinstance(event, ev.SettingsSaveFailed):
+        return replace(event, message=redact(event.message))
+    if isinstance(event, ev.ChannelsChanged):
+        return replace(event, channels=tuple(
+            replace(channel, last_check_result=redact(channel.last_check_result))
+            for channel in event.channels
+        ))
     return event
 
 
