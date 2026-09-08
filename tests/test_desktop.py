@@ -95,6 +95,16 @@ def test_without_tray_hidden_start_still_shows_and_close_exits(qapp, state, wind
     window.close()
 
 
+def test_tray_reopen_preserves_maximized_window(qapp, state, window_settings, monkeypatch):
+    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True)
+    window.showMaximized()
+    window.hide()
+    session.show_window()
+    assert window.isMaximized()
+    window.desktop_managed = False
+    window.close()
+
+
 def test_notifications_obey_toggle_and_never_include_raw_log(qapp, state, window_settings, monkeypatch):
     window, session, tray = _session(qapp, state, window_settings, monkeypatch, True)
     session._on_errors(1, 1)

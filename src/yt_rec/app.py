@@ -98,7 +98,10 @@ class DesktopSession(QObject):
             self.show_window()
 
     def show_window(self) -> None:
-        self.context.window.showNormal()
+        if self.context.window.isMinimized():
+            self.context.window.showNormal()
+        else:
+            self.context.window.show()
         self.context.window.raise_()
         self.context.window.activateWindow()
 
