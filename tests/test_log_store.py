@@ -248,16 +248,21 @@ def test_log_folder_button_opens_global_location(tmp_path, state, monkeypatch):
     store.close()
 
 
-def test_500_logs_per_second_keep_ui_responsive_and_storage_bounded(tmp_path, qapp):
+@pytest.mark.parametrize("heartbeat_interval_ms", [16, 50])
+def test_500_logs_per_second_keep_ui_responsive_and_storage_bounded(
+    tmp_path, qapp, heartbeat_interval_ms,
+):
     seconds = float(os.environ.get("YT_REC_LOG_SOAK_SECONDS", "3"))
     store = LogStore(tmp_path, max_bytes=128 * 1024)
     state = AppState(emit_interval_ms=200)
     dialog = LogDialog(state)
     dialog.show()
     QApplication.processEvents()
+    # Qt may coalesce delayed timeouts. Probe frequency is not UI throughput;
+    # both normal and coarser probes must enforce the same maximum stall.
     beats = []
     heartbeat = QTimer()
-    heartbeat.setInterval(16)
+    heartbeat.setInterval(heartbeat_interval_ms)
     heartbeat.timeout.connect(lambda: beats.append(time.monotonic()))
     heartbeat.start()
     started = time.monotonic()
@@ -271,13 +276,17 @@ def test_500_logs_per_second_keep_ui_responsive_and_storage_bounded(tmp_path, qa
         QTest.qWait(remaining_ms)
     state.flush()
     QApplication.processEvents()
+    finished = time.monotonic()
     heartbeat.stop()
     store.close()
     assert count == round(seconds * 5) * 100
     assert dialog.model.rowCount() == min(count, 1000)
-    assert len(beats) > seconds * 30
-    max_gap = max((right - left for left, right in zip(beats, beats[1:])), default=0)
+    # Include startup and the tail: an absent/stopped heartbeat must not pass.
+    assert beats, "UI heartbeat never ran"
+    samples = [started, *beats, finished]
+    max_gap = max(right - left for left, right in zip(samples, samples[1:]))
     assert max_gap < 0.25, f"UI event loop blocked for {max_gap:.3f}s"
+    assert finished - started < seconds + 0.25, "fixed log workload missed its deadline"
     assert sum(path.stat().st_size for path in tmp_path.glob("yt-rec.log*")) <= 5 * 128 * 1024
     print(f"logs={count}, seconds={time.monotonic() - started:.2f}, heartbeat_max_gap={max_gap:.3f}s")
     dialog.close()

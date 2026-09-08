@@ -16,8 +16,9 @@ import time
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
+from yt_rec.state import events as ev
 from yt_rec.state.store import AppState
-from yt_rec.state.stub import StubEventSource
+from yt_rec.state.stub import StubEventSource, flood_script
 from yt_rec.ui.main_window import MainWindow
 from yt_rec.ui.settings_store import WindowSettings
 
@@ -39,30 +40,39 @@ def test_초당_100건_주입에도_갱신이_묶이고_위젯이_늘지_않는�
 
     injected: list[int] = []
     repaints: list[int] = []
-    source.event_ready.connect(lambda _e: injected.append(1))
+    source.event_ready.connect(
+        lambda event: injected.append(1) if isinstance(event, ev.RecordingProgress) else None
+    )
     state.recordings_changed.connect(lambda payload: repaints.append(len(payload)))
 
     gc.collect()
     widgets_before = len(window.findChildren(QWidget))
 
-    source.start_flood(recording_id="soak", hz=INJECT_HZ)
-
-    deadline = time.monotonic() + SOAK_SECONDS
+    # A Qt timeout can be coalesced on a busy/coarse OS clock. Using one timeout
+    # per event silently reduces the input load, so inject the complete fixed
+    # workload against monotonic deadlines instead of counting timer firings.
+    expected_count = round(SOAK_SECONDS * INJECT_HZ)
+    script = flood_script(recording_id="soak", count=expected_count)
+    source.emit_all(event for _delay, event in script[:2])
+    started = time.monotonic()
     max_stall = 0.0
-    while time.monotonic() < deadline:
+    for index, (_delay, event) in enumerate(script[2:], start=1):
         tick = time.monotonic()
-        QTest.qWait(50)
+        source.emit_event(event)
+        remaining_ms = max(0, int((started + index / INJECT_HZ - time.monotonic()) * 1000))
+        QTest.qWait(remaining_ms)
         max_stall = max(max_stall, time.monotonic() - tick)
 
     source.stop()
+    state.flush()
     QApplication.processEvents()
+    elapsed = time.monotonic() - started
     gc.collect()
     widgets_after = len(window.findChildren(QWidget))
 
     # 실제로 대량 주입이 일어났는지 먼저 확인한다.
-    assert len(injected) > SOAK_SECONDS * INJECT_HZ * 0.5, (
-        f"주입이 너무 적다: {len(injected)}건"
-    )
+    assert len(injected) == expected_count, f"진행 이벤트를 누락했다: {len(injected)}건"
+    assert elapsed < SOAK_SECONDS + 1.0, f"고정 부하 처리 시한을 넘었다: {elapsed:.2f}초"
 
     # 갱신은 emit_interval_ms 마다 한 번으로 묶인다. 주입 건수보다 훨씬 적어야 한다.
     expected_max = SOAK_SECONDS * (1000 / EMIT_INTERVAL_MS) * 2 + 10
@@ -84,6 +94,7 @@ def test_초당_100건_주입에도_갱신이_묶이고_위젯이_늘지_않는�
     row = window.dashboard.recording_rows()["soak"]
     assert row.meta_label.text()
     assert state.recordings[0].reported_bytes > 0
+    assert state.recordings[0].reported_bytes == expected_count * 512 * 1024
 
     window.close()
     state.detach(source)
@@ -96,7 +107,6 @@ def test_완료_이력이_쌓여도_행_위젯은_상한을_넘지_않는다(
     """장시간 구동에서 최근 완료 섹션이 무한히 늘지 않는지 본다."""
     from datetime import timedelta
 
-    from yt_rec.state import events as ev
     from yt_rec.state.models import CompletedRecording
     from yt_rec.state.store import MAX_COMPLETED
 
