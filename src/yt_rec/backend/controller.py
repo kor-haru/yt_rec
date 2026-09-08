@@ -221,6 +221,7 @@ class WatchController:
     def _disconnect_locked(self) -> None:
         self._connected = False
         self._youtube = None
+        self._session_only = False
         self._clear_tokens()
         stopper = getattr(self._recorder, "stop_all", None)
         if stopper is not None:
