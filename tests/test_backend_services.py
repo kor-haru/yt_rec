@@ -15,7 +15,7 @@ from yt_rec.logs import LogStore, sanitize_event
 from yt_rec.recording.options import RecordingOptions, load_settings, save_settings
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import CompletedRecording, LogEntry, Severity, WatchedChannel
+from yt_rec.state.models import CompletedRecording, CompletionStatus, LogEntry, Severity, WatchedChannel
 
 
 def controller(options, emit):
@@ -43,6 +43,24 @@ def test_channel_error_does_not_expose_authorization_in_state(state):
     ),)))
     assert "FAKE-ONLY-SECRET" not in state.channels[0].last_check_result
     assert "[REDACTED]" in state.channels[0].last_check_result
+
+
+def test_archive_refresh_keeps_a_startup_failure_without_state_file(state, tmp_path):
+    failure = CompletedRecording(
+        recording_id="vid", title="unable to start", status=CompletionStatus.FAILED,
+        finished_at=datetime.now(timezone.utc), note="yt-dlp is not installed",
+    )
+    source = BackendSource(controller(RecordingOptions(output_dir=tmp_path), lambda _: None),
+                           poll_interval_ms=0, archive_store=ArchiveStore(tmp_path / "roots.json"))
+    state.attach(source)
+    source.publish(ev.RecordingFinished(failure))
+    source.handle_command(cmd.RefreshArchive())
+    assert state.completed == (failure,)
+    assert state.archive == (failure,)
+    source.publish(ev.RecordingFinished(CompletedRecording(
+        recording_id="vid", title="successful retry", output_path=str(tmp_path / "video.mp4"),
+    )))
+    assert source._unsaved_results == {}
 
 
 def test_backend_persists_redacted_logs_and_reloads_archive(tmp_path, qapp):

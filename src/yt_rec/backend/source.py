@@ -13,8 +13,8 @@ from yt_rec.recording.options import RecordingOptions, default_settings_path, lo
 from yt_rec.logs import LogStore, sanitize_event
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import LogEntry, Severity
-from yt_rec.state.store import EventSource
+from yt_rec.state.models import CompletedRecording, CompletionStatus, LogEntry, Severity
+from yt_rec.state.store import EventSource, MAX_COMPLETED
 
 from .archive import ArchiveStore, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
@@ -58,6 +58,8 @@ class BackendSource(EventSource):
         self._stopping = False
         self.log_store = log_store
         self._archive_store = archive_store
+        self._unsaved_results: dict[str, CompletedRecording] = {}
+        self._results_lock = threading.Lock()
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
@@ -76,6 +78,16 @@ class BackendSource(EventSource):
     def publish(self, event: object) -> None:
         """백엔드 사건을 가리고 저장한 다음 화면에 전달한다."""
         event = sanitize_event(event)
+        if isinstance(event, ev.RecordingFinished):
+            done = event.completed
+            with self._results_lock:
+                if done.status is CompletionStatus.FAILED and done.output_path is None:
+                    self._unsaved_results.pop(done.recording_id, None)
+                    self._unsaved_results[done.recording_id] = done
+                    if len(self._unsaved_results) > MAX_COMPLETED:
+                        self._unsaved_results.pop(next(iter(self._unsaved_results)))
+                else:
+                    self._unsaved_results.pop(done.recording_id, None)
         if isinstance(event, ev.LogAppended) and self.log_store is not None:
             try:
                 self.log_store.append(event.entry)
@@ -114,7 +126,17 @@ class BackendSource(EventSource):
             else:
                 options = self._controller._options
                 recordings = load_archive(options.output_dir, work_root=options.work_root)
-            self.publish(ev.CompletedChanged(recordings))
+            # 준비 실패는 기존 state.json을 보호하려고 디스크에 쓰지 않는다.
+            # 디스크 원본을 바꾸지 않고 이 세션의 최근 실패만 함께 보여 준다.
+            items = {(item.recording_id, item.output_path): item for item in recordings}
+            with self._results_lock:
+                failures = tuple(self._unsaved_results.values())
+            stamp = lambda item: item.finished_at.timestamp() if item.finished_at else 0
+            for item in failures:
+                key = (item.recording_id, item.output_path)
+                if key not in items or stamp(item) >= stamp(items[key]):
+                    items[key] = item
+            self.publish(ev.CompletedChanged(tuple(sorted(items.values(), key=stamp, reverse=True))))
         except (OSError, ValueError) as exc:
             self._warning(f"보관함을 불러오지 못했습니다: {exc}")
 
