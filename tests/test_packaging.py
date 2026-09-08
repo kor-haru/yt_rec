@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import zipfile
+from unittest.mock import MagicMock
 from pathlib import Path
 
 import pytest
@@ -42,3 +43,26 @@ def test_bundled_child_runtime_path_precedes_host_path(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", "host-tools")
     binaries.prepare_bundled_environment()
     assert binaries.os.environ["PATH"].split(binaries.os.pathsep) == [str(directory), "host-tools"]
+
+
+@pytest.mark.parametrize("system,relative", [("win32", "_internal/bin"), ("darwin", "Contents/Helpers")])
+def test_standalone_tools_survive_bundle_without_processing(monkeypatch, tmp_path, system, relative):
+    builder = _builder()
+    monkeypatch.setattr(builder, "VENDOR", tmp_path / "vendor")
+    monkeypatch.setattr(builder.sys, "platform", system)
+    signer = MagicMock()
+    monkeypatch.setattr(builder.subprocess, "run", signer)
+    source = builder.VENDOR / "bin/yt-dlp"
+    source.parent.mkdir(parents=True)
+    payload = b"universal Mach-O stub\x00Python archive payload\x00MEI\x0c\x0b\x0a\x0b\x0e"
+    source.write_bytes(payload)
+    source.chmod(0o755)
+    bundle = tmp_path / "yt-rec"
+    builder.install_child_tools(bundle)
+    assert (bundle / relative / "yt-dlp").read_bytes() == payload
+    if system == "darwin":
+        assert signer.call_count == 2
+        assert "--deep" not in signer.call_args_list[0].args[0]
+        assert signer.call_args_list[0].args[0][-1] == str(bundle)
+    else:
+        signer.assert_not_called()

@@ -121,6 +121,22 @@ def collect_licenses() -> None:
     shutil.copy2(ROOT / "packaging/THIRD_PARTY.md", target / "SOURCES.md")
 
 
+def install_child_tools(bundle: Path) -> None:
+    # Never let PyInstaller analyze/thin a standalone child executable. A universal
+    # yt-dlp carries its Python payload in only one slice; thinning destroys it.
+    destination = bundle / ("Contents/Helpers" if sys.platform == "darwin" else "_internal/bin")
+    destination.mkdir(parents=True, exist_ok=True)
+    for source in (VENDOR / "bin").iterdir():
+        shutil.copy2(source, destination / source.name)
+    if sys.platform == "darwin":
+        # Seal the changed outer bundle, retaining vendor signatures on child tools.
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(bundle)], check=True)
+        subprocess.run(["/usr/bin/codesign", "--verify", "--all-architectures", "--deep", "--strict", str(bundle)], check=True)
+    for source in (VENDOR / "bin").iterdir():
+        if sha256(source) != sha256(destination / source.name):
+            raise RuntimeError(f"Bundling changed the standalone executable: {source.name}")
+
+
 def main() -> None:
     machine = {"AMD64": "x86_64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
     target = f"{sys.platform}-{machine}"
@@ -157,6 +173,7 @@ def main() -> None:
                         "--disable-ffplay", "--disable-debug", "--enable-static", "--disable-shared"], cwd=source, check=True)
         subprocess.run(["make", f"-j{os.cpu_count() or 2}", "ffmpeg", "ffprobe"], cwd=source, check=True)
         for name in ("ffmpeg", "ffprobe"):
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(source / name)], check=True)
             copy_binary(source / name, name)
         for item in source.glob("COPYING*"):
             dest = VENDOR / "licenses/ffmpeg" / item.name
@@ -174,12 +191,10 @@ def main() -> None:
             "--workpath", str(ROOT / "build/pyinstaller"), "--specpath", str(ROOT / "build"),
             "--add-data", f"{VENDOR / 'licenses'}{os.pathsep}licenses",
             "--add-data", f"{VENDOR / 'build-manifest.json'}{os.pathsep}."]
-    for binary in (VENDOR / "bin").iterdir():
-        # Standalone child tools retain their own loader layout/code signature.
-        args += ["--add-data", f"{binary}{os.pathsep}bin"]
     args += [str(ROOT / "packaging/entry.py")]
     subprocess.run(args, cwd=ROOT, check=True)
     bundle = ROOT / "dist" / ("yt-rec.app" if sys.platform == "darwin" else "yt-rec")
+    install_child_tools(bundle)
     executable = bundle / ("Contents/MacOS/yt-rec" if sys.platform == "darwin" else "yt-rec" + extension)
     report = ROOT / "dist" / f"smoke-{target}.json"
     subprocess.run([str(executable), "--smoke-test", str(report)], check=True, timeout=120,

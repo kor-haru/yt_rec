@@ -4,6 +4,11 @@ The application invokes yt-dlp, FFmpeg/ffprobe and Deno as separate executables.
 It uses Qt Widgets through PySide6 Essentials, without QtWebEngine or Chromium.
 The `licenses` directory preserves third-party notices and the manifest records
 the exact package versions and binary SHA256 hashes. Do not remove these files.
+Standalone child executables are copied after PyInstaller builds the application;
+their final hashes must match the originals. In particular, the universal macOS
+yt-dlp must not be thinned to one CPU slice, which would discard its Python payload.
+macOS tools live in `Contents/Helpers`; only locally built FFmpeg binaries and the
+outer application receive ad-hoc signatures. Downloaded vendor tools retain theirs.
 
 - yt-dlp 2026.08.19: https://github.com/yt-dlp/yt-dlp/tree/2026.08.19
   Standalone binaries contain their own third-party components; see the bundled

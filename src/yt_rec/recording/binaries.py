@@ -67,6 +67,8 @@ def _bundle_dirs() -> list[Path]:
         dirs.append(Path(meipass))
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).resolve().parent
+        if sys.platform == "darwin" and exe_dir.name == "MacOS":
+            dirs.append(exe_dir.parent / "Helpers")
         dirs.append(exe_dir / "bin")
         dirs.append(exe_dir)
     return dirs
@@ -74,7 +76,7 @@ def _bundle_dirs() -> list[Path]:
 
 def prepare_bundled_environment() -> None:
     """Let bundled yt-dlp find its bundled Deno runtime as a child process."""
-    directories = [str(path) for path in _bundle_dirs() if path.name == "bin" and path.is_dir()]
+    directories = [str(path) for path in _bundle_dirs() if path.name in ("bin", "Helpers") and path.is_dir()]
     if directories:
         os.environ["PATH"] = os.pathsep.join([*directories, os.environ.get("PATH", "")])
 

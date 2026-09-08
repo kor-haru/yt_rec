@@ -29,8 +29,11 @@ def run_smoke(report_path: Path) -> int:
             path = shutil.which("deno") if name == "deno" else str(getattr(toolchain, name))
             if path is None:
                 raise RuntimeError("Deno runtime not found")
-            if report["frozen"] and not Path(path).resolve().is_relative_to(Path(sys._MEIPASS).resolve()):
-                raise RuntimeError(f"{name} was resolved outside the bundle")
+            if report["frozen"]:
+                bundle_root = (Path(sys.executable).resolve().parent.parent if sys.platform == "darwin"
+                               else Path(sys._MEIPASS).resolve())
+                if not Path(path).resolve().is_relative_to(bundle_root):
+                    raise RuntimeError(f"{name} was resolved outside the bundle")
             version = subprocess.run([path, "--version" if name in ("ytdlp", "deno") else "-version"],
                                      capture_output=True, text=True, check=True, timeout=30)
             versions[name] = version.stdout.splitlines()[0]

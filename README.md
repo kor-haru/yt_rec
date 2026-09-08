@@ -53,7 +53,7 @@ Secret Service에 저장한다. 보안 저장소를 사용할 수 없다면 계�
 2. 받은 압축 파일을 푼다. 안에 ZIP이나 `tar.gz`가 한 번 더 있으면 그것도 푼다.
    Windows는 `windows-2022`(Intel/AMD 64비트), Apple Silicon Mac은 `macos-15`,
    Intel Mac은 `macos-15-intel`, Linux는 자신의 CPU에 맞는 `ubuntu-22.04` 또는
-   `ubuntu-22.04-arm`을 선택한다.
+   `ubuntu-24.04-arm`을 선택한다. Linux ARM64 실행 파일은 Ubuntu 24.04 이상이 필요하다.
 3. 풀린 폴더 전체를 계속 사용할 위치에 둔다. Windows는 그 안의 **yt-rec.exe**,
    macOS는 **yt-rec.app**, Linux는 **yt-rec**를 실행한다. 실행 파일만 따로 옮기면 안 된다.
    macOS의 앱은 응용 프로그램 폴더에 옮긴 뒤 실행할 수 있다.
