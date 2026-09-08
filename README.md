@@ -159,20 +159,22 @@ uv sync
 
 ### 4. 녹화 도구 설치하기
 
-실제 녹화에는 `yt-dlp`, `ffmpeg`, `ffprobe`라는 외부 프로그램이 필요하다.
-Python 패키지가 아니므로 따로 설치해야 한다.
+소스로 실행할 때는 `yt-dlp`, `ffmpeg`, `ffprobe`와 YouTube 다운로드 주소를
+해석하는 데 쓰는 `Deno`를 따로 설치해야 한다. 실행 파일 배포판에는 모두 포함되어 있다.
 
-**Windows** — PowerShell에서 다음 두 명령을 차례로 실행한다. 설치 확인 창이
+**Windows** — PowerShell에서 다음 세 명령을 차례로 실행한다. 설치 확인 창이
 나타나면 내용을 확인하고 진행한다.
 
 ```powershell
 winget install --id yt-dlp.yt-dlp -e --source winget
 winget install --id Gyan.FFmpeg -e --source winget
+winget install --id DenoLand.Deno -e --source winget
 ```
 
 WinGet을 쓸 수 없다면
 [yt-dlp 공식 배포 파일](https://github.com/yt-dlp/yt-dlp#release-files)과
-[FFmpeg 공식 Windows 다운로드 안내](https://ffmpeg.org/download.html#build-windows)를 따른다.
+[FFmpeg 공식 Windows 다운로드 안내](https://ffmpeg.org/download.html#build-windows),
+[Deno 공식 설치 안내](https://docs.deno.com/runtime/getting_started/installation/)를 따른다.
 설치 위치와 `PATH`가 어렵다면
 [yt-dlp Windows FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#on-windows-how-should-i-set-up-ffmpeg-and-yt-dlp-where-should-i-put-the-exe-files)를
 참고한다. `ffprobe.exe`도 빠뜨리면 안 된다.
@@ -181,18 +183,20 @@ WinGet을 쓸 수 없다면
 뒤 다음을 실행한다.
 
 ```bash
-brew install yt-dlp ffmpeg
+brew install yt-dlp ffmpeg deno
 ```
 
-터미널을 닫았다가 프로젝트 폴더에서 다시 연 뒤 세 명령을 확인한다.
+터미널을 닫았다가 프로젝트 폴더에서 다시 연 뒤 네 명령을 확인한다.
 
 ```text
 yt-dlp --version
 ffmpeg -version
 ffprobe -version
+deno --version
 ```
 
-세 명령 모두 버전 정보를 보여야 한다. PATH에 없다면 환경 변수
+네 명령 모두 버전 정보를 보여야 한다. Deno를 찾지 못하면 위 공식 설치 안내의
+PATH 설정을 확인한다. 나머지 도구가 PATH에 없다면 환경 변수
 `YT_REC_YTDLP`, `YT_REC_FFMPEG`, `YT_REC_FFPROBE`로 실행 파일 전체 경로를
 지정할 수 있다.
 
@@ -327,10 +331,10 @@ uv run yt-rec
 
 ### 11. 자주 발생하는 문제
 
-#### `uv`, `yt-dlp`, `ffmpeg`, `ffprobe` 명령을 찾을 수 없음
+#### `uv`, `yt-dlp`, `ffmpeg`, `ffprobe`, `deno` 명령을 찾을 수 없음
 
 터미널을 모두 닫았다가 다시 연다. 그래도 안 되면 2단계와 4단계의 설치 명령을
-다시 실행하고 각 `--version` 명령부터 확인한다. macOS에서 `uv`만 없다면
+다시 실행하고 위에 나온 버전 확인 명령부터 확인한다. macOS에서 `uv`만 없다면
 `source "$HOME/.local/bin/env"` 또는 Homebrew로 설치한 경우 `brew --prefix`가
 PATH에 있는지 확인한다.
 
