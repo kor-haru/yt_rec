@@ -163,7 +163,13 @@ def open_archive_path(path: str, *, reveal: bool = False) -> None:
         raise FileNotFoundError("저장된 위치에 녹화 파일이 없습니다. 보관함을 새로고침하세요.")
     if sys.platform == "win32":
         if reveal:
-            subprocess.Popen(["explorer.exe", f"/select,{target}"], creationflags=subprocess.CREATE_NO_WINDOW)
+            # Explorer parses /select, itself. A list would quote the whole
+            # switch for paths with spaces; quote only the validated path,
+            # including comma-only names that list2cmdline leaves unquoted.
+            subprocess.Popen(
+                f'explorer.exe /select,"{target}"',
+                shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         else:
             os.startfile(str(target))
     else:

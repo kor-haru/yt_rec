@@ -119,13 +119,36 @@ def test_file_manager_routes_preserve_unicode_and_spaces(tmp_path: Path, monkeyp
     backend.open_archive_path(str(path), reveal=True)
     backend.open_archive_path(str(path))
     if platform == "win32":
-        assert launched == [["explorer.exe", f"/select,{path}"], str(path)]
+        assert launched == [f'explorer.exe /select,"{path}"', str(path)]
     elif platform == "darwin":
         assert launched == [["open", "-R", str(path)], ["open", str(path)]]
     else:
         assert launched[0][0] == "dbus-send"
         assert launched[0][-2:] == [f"array:string:{path.as_uri()}", "string:"]
         assert launched[1] == ["xdg-open", str(path)]
+
+
+@pytest.mark.parametrize("name", ["recording.mp4", "recording with spaces.mp4", "한글방송.mp4", "comma,only.mp4", "한글, 방송 🎧.mp4"])
+def test_windows_explorer_quotes_only_the_path_not_the_select_switch(tmp_path: Path, monkeypatch, name: str) -> None:
+    path = tmp_path / name
+    path.write_bytes(b"test recording")
+    launched = []
+    monkeypatch.setattr(backend.sys, "platform", "win32")
+    monkeypatch.setattr(backend.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(backend.subprocess, "Popen", lambda args, **kwargs: launched.append((args, kwargs)))
+
+    backend.open_archive_path(str(path), reveal=True)
+
+    args, options = launched[0]
+    # Inspect the actual Windows command line, not just the mocked argv. Python
+    # quotes an entire list element containing spaces, including /select, when
+    # the switch and path share an element; Explorer then opens its default folder.
+    command_line = args if isinstance(args, str) else subprocess.list2cmdline(args)
+    prefix = "explorer.exe /select,"
+    assert command_line.startswith(prefix)
+    assert command_line[len(prefix):].strip() == f'"{path}"'
+    assert not options.get("shell", False)
+    assert options["creationflags"] == backend.subprocess.CREATE_NO_WINDOW
 
 
 def test_linux_selection_encodes_uri_without_shell_or_array_delimiter_injection(tmp_path: Path, monkeypatch) -> None:
