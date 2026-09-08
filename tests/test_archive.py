@@ -120,7 +120,8 @@ def test_file_manager_routes_preserve_unicode_and_spaces(tmp_path: Path, monkeyp
     backend.open_archive_path(str(path), reveal=True)
     backend.open_archive_path(str(path))
     if platform == "win32":
-        assert launched == [[str(tmp_path / "Windows/explorer.exe"), f"/select,{path}"], str(path)]
+        explorer = tmp_path / "Windows/explorer.exe"
+        assert launched == [f'"{explorer}" /select,"{path}"', str(path)]
     elif platform == "darwin":
         assert launched == [["open", "-R", str(path)], ["open", str(path)]]
     else:
@@ -143,7 +144,8 @@ def test_windows_reveal_never_searches_cwd_or_path_for_explorer(tmp_path, monkey
     launched = []
     monkeypatch.setattr(backend.subprocess, "Popen", lambda argv, **kwargs: launched.append((argv, kwargs)))
     backend.open_archive_path(str(path), reveal=True)
-    assert launched == [([str(system_root / "explorer.exe"), f"/select,{path}"], {"creationflags": 0})]
+    explorer = system_root / "explorer.exe"
+    assert launched == [(f'"{explorer}" /select,"{path}"', {"creationflags": 0, "shell": False})]
     assert fake.read_bytes() == b"not an executable; must never be selected"
 
 
@@ -161,6 +163,28 @@ def test_windows_reveal_rejects_missing_or_relative_system_directory(tmp_path, m
     with pytest.raises(OSError, match="Windows"):
         backend.open_archive_path(str(path), reveal=True)
     assert launched == []
+
+
+@pytest.mark.parametrize("name", ["recording.mp4", "recording with spaces.mp4", "한글방송.mp4", "comma,only.mp4", "한글, 방송 🎧.mp4"])
+def test_windows_explorer_quotes_only_the_path_not_the_select_switch(tmp_path: Path, monkeypatch, name: str) -> None:
+    path = tmp_path / name
+    path.write_bytes(b"test recording")
+    launched = []
+    monkeypatch.setattr(backend.sys, "platform", "win32")
+    monkeypatch.setattr(backend.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    monkeypatch.setattr(backend.subprocess, "Popen", lambda args, **kwargs: launched.append((args, kwargs)))
+
+    backend.open_archive_path(str(path), reveal=True)
+
+    args, options = launched[0]
+    command_line = args if isinstance(args, str) else subprocess.list2cmdline(args)
+    explorer = tmp_path / "Windows" / "explorer.exe"
+    prefix = f'"{explorer}" /select,'
+    assert command_line.startswith(prefix)
+    assert command_line[len(prefix):].strip() == f'"{path}"'
+    assert not options.get("shell", False)
+    assert options["creationflags"] == backend.subprocess.CREATE_NO_WINDOW
 
 
 def test_linux_selection_encodes_uri_without_shell_or_array_delimiter_injection(tmp_path: Path, monkeypatch) -> None:

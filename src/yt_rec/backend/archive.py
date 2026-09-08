@@ -166,7 +166,14 @@ def open_archive_path(path: str, *, reveal: bool = False) -> None:
             windows_dir = Path(os.environ.get("SystemRoot", ""))
             if not windows_dir.is_absolute():
                 raise OSError("Windows 시스템 폴더 경로를 확인할 수 없습니다")
-            subprocess.Popen([str(windows_dir / "explorer.exe"), f"/select,{target}"], creationflags=subprocess.CREATE_NO_WINDOW)
+            explorer = windows_dir / "explorer.exe"
+            # Explorer parses /select, itself. A list would quote the whole
+            # switch for paths with spaces; quote only the validated path.
+            subprocess.Popen(
+                f'"{explorer}" /select,"{target}"',
+                shell=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         else:
             os.startfile(str(target))
     else:
