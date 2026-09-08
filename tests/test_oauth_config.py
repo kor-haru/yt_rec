@@ -56,6 +56,29 @@ def test_요청_권한은_readonly_하나다() -> None:
     assert "youtube.force-ssl" not in YOUTUBE_READONLY
 
 
+def test_로그인할_때_개발자와_다른_계정을_선택할_수_있다(monkeypatch) -> None:
+    import yt_rec.backend.oauth as oauth
+
+    calls = {}
+
+    class Flow:
+        @classmethod
+        def from_client_config(cls, config, *, scopes):
+            calls["scopes"] = scopes
+            return cls()
+
+        def run_local_server(self, **kwargs):
+            calls.update(kwargs)
+            return "credentials"
+
+    monkeypatch.setattr("google_auth_oauthlib.flow.InstalledAppFlow", Flow)
+    assert oauth._run_installed_app({}) == "credentials"
+    assert set(calls["prompt"].split()) == {"select_account", "consent"}
+    assert "login_hint" not in calls
+    assert calls["authorization_prompt_message"] == ""
+    assert calls["scopes"] == [YOUTUBE_READONLY]
+
+
 def test_로그인_대기는_시간_제한이_있다(monkeypatch) -> None:
     import yt_rec.backend.oauth as oauth
 

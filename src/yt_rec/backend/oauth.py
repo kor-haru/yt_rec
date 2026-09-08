@@ -98,8 +98,9 @@ def _run_installed_app(config: dict[str, Any]) -> Any:
                 bind_addr="127.0.0.1",
                 port=0,
                 open_browser=True,
+                authorization_prompt_message="",
                 access_type="offline",
-                prompt="consent",
+                prompt="select_account consent",
             )
         except Exception as extra:  # noqa: BLE001 - 로그인 스레드에서 AuthError 로 올린다
             box["exc"] = extra
