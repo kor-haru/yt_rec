@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QPushButton,
     QRadioButton,
     QVBoxLayout,
     QWidget,
@@ -150,7 +151,7 @@ class ChannelsDialog(QDialog):
 
         filters = QHBoxLayout()
         self.filter_group = QButtonGroup(self)
-        self.filter_all = QRadioButton("전체", self)
+        self.filter_all = QRadioButton("전체 보기", self)
         self.filter_selected = QRadioButton("선택됨만", self)
         self.filter_unselected = QRadioButton("미선택만", self)
         self.filter_all.setObjectName("filterAll")
@@ -161,6 +162,11 @@ class ChannelsDialog(QDialog):
             self.filter_group.addButton(button)
             filters.addWidget(button)
         filters.addStretch(1)
+        self.select_all_button = QPushButton("구독 채널 전체 선택", self)
+        self.select_all_button.setObjectName("selectAllSubscriptions")
+        self.select_all_button.setToolTip("검색과 보기 필터에 관계없이 불러온 구독 채널을 모두 선택합니다.")
+        self.select_all_button.clicked.connect(self._select_all)
+        filters.addWidget(self.select_all_button)
         self.filter_all.toggled.connect(lambda on: on and self._set_mode("all"))
         self.filter_selected.toggled.connect(lambda on: on and self._set_mode("selected"))
         self.filter_unselected.toggled.connect(lambda on: on and self._set_mode("unselected"))
@@ -205,6 +211,9 @@ class ChannelsDialog(QDialog):
 
     def _on_subscriptions(self, subscriptions: tuple[Subscription, ...]) -> None:
         self.model.set_subscriptions(subscriptions)
+        self.select_all_button.setEnabled(
+            self._state.connection is ConnectionState.CONNECTED and bool(subscriptions)
+        )
         selected_ids = [item.channel_id for item in subscriptions if item.selected]
         if self._pending is not None and selected_ids == self._pending:
             self._pending = None
@@ -219,6 +228,16 @@ class ChannelsDialog(QDialog):
         enabled = connection is ConnectionState.CONNECTED
         self.search_edit.setEnabled(enabled)
         self.list_view.setEnabled(enabled)
+        self.select_all_button.setEnabled(enabled and bool(self._state.subscriptions))
+
+    def _select_all(self) -> None:
+        subscriptions = self._state.subscriptions
+        if self._state.connection is not ConnectionState.CONNECTED or not subscriptions:
+            return
+        self._pending = list(dict.fromkeys(
+            [item.channel_id for item in subscriptions] + (self._pending or [])
+        ))
+        self._state.set_watched_channels(self._pending)
 
     def _on_toggled(self, channel_id: str, selected: bool) -> None:
         if self._pending is None:

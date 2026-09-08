@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from dataclasses import replace
+
+import pytest
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
@@ -139,3 +142,106 @@ def test_선택_0개는_감시를_못_한다고_알린다(state: AppState) -> No
     dialog = ChannelsDialog(state)
     assert "감시" in dialog.summary_label.text()
     dialog.close()
+
+
+@pytest.mark.parametrize("filter_mode", ["all", "search", "selected", "unselected"])
+def test_전체_선택은_보기_필터와_관계없이_한_명령을_보내고_결과를_기다린다(state: AppState, filter_mode) -> None:
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    subscriptions = (
+        Subscription(channel_id="UC1", name="하나"),
+        Subscription(channel_id="UC2", name="둘", selected=True),
+        Subscription(channel_id="UC3", name="셋"),
+    )
+    state.apply(ev.SubscriptionsChanged(subscriptions))
+    received = []
+    state.command_requested.connect(received.append)
+    dialog = ChannelsDialog(state)
+    button = dialog.findChild(QPushButton, "selectAllSubscriptions")
+    assert button is not None
+    assert button.text() == "구독 채널 전체 선택"
+    assert dialog.filter_all.text() == "전체 보기"
+    if filter_mode == "search":
+        dialog.search_edit.setText("하나")
+    elif filter_mode != "all":
+        getattr(dialog, f"filter_{filter_mode}").click()
+    button.click()
+    assert received == [cmd.SetWatchedChannels(("UC1", "UC2", "UC3"))]
+    assert state.subscriptions == subscriptions
+    assert "1개 선택" in dialog.summary_label.text()
+    state.apply(ev.SubscriptionsChanged(tuple(replace(item, selected=True) for item in subscriptions)))
+    assert "3개 선택" in dialog.summary_label.text()
+    dialog.model.toggled.emit("UC1", False)
+    assert received[-1] == cmd.SetWatchedChannels(("UC2", "UC3"))
+    dialog.close()
+
+
+def test_전체_선택_전후의_빠른_추가선택과_해제를_잃지_않는다(state: AppState) -> None:
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    state.apply(ev.SubscriptionsChanged((
+        Subscription(channel_id="UC1", name="하나"),
+        Subscription(channel_id="UC2", name="둘"),
+    )))
+    received = []
+    state.command_requested.connect(received.append)
+    dialog = ChannelsDialog(state)
+    dialog.model.toggled.emit("UC-extra", True)
+    dialog.select_all_button.click()
+    assert received[-1] == cmd.SetWatchedChannels(("UC1", "UC2", "UC-extra"))
+    dialog.model.toggled.emit("UC2", False)
+    assert received[-1] == cmd.SetWatchedChannels(("UC1", "UC-extra"))
+    dialog.close()
+
+
+def test_미연결이나_빈_구독에는_전체_선택을_보내지_않는다(state: AppState) -> None:
+    received = []
+    state.command_requested.connect(received.append)
+    dialog = ChannelsDialog(state)
+    state.apply(ev.SubscriptionsChanged((Subscription(channel_id="UC1", name="하나"),)))
+    assert not dialog.select_all_button.isEnabled()
+    dialog._select_all()
+    state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+    assert dialog.select_all_button.isEnabled()
+    state.apply(ev.SubscriptionsChanged(()))
+    assert not dialog.select_all_button.isEnabled()
+    dialog._select_all()
+    assert received == []
+    dialog.close()
+
+
+def test_전체_선택이_실제_파일에_저장되어_재열기와_재시작에_복원된다(state: AppState, tmp_path) -> None:
+    from yt_rec.backend.controller import WatchController
+    from yt_rec.backend.selection import FileSelectionStore
+    from yt_rec.backend.tokens import MemoryTokenStore
+    from yt_rec.backend.youtube import ChannelRef
+    from backend_fakes import FakeAuth, FakeRecorder, FakeYouTube
+
+    path = tmp_path / "watched_channels.json"
+    FileSelectionStore(path).save(("UC-preserved",))
+
+    def connect(store: AppState) -> WatchController:
+        controller = WatchController(
+            emit=store.apply, auth=FakeAuth(), tokens=MemoryTokenStore("credentials"),
+            selection=FileSelectionStore(path), recorder=FakeRecorder(),
+            youtube_factory=lambda _creds: FakeYouTube(subs=[ChannelRef("UC1", "하나"), ChannelRef("UC2", "둘")]),
+        )
+        store.command_requested.connect(controller.handle_command)
+        controller.start()
+        return controller
+
+    controller = connect(state)
+    dialog = ChannelsDialog(state)
+    dialog.select_all_button.click()
+    expected = ("UC1", "UC2", "UC-preserved")
+    assert FileSelectionStore(path).load() == expected
+    dialog.close()
+    reopened = ChannelsDialog(state)
+    assert "3개 선택" in reopened.summary_label.text()
+    reopened.close()
+
+    restarted = AppState(emit_interval_ms=0)
+    restarted_controller = connect(restarted)
+    assert tuple(item.channel_id for item in restarted.subscriptions if item.selected) == expected
+    assert restarted.watch.channel_count == 3
+    state.command_requested.disconnect(controller.handle_command)
+    restarted.command_requested.disconnect(restarted_controller.handle_command)
+    restarted.deleteLater()
