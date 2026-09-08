@@ -20,6 +20,36 @@ def test_미연결에서_연결_버튼이_명령을_보낸다(state: AppState, s
     dialog.close()
 
 
+def test_세션_로그인은_사용자_선택을_명령에_전달한다(state: AppState, stub) -> None:
+    received = []
+    state.command_requested.connect(received.append)
+    dialog = AccountDialog(state)
+    assert not dialog.pane.session_only.isChecked()
+    dialog.pane.session_only.setChecked(True)
+    dialog.pane.connect_button.click()
+    assert received == [cmd.ConnectAccount(session_only=True)]
+    dialog.close()
+
+
+def test_계정_화면에서_Desktop_JSON_가져오기_후_준비_상태가_된다(state: AppState, monkeypatch, tmp_path) -> None:
+    import json
+    import yt_rec.backend.oauth as oauth
+
+    monkeypatch.delenv(oauth.ENV_CLIENT_SECRETS, raising=False)
+    monkeypatch.delenv(oauth.ENV_CLIENT_ID, raising=False)
+    monkeypatch.delenv(oauth.ENV_CLIENT_SECRET, raising=False)
+    monkeypatch.setattr(oauth, "_default_secrets_path", lambda: tmp_path / "config" / "client_secrets.json")
+    source = tmp_path / "download.json"
+    source.write_text(json.dumps({"installed": {"client_id": "id", "client_secret": "s"}}), encoding="utf-8")
+    monkeypatch.setattr("yt_rec.ui.account.QFileDialog.getOpenFileName", lambda *_a: (str(source), ""))
+    dialog = AccountDialog(state)
+    assert "설정이 없습니다" in dialog.config_status.text()
+    dialog.import_button.click()
+    assert "준비되었습니다" in dialog.config_status.text()
+    assert oauth.load_client_config()["installed"]["client_id"] == "id"
+    dialog.close()
+
+
 def test_계정_화면에_인증_만료_원인을_보여_준다(state: AppState, stub) -> None:
     dialog = AccountDialog(state)
     state.apply(

@@ -25,6 +25,7 @@ from yt_rec.state.models import (
 
 from .oauth import AuthError, ClientConfigError
 from .selection import MemorySeenStore
+from .tokens import TokenStoreError
 from .youtube import LiveBroadcast, YouTubeError, recommended_poll_interval
 
 __all__ = ["WatchController", "WATCH_INTERVAL_SECONDS"]
@@ -69,6 +70,7 @@ class WatchController:
         self._lock = threading.Lock()
         self._youtube: object | None = None
         self._connected = False
+        self._session_only = False
         self._subs: list[Subscription] = []
         self._names: dict[str, str] = {}
         self._last_poll_at: datetime | None = None
@@ -79,14 +81,19 @@ class WatchController:
         if recover is not None:
             recover()
         with self._lock:
-            blob = self._tokens.load()
+            try:
+                blob = self._tokens.load()
+            except TokenStoreError as extra:
+                self._storage_error(extra)
+                self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+                return
             if not blob:
                 self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
                 return
             try:
                 self._auth.restore(blob)
             except AuthError as extra:
-                self._tokens.clear()
+                self._clear_tokens()
                 self._log(Severity.ERROR, f"저장된 인증을 쓰지 못했다: {extra}")
                 self._emit(
                     ev.WatchStatusChanged(
@@ -112,7 +119,7 @@ class WatchController:
 
     def handle_command(self, command: cmd.GuiCommand) -> None:
         if isinstance(command, cmd.ConnectAccount):
-            self._connect()
+            self._connect(session_only=command.session_only)
             return
         with self._lock:
             match command:
@@ -155,7 +162,7 @@ class WatchController:
         finally:
             self._lock.release()
 
-    def _connect(self) -> None:
+    def _connect(self, *, session_only: bool = False) -> None:
         with self._lock:
             if self._connected:
                 return
@@ -176,8 +183,33 @@ class WatchController:
             self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
             return
         with self._lock:
-            self._tokens.save(blob)
+            if not session_only:
+                try:
+                    self._tokens.save(blob)
+                except TokenStoreError as extra:
+                    self._auth.credentials = None
+                    self._storage_error(extra)
+                    self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+                    return
+            self._session_only = session_only
+            if session_only:
+                self._log(Severity.INFO, "이번 실행에서만 로그인합니다. 앱을 종료하면 다시 로그인해야 합니다.")
             self._finish_login_locked()
+
+    def _storage_error(self, extra: TokenStoreError) -> None:
+        self._log(
+            Severity.ERROR,
+            f"{extra} 계정 화면에서 '이번 실행에서만 로그인 유지'를 선택하고 연결하거나 로그인을 취소하세요.",
+        )
+
+    def _clear_tokens(self) -> None:
+        self._auth.credentials = None
+        if self._session_only:
+            return
+        try:
+            self._tokens.clear()
+        except TokenStoreError as extra:
+            self._log(Severity.ERROR, f"저장된 인증을 삭제하지 못했습니다. OS 보안 저장소에서 yt-rec 항목을 삭제하세요: {extra}")
 
     def _finish_login_locked(self) -> None:
         creds = getattr(self._auth, "credentials", None)
@@ -189,7 +221,7 @@ class WatchController:
     def _disconnect_locked(self) -> None:
         self._connected = False
         self._youtube = None
-        self._tokens.clear()
+        self._clear_tokens()
         stopper = getattr(self._recorder, "stop_all", None)
         if stopper is not None:
             stopper()
@@ -366,7 +398,7 @@ class WatchController:
         if extra.kind == "auth":
             self._connected = False
             self._youtube = None
-            self._tokens.clear()
+            self._clear_tokens()
             self._emit(
                 ev.WatchStatusChanged(
                     state=WatchState.STOPPED,

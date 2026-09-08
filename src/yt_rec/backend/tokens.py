@@ -18,6 +18,7 @@ __all__ = [
     "MemoryTokenStore",
     "WindowsCredentialStore",
     "MacOSKeychainStore",
+    "LinuxSecretServiceStore",
     "default_token_store",
     "CREDENTIAL_TARGET",
     "KEYCHAIN_ACCOUNT",
@@ -134,16 +135,53 @@ class MacOSKeychainStore:
 
 class _UnsupportedTokenStore:
     def load(self) -> str | None:
-        return None
+        raise TokenStoreError("이 OS에서는 보안 저장소를 지원하지 않습니다.")
 
     def save(self, blob: str) -> None:
         raise TokenStoreError(
-            "이 빌드는 Windows Credential Manager 와 macOS Keychain 만 지원한다. "
+            "이 빌드는 Windows Credential Manager, macOS Keychain, Linux Secret Service를 지원한다. "
             "refresh token 을 평문 파일에 저장하지 않는다."
         )
 
     def clear(self) -> None:
         return None
+
+
+class LinuxSecretServiceStore:
+    """데스크톱 Secret Service. secret-tool의 stdin으로만 비밀을 전달한다."""
+
+    def __init__(self, service: str = CREDENTIAL_TARGET, account: str = KEYCHAIN_ACCOUNT) -> None:
+        self.service = service
+        self.account = account
+
+    def _run(self, action: str, blob: str | None = None) -> subprocess.CompletedProcess[str]:
+        args = ["secret-tool", action]
+        if action == "store":
+            args.append("--label=yt-rec Google OAuth")
+        args.extend(["service", self.service, "account", self.account])
+        try:
+            proc = subprocess.run(args, input=blob, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as extra:
+            raise TokenStoreError(
+                "Linux 보안 저장소에 연결하지 못했습니다. secret-tool(libsecret-tools)을 설치하고 "
+                "로그인 키링을 잠금 해제하세요."
+            ) from extra
+        if proc.returncode != 0 and not (
+            action in {"lookup", "clear"} and proc.returncode == 1
+            and not proc.stderr.strip() and not proc.stdout.strip()
+        ):
+            raise TokenStoreError("Linux 보안 저장소를 사용할 수 없습니다. 로그인 키링을 확인하세요.")
+        return proc
+
+    def load(self) -> str | None:
+        proc = self._run("lookup")
+        return proc.stdout.rstrip("\r\n") if proc.returncode == 0 else None
+
+    def save(self, blob: str) -> None:
+        self._run("store", blob)
+
+    def clear(self) -> None:
+        self._run("clear")
 
 
 def default_token_store() -> TokenStore:
@@ -152,15 +190,16 @@ def default_token_store() -> TokenStore:
         return WindowsCredentialStore()
     if sys.platform == "darwin":
         return MacOSKeychainStore()
+    if sys.platform.startswith("linux"):
+        return LinuxSecretServiceStore()
     return _UnsupportedTokenStore()
 
 
 def _security(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["security", *args],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(["security", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as extra:
+        raise TokenStoreError("macOS Keychain에 연결하지 못했습니다.") from extra
 
 
 def _security_not_found(proc: subprocess.CompletedProcess[str]) -> bool:

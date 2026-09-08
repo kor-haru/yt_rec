@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from yt_rec.backend.tokens import (
+    LinuxSecretServiceStore,
     MacOSKeychainStore,
     MemoryTokenStore,
     TokenStoreError,
@@ -29,6 +30,8 @@ def test_기본_저장소는_os에_맞는_보안_저장소다() -> None:
         assert isinstance(store, WindowsCredentialStore)
     elif sys.platform == "darwin":
         assert isinstance(store, MacOSKeychainStore)
+    elif sys.platform.startswith("linux"):
+        assert isinstance(store, LinuxSecretServiceStore)
     else:
         with pytest.raises(TokenStoreError):
             store.save("x")
@@ -87,3 +90,41 @@ def test_keychain_은_macos가_아니면_만들지_않는다() -> None:
         pytest.skip("이 검사는 darwin 이 아닐 때만 의미가 있다")
     with pytest.raises(TokenStoreError):
         MacOSKeychainStore()
+
+
+def test_linux는_secret_tool을_쓰고_비밀은_인자에_넣지_않는다(monkeypatch) -> None:
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return _Proc(0, stdout='{"refresh_token":"private"}\n') if len(calls) == 3 else _Proc(1 if args[1] == "lookup" else 0)
+
+    monkeypatch.setattr("yt_rec.backend.tokens.subprocess.run", run)
+    monkeypatch.setattr("yt_rec.backend.tokens.sys.platform", "linux")
+    store = default_token_store()
+    assert store.load() is None
+    store.save('{"refresh_token":"private"}')
+    assert store.load() == '{"refresh_token":"private"}'
+    store.clear()
+    assert [call[0][1] for call in calls] == ["lookup", "store", "lookup", "clear"]
+    assert calls[1][1]["input"] == '{"refresh_token":"private"}'
+    assert all("private" not in " ".join(args) for args, _ in calls)
+    assert all(kwargs["timeout"] == 30 for _, kwargs in calls)
+
+
+@pytest.mark.parametrize("action", ["load", "save", "clear"])
+def test_linux_키링_오류는_토큰을_노출하거나_조용히_무시하지_않는다(monkeypatch, action) -> None:
+    monkeypatch.setattr("yt_rec.backend.tokens.subprocess.run", lambda *_a, **_k: _Proc(1, stderr="locked private-token"))
+    store = LinuxSecretServiceStore()
+    with pytest.raises(TokenStoreError) as caught:
+        getattr(store, action)("private-token") if action == "save" else getattr(store, action)()
+    assert "private-token" not in str(caught.value)
+
+
+def test_secret_tool이_없으면_설치_안내를_준다(monkeypatch) -> None:
+    def run(*args, **kwargs):
+        raise FileNotFoundError("secret-tool")
+
+    monkeypatch.setattr("yt_rec.backend.tokens.subprocess.run", run)
+    with pytest.raises(TokenStoreError, match="libsecret-tools"):
+        LinuxSecretServiceStore().load()

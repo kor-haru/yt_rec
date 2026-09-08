@@ -101,6 +101,9 @@ class ConnectAccount:
     못하므로, 이 명령만 백엔드 소스가 붙어 있으면 통과한다.
     """
 
+    session_only: bool = False
+    """사용자가 명시적으로 선택했을 때만 토큰을 OS 저장소에 쓰지 않는다."""
+
 
 @dataclass(frozen=True, slots=True)
 class DisconnectAccount:

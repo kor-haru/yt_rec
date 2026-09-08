@@ -487,9 +487,9 @@ class AppState(QObject):
         """
         return self.send_command(cmd.UpdateSettings(dict(values)))
 
-    def connect_account(self) -> bool:
+    def connect_account(self, *, session_only: bool = False) -> bool:
         """Google 계정 연결을 시작해 달라. 미연결에서도 백엔드가 붙어 있으면 보낸다."""
-        return self.send_command(cmd.ConnectAccount())
+        return self.send_command(cmd.ConnectAccount(session_only=session_only))
 
     def disconnect_account(self) -> bool:
         """Google 계정 연결을 끊으라."""
