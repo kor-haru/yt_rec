@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import zipfile
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -25,6 +26,32 @@ def test_bundle_download_rejects_changed_cached_binary(monkeypatch, tmp_path):
     (tmp_path / name).write_bytes(b"wrong")
     with pytest.raises(RuntimeError, match="SHA256 mismatch"):
         builder.download(url, "0" * 64)
+
+
+@pytest.mark.parametrize("url,authenticated", [
+    ("https://api.github.com/repos/qt/qtbase/contents/LICENSES?ref=v6.11.1", True),
+    ("http://api.github.com/LICENSES", False),
+    ("https://api.github.com.example.invalid/LICENSES", False),
+    ("https://raw.githubusercontent.com/qt/qtbase/v6.11.1/LICENSES", False),
+    ("https://github.com/qt/qtbase/releases/download/LICENSES", False),
+])
+def test_build_token_is_api_only_and_never_redirected(monkeypatch, tmp_path, url, authenticated):
+    builder = _builder()
+    monkeypatch.setattr(builder, "CACHE", tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-only-build-token")
+
+    def open_request(request, timeout):
+        assert request.get_header("Authorization") == (
+            "Bearer test-only-build-token" if authenticated else None
+        )
+        redirected = builder.urllib.request.HTTPRedirectHandler().redirect_request(
+            request, None, 302, "Found", {}, "https://example.invalid/LICENSES",
+        )
+        assert not redirected.has_header("Authorization")
+        return io.BytesIO(b"license notice")
+
+    monkeypatch.setattr(builder.urllib.request, "urlopen", open_request)
+    assert builder.download(url).read_bytes() == b"license notice"
 
 
 def test_bundle_extract_rejects_archive_traversal(tmp_path):

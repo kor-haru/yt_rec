@@ -62,6 +62,10 @@ def download(url: str, expected: str | None = None) -> Path:
     if not target.exists():
         print("Downloading", url, flush=True)
         request = urllib.request.Request(url, headers={"User-Agent": "yt-rec-build"})
+        token = os.environ.get("GITHUB_TOKEN")
+        if token and request.type == "https" and request.host == "api.github.com":
+            # The CI token must never follow redirects or reach binary/raw hosts.
+            request.add_unredirected_header("Authorization", f"Bearer {token}")
         temporary = target.with_suffix(target.suffix + ".part")
         with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as stream:
             shutil.copyfileobj(response, stream)

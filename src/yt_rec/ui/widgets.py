@@ -150,8 +150,20 @@ class ElidedLabel(QLabel):
 
     def elided_text(self, width: int | None = None) -> str:
         """지금 폭(또는 지정 폭)에서 실제로 그려질 문자열. 테스트에서 쓴다."""
-        available = self.contentsRect().width() if width is None else width
-        return self.fontMetrics().elidedText(self.text(), self._mode, max(available, 0))
+        available = max(self.contentsRect().width() if width is None else width, 0)
+        metrics = self.fontMetrics()
+        budget = available
+        result = metrics.elidedText(self.text(), self._mode, budget)
+        if self._mode == Qt.TextElideMode.ElideNone:
+            return result
+        # Native fallback/reshaping can widen the final text plus ellipsis.
+        # Recheck that result, keeping Qt's grapheme-aware elision intact.
+        while metrics.horizontalAdvance(result) > available:
+            budget -= max(metrics.horizontalAdvance(result) - available, 1)
+            if budget <= 0:
+                return ""
+            result = metrics.elidedText(self.text(), self._mode, budget)
+        return result
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt 명명 규칙
         hint = super().minimumSizeHint()

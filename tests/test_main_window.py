@@ -43,7 +43,7 @@ from yt_rec.ui.main_window import (
     MainWindow,
 )
 from yt_rec.ui.settings_store import WindowSettings
-from yt_rec.ui.widgets import ELLIPSIS, can_elide, drawn_text
+from yt_rec.ui.widgets import ELLIPSIS, can_elide, drawn_text, visible_text_width
 
 
 def make_window(state: AppState, settings: WindowSettings) -> MainWindow:
@@ -565,9 +565,12 @@ def _silent_cuts(window: MainWindow) -> list[str]:
             continue
         if can_elide(label) and drawn.endswith(ELLIPSIS):
             continue
+        planned = label.elided_text() if can_elide(label) else text
         problems.append(
             f"{type(label).__name__}#{label.objectName()}: "
-            f"{text!r} 가 {drawn!r} 로 그려진다"
+            f"{text!r} 가 {drawn!r} 로 그려진다 "
+            f"(contents={label.contentsRect().width()}, visible={visible_text_width(label)}, "
+            f"planned={planned!r}, advance={label.fontMetrics().horizontalAdvance(planned)})"
         )
     return problems
 

@@ -14,7 +14,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -25,9 +28,51 @@ from yt_rec.state.stub import StubEventSource
 from yt_rec.ui.dashboard import EMPTY_CHANNELS_DISCONNECTED
 from yt_rec.ui.main_window import STYLESHEET, MainWindow
 from yt_rec.ui.settings_store import WindowSettings
+from yt_rec.ui.widgets import ELLIPSIS, ElidedLabel
 
 MIN_CONTRAST = 3.0
 """보조 문구의 최소 대비비. WCAG 의 큰 글자·보조 텍스트 기준."""
+
+
+def test_elision_rechecks_the_reshaped_result(qapp, monkeypatch) -> None:
+    label = ElidedLabel("a long title with fallback glyphs")
+    budgets = []
+
+    def elide(text, mode, width):
+        budgets.append(width)
+        assert text == label.text()
+        assert mode == Qt.TextElideMode.ElideRight
+        # Model native fallback reshaping adding two pixels after elision.
+        return "a" * max(width - 1, 0) + ELLIPSIS if width else ""
+
+    monkeypatch.setattr(label, "fontMetrics", lambda: SimpleNamespace(
+        elidedText=elide, horizontalAdvance=lambda text: len(text) + 2 if text else 0,
+    ))
+    result = label.elided_text(10)
+    assert label.fontMetrics().horizontalAdvance(result) <= 10
+    assert result.endswith(ELLIPSIS)
+    assert budgets == [10, 8]
+    assert label.text() == "a long title with fallback glyphs"
+
+
+def test_native_metadata_elision_fits_at_every_width(qapp) -> None:
+    label = ElidedLabel(
+        "09-07 20:13  ·  🎧 심야 라디오 아카이브 채널  ·  1:02:00  ·  "
+        "2.0 GB  ·  마지막 8초 조각 누락"
+    )
+    metrics = label.fontMetrics()
+    for width in range(metrics.horizontalAdvance(ELLIPSIS) + 4, 700):
+        result = label.elided_text(width)
+        assert metrics.horizontalAdvance(result) <= width, (width, result)
+        assert result == label.text() or result.endswith(ELLIPSIS), (width, result)
+
+
+def test_elision_handles_no_room_and_preserves_explicit_no_elision(qapp) -> None:
+    label = ElidedLabel("a title")
+    assert label.elided_text(0) == ""
+    assert label.elided_text(-1) == ""
+    unelided = ElidedLabel("a title", mode=Qt.TextElideMode.ElideNone)
+    assert unelided.elided_text(0) == "a title"
 
 
 def _relative_luminance(color: QColor) -> float:

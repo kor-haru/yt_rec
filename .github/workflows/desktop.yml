@@ -29,6 +29,8 @@ jobs:
       - run: uv sync --frozen
       - run: uv run --frozen pytest -m "not integration"
       - name: Build native bundle and run isolated GUI/media smoke
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py
       - uses: actions/upload-artifact@v4
         if: always()
