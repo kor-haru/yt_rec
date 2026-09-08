@@ -203,7 +203,7 @@ class CompletedRecording:
 
     duration: timedelta = timedelta()
     total_bytes: int = 0
-    """녹화 프로세스가 마지막으로 보고한 최종 크기."""
+    """마지막 보고 크기 또는 백엔드가 확인한 완료 파일 크기. -1은 알 수 없음."""
 
     status: CompletionStatus = CompletionStatus.COMPLETED
     output_path: str | None = None
@@ -279,3 +279,5 @@ class AppSnapshot:
     quota: QuotaStatus = field(default_factory=QuotaStatus)
     account: AccountInfo = field(default_factory=AccountInfo)
     subscriptions: tuple[Subscription, ...] = ()
+    archive: tuple[CompletedRecording, ...] = ()
+    """백엔드에서 복원한 전체 보관함. completed는 대시보드 최근 200건이다."""

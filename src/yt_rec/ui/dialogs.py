@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from ..state.store import AppState
 from .account import AccountDialog
+from .archive import ArchiveDialog
 from .channels import ChannelsDialog
 from .logs import LogDialog
 from .settings import SettingsDialog
@@ -84,9 +85,5 @@ class PlaceholderDialog(QDialog):
         return self._state
 
 
-class ArchiveDialog(PlaceholderDialog):
-    screen_title = "보관함"
-    issue = 10
-    summary = "완료된 녹화를 찾아보고 파일에 접근하는 화면입니다."
 
 

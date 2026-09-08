@@ -51,6 +51,7 @@ __all__ = [
     "RecordingStarted",
     "RecordingProgress",
     "RecordingFinished",
+    "CompletedChanged",
     "LogAppended",
     "QuotaChanged",
     "AccountChanged",
@@ -126,6 +127,13 @@ class RecordingFinished:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletedChanged:
+    """디스크에서 복원한 전체 보관함. 최근 완료와 달리 200건으로 자르지 않는다."""
+
+    completed: tuple[CompletedRecording, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class LogAppended:
     """로그 한 줄이 쌓였다. ``ERROR`` 수준이면 오류 카운터가 함께 올라간다."""
 
@@ -172,6 +180,7 @@ BackendEvent = (
     | RecordingStarted
     | RecordingProgress
     | RecordingFinished
+    | CompletedChanged
     | LogAppended
     | QuotaChanged
     | AccountChanged

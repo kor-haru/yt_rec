@@ -45,6 +45,8 @@ __all__ = [
     "ConnectAccount",
     "DisconnectAccount",
     "RefreshSubscriptions",
+    "RefreshArchive",
+    "OpenRecordingPath",
     "GuiCommand",
 ]
 
@@ -110,6 +112,19 @@ class RefreshSubscriptions:
     """구독 채널 목록을 다시 불러 달라."""
 
 
+@dataclass(frozen=True, slots=True)
+class RefreshArchive:
+    """보관함 이력과 완료 파일 존재 여부를 다시 읽어 달라."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRecordingPath:
+    """완료 파일을 재생하거나 파일 관리자에 표시해 달라."""
+
+    path: str
+    reveal: bool = False
+
+
 GuiCommand = (
     StopRecording
     | SetWatchedChannels
@@ -117,5 +132,7 @@ GuiCommand = (
     | ConnectAccount
     | DisconnectAccount
     | RefreshSubscriptions
+    | RefreshArchive
+    | OpenRecordingPath
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

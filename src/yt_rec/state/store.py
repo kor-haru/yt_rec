@@ -159,6 +159,9 @@ class AppState(QObject):
 
     settings_save_failed = Signal(str)
 
+    archive_changed = Signal(object)
+    """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
+
     snapshot_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.AppSnapshot` — 무엇이든 바뀌면 방출.
 
@@ -197,6 +200,7 @@ class AppState(QObject):
         self._channels: tuple[WatchedChannel, ...] = ()
         self._recordings: dict[str, Recording] = {}
         self._completed: list[CompletedRecording] = []
+        self._archive: tuple[CompletedRecording, ...] = ()
         self._logs: list[LogEntry] = []
         self._error_count = 0
         self._unseen_error_count = 0
@@ -265,6 +269,11 @@ class AppState(QObject):
         return tuple(self._completed)
 
     @property
+    def archive(self) -> tuple[CompletedRecording, ...]:
+        self._require_gui_thread("archive")
+        return self._archive
+
+    @property
     def logs(self) -> tuple[LogEntry, ...]:
         self._require_gui_thread("logs")
         return tuple(self._logs)
@@ -313,6 +322,7 @@ class AppState(QObject):
             channels=self._channels,
             recordings=tuple(self._recordings.values()),
             completed=tuple(self._completed),
+            archive=self._archive,
             logs=tuple(self._logs),
             error_count=self._error_count,
             unseen_error_count=self._unseen_error_count,
@@ -442,16 +452,13 @@ class AppState(QObject):
         if not isinstance(command, cmd.GuiCommand):
             raise TypeError(f"알 수 없는 화면 명령: {type(command)!r}")
         connected = self._connection is ConnectionState.CONNECTED
-        login_while_attached = (
-            isinstance(command, cmd.ConnectAccount) and bool(self._sources)
+        usable_while_attached = (
+            isinstance(command, (
+                cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
+                cmd.RefreshArchive, cmd.OpenRecordingPath,
+            )) and bool(self._sources)
         )
-        stop_while_attached = (
-            isinstance(command, cmd.StopRecording) and bool(self._sources)
-        )
-        settings_while_attached = (
-            isinstance(command, cmd.UpdateSettings) and bool(self._sources)
-        )
-        if not connected and not login_while_attached and not stop_while_attached and not settings_while_attached:
+        if not connected and not usable_while_attached:
             self.command_rejected.emit(command, "백엔드에 연결되지 않았습니다")
             return False
         self.command_requested.emit(command)
@@ -491,6 +498,14 @@ class AppState(QObject):
     def refresh_subscriptions(self) -> bool:
         """구독 목록을 다시 불러 달라."""
         return self.send_command(cmd.RefreshSubscriptions())
+
+    def refresh_archive(self) -> bool:
+        """로그인 없이 로컬 보관함을 다시 읽는다."""
+        return self.send_command(cmd.RefreshArchive())
+
+    def open_recording_path(self, path: str, *, reveal: bool = False) -> bool:
+        """완료 파일 재생 또는 파일 위치 열기를 요청한다."""
+        return self.send_command(cmd.OpenRecordingPath(path, reveal=reveal))
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -567,8 +582,18 @@ class AppState(QObject):
             done = _replace(done, finished_at=_now())
         self._completed.insert(0, done)
         del self._completed[MAX_COMPLETED:]
+        self._archive = (done,) + tuple(
+            item for item in self._archive
+            if (item.recording_id, item.output_path) != (done.recording_id, done.output_path)
+        )
         self._dirty.add("recordings")
         self._dirty.add("completed")
+        self._dirty.add("archive")
+
+    def _on_completed(self, event: ev.CompletedChanged) -> None:
+        self._archive = tuple(event.completed)
+        self._completed = list(self._archive[:MAX_COMPLETED])
+        self._dirty.update({"completed", "archive"})
 
     def _on_log(self, event: ev.LogAppended) -> None:
         self._logs.insert(0, event.entry)
@@ -605,6 +630,7 @@ class AppState(QObject):
         ev.RecordingStarted: _on_recording_started,
         ev.RecordingProgress: _on_recording_progress,
         ev.RecordingFinished: _on_recording_finished,
+        ev.CompletedChanged: _on_completed,
         ev.LogAppended: _on_log,
         ev.QuotaChanged: _on_quota,
         ev.AccountChanged: _on_account,
@@ -644,6 +670,8 @@ class AppState(QObject):
             self.recordings_changed.emit(tuple(self._recordings.values()))
         if "completed" in dirty:
             self.completed_changed.emit(tuple(self._completed))
+        if "archive" in dirty:
+            self.archive_changed.emit(self._archive)
         if "logs" in dirty:
             self.logs_changed.emit(tuple(self._logs))
         if "errors" in dirty:
