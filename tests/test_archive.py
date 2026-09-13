@@ -116,16 +116,51 @@ def test_file_manager_routes_preserve_unicode_and_spaces(tmp_path: Path, monkeyp
     monkeypatch.setattr(backend.subprocess, "run", lambda args, **kwargs: launched.append(args))
     monkeypatch.setattr(backend.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
     monkeypatch.setattr(backend.os, "startfile", lambda name: launched.append(name), raising=False)
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
     backend.open_archive_path(str(path), reveal=True)
     backend.open_archive_path(str(path))
     if platform == "win32":
-        assert launched == [["explorer.exe", f"/select,{path}"], str(path)]
+        assert launched == [[str(tmp_path / "Windows/explorer.exe"), f"/select,{path}"], str(path)]
     elif platform == "darwin":
         assert launched == [["open", "-R", str(path)], ["open", str(path)]]
     else:
         assert launched[0][0] == "dbus-send"
         assert launched[0][-2:] == [f"array:string:{path.as_uri()}", "string:"]
         assert launched[1] == ["xdg-open", str(path)]
+
+
+def test_windows_reveal_never_searches_cwd_or_path_for_explorer(tmp_path, monkeypatch):
+    path = tmp_path / "한글, 영상.mp4"
+    path.write_bytes(b"media")
+    fake = tmp_path / "explorer.exe"
+    fake.write_bytes(b"not an executable; must never be selected")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    system_root = tmp_path / "Windows"
+    monkeypatch.setenv("SystemRoot", str(system_root))
+    monkeypatch.setattr(backend.sys, "platform", "win32")
+    monkeypatch.setattr(backend.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    launched = []
+    monkeypatch.setattr(backend.subprocess, "Popen", lambda argv, **kwargs: launched.append((argv, kwargs)))
+    backend.open_archive_path(str(path), reveal=True)
+    assert launched == [([str(system_root / "explorer.exe"), f"/select,{path}"], {"creationflags": 0})]
+    assert fake.read_bytes() == b"not an executable; must never be selected"
+
+
+@pytest.mark.parametrize("system_root", [None, "", "relative", "../Windows"])
+def test_windows_reveal_rejects_missing_or_relative_system_directory(tmp_path, monkeypatch, system_root):
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"media")
+    monkeypatch.setattr(backend.sys, "platform", "win32")
+    if system_root is None:
+        monkeypatch.delenv("SystemRoot", raising=False)
+    else:
+        monkeypatch.setenv("SystemRoot", system_root)
+    launched = []
+    monkeypatch.setattr(backend.subprocess, "Popen", lambda *args, **kwargs: launched.append(args))
+    with pytest.raises(OSError, match="Windows"):
+        backend.open_archive_path(str(path), reveal=True)
+    assert launched == []
 
 
 def test_linux_selection_encodes_uri_without_shell_or_array_delimiter_injection(tmp_path: Path, monkeypatch) -> None:

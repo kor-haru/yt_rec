@@ -163,7 +163,10 @@ def open_archive_path(path: str, *, reveal: bool = False) -> None:
         raise FileNotFoundError("저장된 위치에 녹화 파일이 없습니다. 보관함을 새로고침하세요.")
     if sys.platform == "win32":
         if reveal:
-            subprocess.Popen(["explorer.exe", f"/select,{target}"], creationflags=subprocess.CREATE_NO_WINDOW)
+            windows_dir = Path(os.environ.get("SystemRoot", ""))
+            if not windows_dir.is_absolute():
+                raise OSError("Windows 시스템 폴더 경로를 확인할 수 없습니다")
+            subprocess.Popen([str(windows_dir / "explorer.exe"), f"/select,{target}"], creationflags=subprocess.CREATE_NO_WINDOW)
         else:
             os.startfile(str(target))
     else:
