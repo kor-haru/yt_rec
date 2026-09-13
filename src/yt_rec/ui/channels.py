@@ -76,7 +76,7 @@ class SubscriptionListModel(QAbstractListModel):
         item = self.at(index.row())
         if item is None or role != Qt.ItemDataRole.CheckStateRole:
             return False
-        selected = value in (Qt.CheckState.Checked, int(Qt.CheckState.Checked), True)
+        selected = value in (Qt.CheckState.Checked, Qt.CheckState.Checked.value, True)
         self.toggled.emit(item.channel_id, bool(selected))
         return False
 
