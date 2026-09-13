@@ -24,11 +24,15 @@ def test_all_settings_roundtrip_and_old_json_defaults(tmp_path):
     options = RecordingOptions(
         output_dir=tmp_path, max_height=720, max_recordings=5,
         poll_interval_seconds=300, autostart=True, start_hidden=True,
-        log_retention_days=30, notifications_enabled=False,
+        minimize_to_tray=True, log_retention_days=30, notifications_enabled=False,
     )
     save_settings(options, path)
     assert load_settings(path) == options
-    assert RecordingOptions.from_dict({"output_dir": str(tmp_path)}).max_recordings == 2
+    old = RecordingOptions.from_dict({"output_dir": str(tmp_path), "start_hidden": True})
+    assert old.max_recordings == 2
+    assert old.minimize_to_tray is False and old.start_hidden is True
+    save_settings(options.with_(minimize_to_tray=False), path)
+    assert load_settings(path).minimize_to_tray is False
     path.write_text("[]", encoding="utf-8")
     assert load_settings(path, default=options) == options
 
@@ -38,10 +42,14 @@ def test_all_settings_roundtrip_and_old_json_defaults(tmp_path):
     {"max_recordings": True}, {"poll_interval_seconds": 29},
     {"poll_interval_seconds": 3601}, {"log_retention_days": 0},
     {"autostart": "true"}, {"max_height": 0},
+    {"minimize_to_tray": "true"}, {"minimize_to_tray": 1},
+    {"minimize_to_tray": 0}, {"minimize_to_tray": None},
 ])
 def test_invalid_settings_rejected(tmp_path, values):
     with pytest.raises(ValueError):
         RecordingOptions(output_dir=tmp_path, **values)
+    with pytest.raises(ValueError):
+        RecordingOptions.from_dict({"output_dir": str(tmp_path), **values})
 
 
 def test_output_directory_must_exist_and_be_writable(tmp_path, monkeypatch):
@@ -77,9 +85,12 @@ def test_save_disconnected_ack_persist_and_failure_does_not_apply(tmp_path, stat
     errors = []
     state.settings_save_failed.connect(errors.append)
     assert state.settings == original
-    assert state.update_settings(max_recordings=4, poll_interval_seconds=300)
+    assert state.update_settings(max_recordings=4, poll_interval_seconds=300, minimize_to_tray=True)
     assert load_settings(path).max_recordings == 4
     assert state.settings.poll_interval_seconds == 300
+    assert state.settings.minimize_to_tray is True
+    assert load_settings(path).minimize_to_tray is True
+    assert recorder.option_updates[-1]["minimize_to_tray"] is True
     saved_bytes = path.read_bytes()
     applied = len(recorder.option_updates)
     state.update_settings(max_recordings=0)
@@ -87,9 +98,11 @@ def test_save_disconnected_ack_persist_and_failure_does_not_apply(tmp_path, stat
     assert path.read_bytes() == saved_bytes
     assert len(recorder.option_updates) == applied
     controller._settings_saver = lambda _: (_ for _ in ()).throw(OSError("disk full"))
-    state.update_settings(max_recordings=3)
+    state.update_settings(max_recordings=3, minimize_to_tray=False)
     assert errors[-1] == "disk full"
     assert state.settings.max_recordings == 4
+    assert state.settings.minimize_to_tray is True
+    assert load_settings(path).minimize_to_tray is True
     assert len(recorder.option_updates) == applied
     source.stop()
 
@@ -104,6 +117,9 @@ def test_dialog_cancel_validation_browse_and_ack(tmp_path, state, monkeypatch):
     dialog.show()
     assert dialog.isModal()
     assert dialog.save_button.isEnabled()
+    assert dialog.minimize_to_tray_check.text() == "최소화하면 트레이로 보내기"
+    assert not dialog.minimize_to_tray_check.isChecked()
+    dialog.minimize_to_tray_check.setChecked(True)
     assert dialog.space_label.text() != "확인할 수 없음"
     dialog.output_edit.setText(str(tmp_path / "missing"))
     assert not dialog.save_button.isEnabled()
@@ -115,18 +131,25 @@ def test_dialog_cancel_validation_browse_and_ack(tmp_path, state, monkeypatch):
     dialog.reject()
     assert commands == []
     assert state.settings.max_recordings == 2
+    assert state.settings.minimize_to_tray is False
     dialog = SettingsDialog(state)
     dialog.show()
     dialog.max_recordings_spin.setValue(3)
+    dialog.minimize_to_tray_check.setChecked(True)
     dialog._save()
     assert commands[-1].values["max_recordings"] == 3
+    assert commands[-1].values["minimize_to_tray"] is True
+    assert state.settings.minimize_to_tray is False
     assert dialog.result() != QDialog.DialogCode.Accepted
     state.apply(ev.SettingsSaveFailed("permission denied"))
     assert dialog.isEnabled()
     assert "permission denied" in dialog.error_label.text()
     dialog._save()
-    state.apply(ev.SettingsChanged(state.settings.with_(max_recordings=3)))
+    state.apply(ev.SettingsChanged(state.settings.with_(max_recordings=3, minimize_to_tray=True)))
     assert dialog.result() == QDialog.DialogCode.Accepted
+    reopened = SettingsDialog(state)
+    assert reopened.minimize_to_tray_check.isChecked()
+    reopened.reject()
 
 
 def test_recording_limit_and_new_options_only_affect_next_recording(tmp_path):

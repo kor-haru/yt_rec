@@ -59,6 +59,7 @@ class RecordingOptions:
     poll_interval_seconds: int = 120
     autostart: bool = False
     start_hidden: bool = False
+    minimize_to_tray: bool = False
     log_retention_days: int = 14
     notifications_enabled: bool = True
 
@@ -127,7 +128,7 @@ class RecordingOptions:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name}: {low}~{high} 사이의 정수를 입력하세요")
-        for name in ("autostart", "start_hidden", "notifications_enabled"):
+        for name in ("autostart", "start_hidden", "minimize_to_tray", "notifications_enabled"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name}: 켜기 또는 끄기만 가능합니다")
         if self.max_height is not None and (

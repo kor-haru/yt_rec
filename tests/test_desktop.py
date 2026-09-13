@@ -9,11 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from yt_rec import desktop
-from yt_rec.app import AppContext, DesktopSession
-from yt_rec.state.events import RecordingStarted
+from yt_rec.app import AppContext, DesktopSession, NotificationSession
+from yt_rec.recording.options import RecordingOptions
+from yt_rec.state.events import RecordingStarted, SettingsChanged, SettingsSaveFailed
 from yt_rec.state.models import CompletedRecording, CompletionStatus, Recording
 from yt_rec.ui.main_window import MainWindow
 
@@ -56,11 +57,12 @@ def test_desktop_exec_quotes_and_rejects_newlines():
         desktop._desktop_argument("path\nExec=bad")
 
 
-def _session(qapp, state, window_settings, monkeypatch, available, source=None):
+def _session(qapp, state, window_settings, monkeypatch, available, source=None, options=None):
     tray_type = MagicMock()
+    tray_type.ActivationReason = QSystemTrayIcon.ActivationReason
     tray_type.isSystemTrayAvailable.return_value = available
     monkeypatch.setattr("yt_rec.app.QSystemTrayIcon", tray_type)
-    monkeypatch.setattr("yt_rec.app.load_settings", lambda: SimpleNamespace(start_hidden=True, notifications_enabled=True))
+    monkeypatch.setattr("yt_rec.app.load_settings", lambda: options or SimpleNamespace(start_hidden=True, notifications_enabled=True))
     monkeypatch.setattr(qapp, "quit", MagicMock())
     window = MainWindow(state, settings=window_settings)
     session = DesktopSession(AppContext(qapp, state, window, source))
@@ -101,6 +103,134 @@ def test_tray_reopen_preserves_maximized_window(qapp, state, window_settings, mo
     window.hide()
     session.show_window()
     assert window.isMaximized()
+    window.desktop_managed = False
+    window.close()
+
+
+@pytest.mark.parametrize("available", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_minimize_option_keeps_source_and_receiver_running(
+    qapp, state, window_settings, monkeypatch, tmp_path, fake_push_receiver, available, enabled,
+):
+    source = MagicMock()
+    options = RecordingOptions(output_dir=tmp_path, minimize_to_tray=enabled)
+    window, session, _tray = _session(
+        qapp, state, window_settings, monkeypatch, available, source, options,
+    )
+    notifications = NotificationSession(state, source, window)
+    session.context.notifications = notifications
+    notifications.start()
+    session.show_initial()
+    assert window.isVisible()  # minimize preference is not start_hidden
+    window.showMinimized()  # exercise Qt's real WindowStateChange delivery
+    qapp.processEvents()
+    assert window.isMinimized()
+    assert window.isHidden() is (available and enabled)
+    state.apply(RecordingStarted(Recording("id", "Live")))
+    assert state.recordings and window._countdown_repaint_timer.isActive()
+    source.stop.assert_not_called()
+    source.begin_shutdown.assert_not_called()
+    assert notifications.receiver.starts == 1 and notifications.receiver.stops == 0
+    assert not notifications._stopped and not session.stopped and not window.exiting
+    session.show_window()
+    qapp.processEvents()
+    assert window.isVisible() and not window.isMinimized()
+    notifications.stop()
+    window.desktop_managed = False
+    window.close()
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+@pytest.mark.parametrize("restore", ["click", "double_click", "menu"])
+def test_minimize_tray_restore_preserves_window_state(
+    qapp, state, window_settings, monkeypatch, tmp_path, maximized, restore,
+):
+    options = RecordingOptions(output_dir=tmp_path, minimize_to_tray=True)
+    window, session, tray = _session(qapp, state, window_settings, monkeypatch, True, options=options)
+    window.showMaximized() if maximized else window.showNormal()
+    qapp.processEvents()
+    window.showMinimized()
+    qapp.processEvents()
+    assert window.isHidden()
+    if restore == "menu":
+        tray.setContextMenu.call_args.args[0].actions()[0].trigger()
+    else:
+        reason = (QSystemTrayIcon.ActivationReason.Trigger if restore == "click"
+                  else QSystemTrayIcon.ActivationReason.DoubleClick)
+        tray.activated.connect.call_args.args[0](reason)
+    qapp.processEvents()
+    assert window.isVisible() and not window.isMinimized()
+    assert window.isMaximized() is maximized
+    window.desktop_managed = False
+    window.close()
+
+
+def test_saved_minimize_setting_applies_immediately_not_on_failure(
+    qapp, state, window_settings, monkeypatch, tmp_path,
+):
+    options = RecordingOptions(output_dir=tmp_path)
+    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True, options=options)
+    session.show_initial()
+    state.apply(SettingsChanged(options.with_(minimize_to_tray=True)))
+    assert window.isVisible() and not window.isMinimized()
+    window.showMinimized()
+    qapp.processEvents()
+    assert window.isHidden()
+    state.apply(SettingsSaveFailed("disk full"))
+    assert window.isHidden() and session.options.minimize_to_tray is True
+    state.apply(SettingsChanged(options))
+    assert window.isHidden()  # Changing preferences must not reopen a hidden window.
+    session.show_window()
+    window.showMinimized()
+    qapp.processEvents()
+    assert window.isVisible() and window.isMinimized()
+    state.apply(SettingsChanged(options.with_(minimize_to_tray=True)))
+    assert window.isHidden() and window.isMinimized()
+    session.show_window()
+    window.desktop_managed = False
+    window.close()
+
+
+@pytest.mark.parametrize("settings_event", [False, True])
+def test_disabled_minimize_option_never_reopens_a_close_to_tray_window(
+    qapp, state, window_settings, monkeypatch, tmp_path, settings_event,
+):
+    options = RecordingOptions(output_dir=tmp_path)
+    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True, options=options)
+    session.show_initial()
+    window.showMinimized()
+    if settings_event:
+        qapp.processEvents()
+    window.close()
+    assert window.isHidden()
+    if settings_event:
+        state.apply(SettingsChanged(options.with_(notifications_enabled=False)))
+    qapp.processEvents()
+    assert window.isHidden() and not session.stopped
+    session.show_window()
+    window.desktop_managed = False
+    window.close()
+
+
+@pytest.mark.parametrize("change", ["restore", "disable", "tray_lost", "shutdown"])
+def test_deferred_minimize_rechecks_before_hiding(
+    qapp, state, window_settings, monkeypatch, tmp_path, change,
+):
+    options = RecordingOptions(output_dir=tmp_path, minimize_to_tray=True)
+    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True, options=options)
+    session.show_initial()
+    window.showMinimized()
+    if change == "restore":
+        session.show_window()
+    elif change == "disable":
+        state.apply(SettingsChanged(options.with_(minimize_to_tray=False)))
+    elif change == "tray_lost":
+        monkeypatch.setattr("yt_rec.app.QSystemTrayIcon.isSystemTrayAvailable", lambda: False)
+    else:
+        session.shutdown()
+    qapp.processEvents()
+    assert window.isVisible()
+    assert window.isMinimized() is (change != "restore")
     window.desktop_managed = False
     window.close()
 

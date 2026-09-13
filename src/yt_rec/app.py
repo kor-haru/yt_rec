@@ -206,18 +206,35 @@ class DesktopSession(QObject):
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(100)
         self._shutdown_timer.timeout.connect(self._check_shutdown)
+        window.installEventFilter(self)
 
     def show_initial(self) -> None:
         if not (self.context.window.tray_available and getattr(self.options, "start_hidden", False)):
             self.show_window()
 
     def show_window(self) -> None:
-        if self.context.window.isMinimized():
-            self.context.window.showNormal()
-        else:
-            self.context.window.show()
-        self.context.window.raise_()
-        self.context.window.activateWindow()
+        window = self.context.window
+        if window.isMinimized():
+            # Remove only minimization; a maximized window must stay maximized.
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched is self.context.window and event.type() == QEvent.Type.WindowStateChange:
+            # Let the native minimize finish before hiding. Recheck when delivered
+            # so a quick restore or setting change cannot hide a restored window.
+            QTimer.singleShot(0, self._apply_minimize_to_tray)
+        return super().eventFilter(watched, event)
+
+    def _apply_minimize_to_tray(self) -> None:
+        window = self.context.window
+        if self.stopped or self._shutdown is not None or window.exiting or not window.isMinimized():
+            return
+        if (getattr(self.options, "minimize_to_tray", False)
+                and self.tray is not None and QSystemTrayIcon.isSystemTrayAvailable()):
+            window.hide()
 
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -225,6 +242,7 @@ class DesktopSession(QObject):
 
     def _on_settings(self, options: object) -> None:
         self.options = options
+        self._apply_minimize_to_tray()
 
     def _notify(self, text: str) -> None:
         if (self.tray is not None and getattr(self.options, "notifications_enabled", True)
