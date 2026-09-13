@@ -35,6 +35,7 @@ from .models import (
     CompletedRecording,
     ConnectionState,
     LogEntry,
+    NotificationStatus,
     QuotaStatus,
     Recording,
     RecordingState,
@@ -58,6 +59,7 @@ __all__ = [
     "SubscriptionsChanged",
     "SettingsChanged",
     "SettingsSaveFailed",
+    "NotificationStatusChanged",
     "BackendEvent",
     "NaiveDatetimeWarning",
     "naive_datetime_fields",
@@ -173,6 +175,11 @@ class SettingsSaveFailed:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class NotificationStatusChanged:
+    status: NotificationStatus
+
+
 BackendEvent = (
     ConnectionChanged
     | WatchStatusChanged
@@ -187,6 +194,7 @@ BackendEvent = (
     | SubscriptionsChanged
     | SettingsChanged
     | SettingsSaveFailed
+    | NotificationStatusChanged
 )
 
 

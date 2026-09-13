@@ -310,7 +310,7 @@ class WatchController:
             # This construction option does not establish a push receiver.
             self._emit(ev.ChannelsChanged(tuple(
                 WatchedChannel(channel_id=cid, name=self._names.get(cid, cid),
-                               last_check_result="이벤트 대기 · 수신 경로 미검증")
+                               last_check_result="방송 알림 대기 · 주기 확인 없음")
                 for cid in selected
             )))
             self._emit(ev.WatchStatusChanged(

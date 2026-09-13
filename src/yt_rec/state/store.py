@@ -72,6 +72,7 @@ from .models import (
     CompletedRecording,
     ConnectionState,
     LogEntry,
+    NotificationStatus,
     QuotaStatus,
     Recording,
     Severity,
@@ -160,6 +161,9 @@ class AppState(QObject):
 
     settings_save_failed = Signal(str)
 
+    notification_changed = Signal(object)
+    """payload: NotificationStatus — 앱 전용 YouTube 알림 수신기 상태"""
+
     archive_changed = Signal(object)
     """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
 
@@ -210,6 +214,7 @@ class AppState(QObject):
         self._account = AccountInfo()
         self._subscriptions: tuple[Subscription, ...] = ()
         self._settings: RecordingOptions | None = None
+        self._notification = NotificationStatus()
 
         self._dirty: set[str] = set()
         self._sources: list[EventSource] = []
@@ -310,6 +315,11 @@ class AppState(QObject):
         self._require_gui_thread("settings")
         return self._settings
 
+    @property
+    def notification(self) -> NotificationStatus:
+        self._require_gui_thread("notification")
+        return self._notification
+
     def snapshot(self) -> AppSnapshot:
         """현재 상태 전체를 한 덩어리로 돌려준다. GUI 스레드 전용."""
         self._require_gui_thread("snapshot()")
@@ -331,6 +341,7 @@ class AppState(QObject):
             quota=self._quota,
             account=self._account,
             subscriptions=self._subscriptions,
+            notification=self._notification,
         )
 
     # ------------------------------------------------------------------
@@ -476,6 +487,7 @@ class AppState(QObject):
             isinstance(command, (
                 cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
                 cmd.RefreshArchive, cmd.OpenRecordingPath,
+                cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
             )) and bool(self._sources)
         )
         if not connected and not usable_while_attached:
@@ -526,6 +538,12 @@ class AppState(QObject):
     def open_recording_path(self, path: str, *, reveal: bool = False) -> bool:
         """완료 파일 재생 또는 파일 위치 열기를 요청한다."""
         return self.send_command(cmd.OpenRecordingPath(path, reveal=reveal))
+
+    def open_notification_browser(self) -> bool:
+        return self.send_command(cmd.OpenNotificationBrowser())
+
+    def open_notification_settings(self) -> bool:
+        return self.send_command(cmd.OpenNotificationSettings())
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -643,6 +661,10 @@ class AppState(QObject):
     def _on_settings_failed(self, event: ev.SettingsSaveFailed) -> None:
         self.settings_save_failed.emit(event.message)
 
+    def _on_notification(self, event: ev.NotificationStatusChanged) -> None:
+        self._notification = event.status
+        self._dirty.add("notification")
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -657,6 +679,7 @@ class AppState(QObject):
         ev.SubscriptionsChanged: _on_subscriptions,
         ev.SettingsChanged: _on_settings,
         ev.SettingsSaveFailed: _on_settings_failed,
+        ev.NotificationStatusChanged: _on_notification,
     }
 
     # ------------------------------------------------------------------
@@ -704,5 +727,7 @@ class AppState(QObject):
             self.subscriptions_changed.emit(self._subscriptions)
         if "settings" in dirty:
             self.settings_changed.emit(self._settings)
+        if "notification" in dirty:
+            self.notification_changed.emit(self._notification)
 
         self.snapshot_changed.emit(self._snapshot())

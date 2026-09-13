@@ -149,7 +149,7 @@ def test_autostart_failure_and_disk_failure_keep_old_settings(tmp_path, qapp, mo
     monkeypatch.setattr("yt_rec.backend.source.save_settings", disk_error)
     calls = []
     monkeypatch.setattr("yt_rec.desktop.set_autostart", calls.append)
-    source = create_backend_source(background=False, poll_interval=0)
+    source = create_backend_source(background=False, poll_interval=0, event_only=False)
     events = []
     source.event_ready.connect(events.append)
     source.handle_command(cmd.UpdateSettings({"autostart": True}))

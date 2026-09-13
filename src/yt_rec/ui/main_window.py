@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..state.models import ConnectionState, QuotaStatus, StopReason, WatchState, WatchStatus
+from ..state.models import ConnectionState, NotificationStatus, QuotaStatus, StopReason, WatchState, WatchStatus
 from ..state.store import AppState
 from .dashboard import Dashboard
 from .dialogs import (
@@ -157,6 +157,25 @@ class MainWindow(QMainWindow):
         self.top_bar = self._build_top_bar(central)
         central_layout.addWidget(self.top_bar)
 
+        self.notification_panel = QWidget(central)
+        notification_layout = QVBoxLayout(self.notification_panel)
+        notification_layout.setContentsMargins(12, 0, 12, 8)
+        self.notification_label = QLabel(self.notification_panel)
+        self.notification_label.setObjectName("notificationStatus")
+        self.notification_label.setWordWrap(True)
+        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
+        notification_layout.addWidget(self.notification_label)
+        notification_buttons = QHBoxLayout()
+        self.notification_login_button = QPushButton("YouTube 로그인", self.notification_panel)
+        self.notification_login_button.clicked.connect(state.open_notification_browser)
+        notification_buttons.addWidget(self.notification_login_button)
+        self.notification_settings_button = QPushButton("YouTube 알림 설정", self.notification_panel)
+        self.notification_settings_button.clicked.connect(state.open_notification_settings)
+        notification_buttons.addWidget(self.notification_settings_button)
+        notification_buttons.addStretch()
+        notification_layout.addLayout(notification_buttons)
+        central_layout.addWidget(self.notification_panel)
+
         self.scroll_area = QScrollArea(central)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -182,6 +201,7 @@ class MainWindow(QMainWindow):
         state.watch_changed.connect(self._on_watch)
         state.errors_changed.connect(self._on_errors)
         state.quota_changed.connect(self._on_quota)
+        state.notification_changed.connect(self._on_notification)
 
         # 남은 시간 표시 재렌더링. 백엔드를 조회하지 않는다.
         self._countdown_repaint_timer = QTimer(self)
@@ -196,6 +216,7 @@ class MainWindow(QMainWindow):
         self._on_watch(state.watch)
         self._on_errors(state.error_count, state.unseen_error_count)
         self._on_quota(state.quota)
+        self._on_notification(state.notification)
 
     # ------------------------------------------------------------------
     # 구성
@@ -355,6 +376,13 @@ class MainWindow(QMainWindow):
         elif watch.state is WatchState.WATCHING:
             kind = "ok"
             detail = ""
+        elif self._state.notification.code != "disabled" and watch.stop_reason is None:
+            ready = self._state.notification.code in ("ready", "received")
+            text = f"알림 대기 {watch.channel_count}채널" if ready else "수신 설정 필요"
+            if self._state.notification.code == "error":
+                text = "알림 수신 오류"
+            kind = "neutral" if ready else "warn"
+            detail = "방송 알림이 도착하면 해당 영상만 확인합니다. 아래 수신기 상태를 확인하세요."
         else:
             kind = "warn"
             detail = stop_reason_text(watch.stop_reason)
@@ -364,6 +392,14 @@ class MainWindow(QMainWindow):
         # 최소 너비는 여기서 다시 계산하지 않는다. 배지 문구가 길어질 때마다
         # 최소 너비가 커지면 Qt 가 창을 그만큼 넓혀 복원된 창 크기를 무효로
         # 만든다. 대신 생성 시 최장 문구(BADGE_WIDTH_SAMPLE)로 한 번 잡는다.
+
+    def _on_notification(self, status: NotificationStatus) -> None:
+        self.notification_panel.setVisible(status.code != "disabled")
+        self.notification_label.setText(status.detail)
+        self.notification_login_button.setEnabled(status.code != "stopped")
+        self.notification_settings_button.setEnabled(status.code != "stopped")
+        self._refresh_badge(self._state.connection, self._state.watch)
+        self._repaint_countdowns()
 
     def _on_errors(self, total: int, unseen: int) -> None:
         badge = str(unseen) if unseen <= 99 else "99+"
@@ -386,7 +422,9 @@ class MainWindow(QMainWindow):
     def _repaint_countdowns(self) -> None:
         """남은 시간 문자열만 다시 만든다. 상태 조회는 하지 않는다."""
         watch = self._state.watch
-        if self._state.connection is not ConnectionState.CONNECTED:
+        if self._state.notification.code != "disabled":
+            self.next_check_label.setText("주기 확인 없음")
+        elif self._state.connection is not ConnectionState.CONNECTED:
             self.next_check_label.setText("다음 확인 —")
         else:
             self.next_check_label.setText(f"다음 확인 {format_countdown(watch.next_check_at)}")

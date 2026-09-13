@@ -19,16 +19,27 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QStyle, QSystemTrayIcon, QVBoxLayout,
+)
+
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .backend import create_backend_source
+from .logs import redact
 from .recording.options import load_settings
-from .state.models import CompletionStatus, StopReason, WatchState
+from .state import commands as cmd, events as ev
+from .state.models import CompletionStatus, LogEntry, NotificationStatus, Severity, StopReason, WatchState
 from .state.store import AppState, EventSource
 from .state.stub import PRESETS, StubEventSource, recording_lifecycle
 from .ui.main_window import MainWindow
 from .ui.settings_store import APPLICATION, ORGANIZATION, WindowSettings
+
+# Configure/import WebEngine before the first QApplication, including --stub and
+# smoke entrypoints. Importing alone creates no profile or network work.
+QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 __all__ = ["main", "build_application", "AppContext", "parse_args"]
 
@@ -43,6 +54,109 @@ class AppContext:
     state: AppState
     window: MainWindow
     source: EventSource | None = None
+    notifications: NotificationSession | None = None
+
+
+class NotificationSession(QObject):
+    """Glue the native receiver to the existing queued backend and GUI state.
+
+    Only this adapter asserts trusted=True; it accepts no JSON/URL/probe command.
+    Closing the browser hides it. The receiver lives until the application exits.
+    """
+
+    def __init__(self, state: AppState, source: EventSource, window: MainWindow) -> None:
+        super().__init__(window)
+        self.state, self.source, self.window = state, source, window
+        self.receiver = None
+        self.browser = None
+        self._stopped = False
+        self._received = False
+        state.command_requested.connect(self.handle_command)
+
+    def start(self) -> None:
+        if self._stopped or self.receiver is not None:
+            return
+        self._status("connecting", "YouTube 알림 수신기를 시작하는 중입니다.")
+        try:
+            from .backend.push_receiver import YouTubePushReceiver
+
+            self.receiver = YouTubePushReceiver(self)
+            self.receiver.notification_received.connect(self._notification)
+            self.receiver.status_changed.connect(self._status)
+            self.receiver.start()
+        except Exception as exc:
+            # No fallback discovery: startup failure must remain visible and safe.
+            if self.receiver is not None:
+                self.receiver.stop()
+                self.receiver = None
+            self._status("error", f"알림 수신기를 시작하지 못했습니다. 앱을 다시 실행하고 로그를 확인하세요: {redact(str(exc))}")
+
+    def _notification(self, notice: object) -> None:
+        if self._stopped:
+            return
+        # BackendSource rechecks the exact type, ID and non-synthetic boundary.
+        if self.source.receive_notification(notice, trusted=True):
+            self._received = True
+            self._status("ready", "")
+
+    def _status(self, code: str, detail: str) -> None:
+        if self._stopped and code != "stopped":
+            return
+        if code in ("ready", "received"):
+            detail = ("알림 대기(이 세션에서 수신 이력 있음)" if self._received
+                      else "알림 대기(수신 이력 없음)") + " · 준비 상태이며 모든 방송 수신을 보장하지 않습니다."
+        status = NotificationStatus(code, redact(detail))
+        self.state.post_event(ev.NotificationStatusChanged(status))
+        self.source.publish(ev.LogAppended(LogEntry(
+            at=datetime.now(timezone.utc), severity=Severity.ERROR if code == "error" else Severity.INFO,
+            source="notification-receiver", message=f"{code}: {status.detail}",
+        )))
+
+    def handle_command(self, command: object) -> None:
+        if self._stopped:
+            return
+        if not isinstance(command, (cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings)):
+            self.source.handle_command(command)
+            return
+        if self.receiver is None:
+            self.start()
+        if self.receiver is None:
+            return
+        if self.browser is None:
+            self.browser = QDialog(self.window)
+            self.browser.setWindowTitle("YouTube 로그인·알림 설정 — yt-rec")
+            self.browser.resize(1000, 760)
+            layout = QVBoxLayout(self.browser)
+            note = QLabel("계정 메뉴와 같은 YouTube 계정으로 로그인하세요. 이 창을 닫아도 알림 수신은 계속됩니다.", self.browser)
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            controls = QHBoxLayout()
+            check = QPushButton("알림 상태 확인", self.browser)
+            check.clicked.connect(self.receiver.inspect_registration)
+            controls.addWidget(check)
+            controls.addStretch()
+            layout.addLayout(controls)
+            view = QWebEngineView(self.browser)
+            view.setPage(self.receiver.page)
+            layout.addWidget(view, 1)
+        self.browser.show()
+        self.browser.raise_()
+        self.browser.activateWindow()
+        if isinstance(command, cmd.OpenNotificationSettings):
+            self.receiver.open_settings()
+        else:
+            self.receiver.open_browser()
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        if self.browser is not None:
+            self.browser.hide()
+            self.browser.deleteLater()
+            self.browser = None
+        if self.receiver is not None:
+            self.receiver.stop()
 
 
 class DesktopSession(QObject):
@@ -143,6 +257,8 @@ class DesktopSession(QObject):
     def shutdown(self) -> None:
         if self._shutdown is not None:
             return
+        if self.context.notifications is not None:
+            self.context.notifications.stop()
         source = self.context.source
         if source is None or isinstance(source, StubEventSource):
             if source is not None:
@@ -222,18 +338,20 @@ def build_application(
     window = MainWindow(state, settings=settings or WindowSettings())
 
     source: EventSource | None
+    notifications = None
     if args.stub:
         stub = StubEventSource()
         state.attach(stub)
         _start_stub(stub, args.stub)
         source = stub
     else:
-        source = create_backend_source()
+        source = create_backend_source(event_only=True)
         state.attach(source)
-        state.command_requested.connect(source.handle_command)
         source.start()
+        notifications = NotificationSession(state, source, window)
+        notifications.start()
 
-    return AppContext(app=app, state=state, window=window, source=source)
+    return AppContext(app=app, state=state, window=window, source=source, notifications=notifications)
 
 
 def _start_stub(source: StubEventSource, mode: str) -> None:
@@ -262,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return context.app.exec()
     finally:
+        if context.notifications is not None:
+            context.notifications.stop()
+            # External app.quit() can bypass the normal async shutdown. Destroy
+            # views/pages before profiles while the Qt application still exists.
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         if context.source is not None and not desktop.stopped:
             context.source.stop()
 

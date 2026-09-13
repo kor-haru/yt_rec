@@ -92,9 +92,9 @@ class BackendSource(EventSource):
         """Queue one verified adapter input; True means accepted, not recorded.
 
         ``trusted`` is an internal caller assertion, NOT authentication. The
-        future receiver must authenticate its source before calling this API.
-        Probe/synthetic input is rejected even with trusted=True. No raw payload,
-        URL, browser bridge, or launcher is connected by this method.
+        native receiver must authenticate its source before calling this API.
+        Probe/synthetic input is rejected even with trusted=True. The app connects
+        its native receiver only; this method accepts no raw payload or URL.
         """
         if self._stopping or self._worker is None:
             return False
@@ -317,9 +317,13 @@ def create_backend_source(
     *,
     background: bool = True,
     poll_interval: float | None = None,
-    event_only: bool = False,
+    event_only: bool = True,
 ) -> BackendSource:
-    """생산용 소스. event_only는 수신기를 설치하지 않는 명시적 내부 옵션이다."""
+    """생산용 소스는 알림 전용이다. 수신기 수명주기는 app이 소유한다.
+
+    event_only=False는 기존 내부 통합용 호환 옵션이며 일반 실행은 쓰지 않는다.
+    수신기 오류 시에도 폴링으로 전환하지 않는다.
+    """
 
     if event_only and not background:
         raise ValueError("이벤트 전용 소스는 백그라운드 작업 스레드가 필요합니다")

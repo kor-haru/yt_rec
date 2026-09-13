@@ -1,7 +1,8 @@
 # Bundled components and source locations
 
 The application invokes yt-dlp, FFmpeg/ffprobe and Deno as separate executables.
-It uses Qt Widgets through PySide6 Essentials, without QtWebEngine or Chromium.
+It uses Qt Widgets and QtWebEngine through PySide6 (including Addons/Chromium).
+QtWebEngine is used only for the application-owned YouTube notification receiver.
 The `licenses` directory preserves third-party notices and the manifest records
 the exact package versions and binary SHA256 hashes. Do not remove these files.
 Standalone child executables are copied after PyInstaller builds the application;
@@ -28,6 +29,9 @@ outer application receive ad-hoc signatures. Downloaded vendor tools retain thei
 - Qt/PySide6: https://code.qt.io/ and https://download.qt.io/official_releases/
   Versions are in `build-manifest.json`. LGPL/GPL and bundled library license
   texts are retained. Qt libraries remain separate files, replaceable by users.
+  QtWebEngine includes Chromium and its third-party components. Preserve the
+  QtWebEngine/Chromium notices and review corresponding source obligations before
+  redistribution: https://doc.qt.io/qt-6/qtwebengine-licensing.html
 - Python: https://www.python.org/downloads/source/
   Runtime and other Python package notices are included where supplied by wheels.
 

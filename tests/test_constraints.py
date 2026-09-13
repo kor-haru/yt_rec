@@ -193,7 +193,7 @@ def test_소스가_os_scandir을_호출하지_않는다() -> None:
 
 
 # ----------------------------------------------------------------------
-# QtWebEngine 금지 (#6, README)
+# 네이티브 YouTube 알림 수신에 한정한 QtWebEngine 허용 (#38, #39)
 # ----------------------------------------------------------------------
 def pyproject() -> dict:
     return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -216,68 +216,27 @@ def declared_requirements() -> list[str]:
     return reqs
 
 
-def test_선언된_의존성에_QtWebEngine이_없다() -> None:
-    offenders = [r for r in declared_requirements() if "webengine" in r.lower()]
-    assert not offenders, f"QtWebEngine 계열 의존성: {offenders}"
+def test_검증한_Qt_버전의_전체_패키지만_직접_선언한다() -> None:
+    """내장 Chromium 요청으로 Essentials-only 제약을 대체했다."""
+    qt = [r for r in runtime_requirements() if "pyside6" in r.lower()]
+    assert qt == ["PySide6>=6.11.1,<7"]
 
 
-def test_PySide6_Addons가_의존성에_없다() -> None:
-    """Addons 를 끌어오면 QtWebEngine 계열이 따라온다. Essentials 만 쓴다."""
-    offenders = [r for r in declared_requirements() if "pyside6-addons" in r.lower()]
-    assert not offenders, f"PySide6-Addons 의존성: {offenders}"
-    assert any("pyside6-essentials" in r.lower() for r in declared_requirements())
-
-
-def test_QtWebEngine_모듈이_설치되어_있지_않다() -> None:
+def test_QtWebEngine_수신기_모듈이_설치되어_있다() -> None:
     for name in (
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebEngineCore",
-        "PySide6.QtWebEngineQuick",
     ):
-        assert importlib.util.find_spec(name) is None, f"{name} 이 설치돼 있다"
+        assert importlib.util.find_spec(name) is not None, f"{name} 이 설치되지 않았다"
 
 
-def pyside6_root() -> Path:
-    spec = importlib.util.find_spec("PySide6")
-    assert spec is not None and spec.submodule_search_locations
-    return Path(list(spec.submodule_search_locations)[0])
-
-
-def test_Chromium_라이브러리가_설치되어_있지_않다() -> None:
-    """QtWebEngine 의 실체인 Chromium(``Qt6WebEngineCore``)이 없어야 한다.
-
-    배포 요건과 충돌하는 것은 Chromium 그 자체다. PySide6-Essentials 는
-    Qt 전체 API 의 타입 스텁(``.pyi``)과 Designer 폼 편집기용 플러그인
-    (``plugins/designer/qwebengineview.dll``, 48 KB)을 함께 넣지만, 둘 다
-    Chromium 을 포함하지 않고 앱 실행 경로에도 들어오지 않는다.
-    """
-    root = pyside6_root()
-    chromium = [p.name for p in root.glob("**/Qt6WebEngine*")]
-    assert not chromium, f"Chromium 라이브러리가 설치돼 있다: {chromium}"
-
-    extensions = [p.name for p in root.glob("QtWebEngine*.pyd")]
-    extensions += [p.name for p in root.glob("QtWebEngine*.so")]
-    assert not extensions, f"QtWebEngine 확장 모듈이 설치돼 있다: {extensions}"
-
-
-def test_WebEngine_관련_설치_용량이_무시할_수준이다() -> None:
-    """진짜 Chromium 이 들어오면 수백 MB 가 된다. 상한으로 걸러 낸다.
-
-    여기서 ``stat`` 을 쓰는 것은 금지 대상이 아니다. 금지된 것은 *진행 중
-    녹화의 크기*를 stat 으로 읽는 일이고, 이것은 이미 설치가 끝난 wheel 의
-    디스크 용량을 재는 검사 코드다.
-    """
-    root = pyside6_root()
-    total = sum(p.stat().st_size for p in root.glob("**/*") if "webengine" in p.name.lower())
-    assert total < 1_000_000, f"WebEngine 관련 파일이 {total:,} 바이트다"
-
-
-def test_소스가_QtWebEngine을_참조하지_않는다() -> None:
-    """docstring 의 금지 문구는 제외하고 실제 코드만 본다."""
+def test_WebEngine은_수신기와_앱_배선에만_쓴다() -> None:
+    """다른 화면의 WebEngine/스크래핑 의존성 확대는 계속 금지한다."""
+    allowed = {SRC_ROOT / "app.py", SRC_ROOT / "backend" / "push_receiver.py"}
     offenders = [
         str(path.relative_to(REPO_ROOT))
         for path in python_sources()
-        if "WebEngine" in code_text(path)
+        if "WebEngine" in code_text(path) and path not in allowed
     ]
     assert not offenders, f"QtWebEngine 참조: {offenders}"
 
@@ -470,16 +429,9 @@ def test_잠금_파일의_requires_python이_pyproject와_일치한다() -> None
     assert lock()["requires-python"] == pyproject()["project"]["requires-python"]
 
 
-def test_잠금_파일에_QtWebEngine_계열이_없다() -> None:
-    """잠금 파일까지 확인해야 실제로 설치될 트리를 보증할 수 있다."""
-    offenders = [
-        name
-        for name in locked_packages()
-        if "webengine" in name.lower() or "pyside6-addons" in name.lower()
-    ]
-    assert not offenders, f"잠금 파일에 QtWebEngine 계열이 있다: {offenders}"
-    # 원본 텍스트에도 없어야 한다(휠 URL 등에 섞여 들어오는 경우 대비).
-    assert "webengine" not in LOCK_PATH.read_text(encoding="utf-8").lower()
+def test_잠금_파일의_Qt_구성요소_버전이_일치한다() -> None:
+    packages = locked_packages()
+    assert {packages[name] for name in ("pyside6", "pyside6-addons", "pyside6-essentials", "shiboken6")} == {packages["pyside6"]}
 
 
 def test_잠금_파일이_런타임_의존성을_담는다() -> None:
@@ -508,7 +460,7 @@ def test_개발_의존성이_런타임과_분리되어_있다() -> None:
     project_entry = next(p for p in lock()["package"] if p["name"] == "yt-rec")
     runtime_names = {d["name"] for d in project_entry.get("dependencies", [])}
     assert "pytest" not in runtime_names
-    assert "pyside6-essentials" in runtime_names
+    assert "pyside6" in runtime_names
 
 
 def test_uv_빌드_백엔드를_쓴다() -> None:

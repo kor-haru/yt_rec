@@ -47,6 +47,8 @@ __all__ = [
     "RefreshSubscriptions",
     "RefreshArchive",
     "OpenRecordingPath",
+    "OpenNotificationBrowser",
+    "OpenNotificationSettings",
     "GuiCommand",
 ]
 
@@ -128,6 +130,16 @@ class OpenRecordingPath:
     reveal: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class OpenNotificationBrowser:
+    """앱 전용 YouTube 브라우저를 열어 로그인한다. API 계정 연결과 별개다."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenNotificationSettings:
+    """같은 브라우저의 YouTube 알림 설정을 연다."""
+
+
 GuiCommand = (
     StopRecording
     | SetWatchedChannels
@@ -137,5 +149,7 @@ GuiCommand = (
     | RefreshSubscriptions
     | RefreshArchive
     | OpenRecordingPath
+    | OpenNotificationBrowser
+    | OpenNotificationSettings
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

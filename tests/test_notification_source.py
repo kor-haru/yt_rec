@@ -49,7 +49,7 @@ def flush(source, qapp):
 
 
 @pytest.fixture
-def wired(tmp_path, monkeypatch, qapp):
+def production_backend(tmp_path, monkeypatch, qapp):
     """Use the actual factory/controller/recorder, replacing external I/O only."""
     engines = {}
     events = []
@@ -139,18 +139,32 @@ def wired(tmp_path, monkeypatch, qapp):
     monkeypatch.setattr(production, "EngineRecorder", lambda *args, **kwargs: EngineRecorder(*args, engine_cls=Engine, **kwargs))
     monkeypatch.setattr(production, "ArchiveStore", lambda: ArchiveStore(tmp_path / "archive.json"))
     monkeypatch.setattr(production, "LogStore", lambda **kwargs: LogStore(tmp_path / "logs", **kwargs))
-    source = production.create_backend_source(event_only=True)
-    source.event_ready.connect(events.append)
+    sources = []
+
+    def factory(**kwargs):
+        source = production.create_backend_source(**kwargs)
+        source.event_ready.connect(events.append)
+        sources.append(source)
+        return source, api, engines, selected, seen, events
+
+    try:
+        yield factory
+    finally:
+        api.release.set()
+        for source in sources:
+            source.begin_shutdown()
+            source.stop()
+        qapp.processEvents()
+
+
+@pytest.fixture
+def wired(production_backend, qapp):
+    result = production_backend()
+    source, _, _, _, _, events = result
     source.start()
     until(qapp, lambda: any(isinstance(e, ev.ConnectionChanged) and e.state is ConnectionState.CONNECTED for e in events))
     flush(source, qapp)
-    try:
-        yield source, api, engines, selected, seen, events
-    finally:
-        source.begin_shutdown()
-        api.release.set()
-        source.stop()
-        qapp.processEvents()
+    return result
 
 
 def notice(video_id=VIDEO):

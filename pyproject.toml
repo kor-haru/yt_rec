@@ -8,10 +8,8 @@ version = "0.0.0"
 description = "선택한 YouTube 채널의 라이브를 시작 지점부터 자동 녹화하는 데스크톱 앱"
 requires-python = ">=3.11"
 dependencies = [
-    # GUI. QtWebEngine 계열은 의도적으로 제외한다 (README 제약 참고).
-    # PySide6 대신 -Essentials 를 쓰는 이유가 그것이다. PySide6 메타 패키지는
-    # PySide6-Addons 를 끌어오고, 거기에 Chromium 이 들어 있다.
-    "PySide6-Essentials>=6.7",
+    # Widgets + YouTube의 네이티브 웹 푸시를 받는 앱 전용 Chromium 프로필.
+    "PySide6>=6.11.1,<7",
     # Google 공식 OAuth 2.0. 시스템 기본 브라우저 + 로컬 루프백.
     "google-auth>=2.57.0",
     "google-auth-oauthlib>=1.4.1",
