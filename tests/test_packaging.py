@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import zipfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from pathlib import Path
 
@@ -93,3 +95,74 @@ def test_standalone_tools_survive_bundle_without_processing(monkeypatch, tmp_pat
         assert signer.call_args_list[0].args[0][-1] == str(bundle)
     else:
         signer.assert_not_called()
+
+
+def test_bundle_smoke_isolates_user_data_and_removes_host_overrides(monkeypatch, tmp_path):
+    builder = _builder()
+    monkeypatch.setenv("PATH", "host-python-and-tools")
+    monkeypatch.setenv("PYTHONPATH", "host-python")
+    monkeypatch.setenv("YT_REC_FFMPEG", "host-ffmpeg")
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "host-flags")
+    monkeypatch.setenv("QT_PLUGIN_PATH", "host-qt")
+    env = builder.smoke_environment(tmp_path)
+    for name in ("APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "XDG_CONFIG_HOME",
+                 "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR"):
+        assert Path(env[name]).is_relative_to(tmp_path) and Path(env[name]).is_dir()
+    assert env["PATH"] != "host-python-and-tools"
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+    assert not {"PYTHONPATH", "YT_REC_FFMPEG", "QTWEBENGINE_CHROMIUM_FLAGS", "QT_PLUGIN_PATH"} & env.keys()
+    assert builder.os.environ["PATH"] == "host-python-and-tools"  # Parent is untouched.
+
+
+def test_offline_webengine_smoke_runs_real_renderer(qapp):
+    from yt_rec.smoke import check_webengine
+
+    assert check_webengine() == {
+        "off_the_record": True, "javascript": True, "renderer_started": True, "rendered": True,
+    }
+
+
+def test_offline_webengine_smoke_does_not_accept_broken_javascript(qapp, monkeypatch):
+    from yt_rec import smoke
+
+    monkeypatch.setattr(smoke.QWebEnginePage, "runJavaScript", lambda _page, _script, callback: callback("wrong"))
+    assert smoke.check_webengine()["javascript"] is False
+
+
+def test_webengine_late_callback_does_not_access_deleted_page(qapp, monkeypatch):
+    from yt_rec import smoke
+
+    loop = smoke.QEventLoop()
+    errors = []
+    monkeypatch.setattr(smoke, "QEventLoop", lambda: loop)
+
+    def delayed(page, _script, callback):
+        def destroyed_callback():
+            try:
+                callback("")
+            except RuntimeError as exc:
+                errors.append(exc)
+        page.destroyed.connect(destroyed_callback)
+        loop.quit()
+
+    monkeypatch.setattr(smoke.QWebEnginePage, "runJavaScript", delayed)
+    assert smoke.check_webengine()["javascript"] is False
+    assert errors == []
+
+
+def test_smoke_failure_preserves_exact_tool_checkpoint(qapp, tmp_path, monkeypatch):
+    from yt_rec import smoke
+
+    monkeypatch.setattr(smoke, "check_webengine", lambda: {"javascript": True})
+    monkeypatch.setattr(smoke, "resolve_toolchain", lambda: SimpleNamespace(ytdlp=tmp_path / "blocked.exe"))
+
+    def blocked(*args, **kwargs):
+        raise OSError("application control blocked this file")
+
+    monkeypatch.setattr(smoke.subprocess, "run", blocked)
+    path = tmp_path / "report.json"
+    assert smoke.run_smoke(path) == 1
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["checking_tool"] == "ytdlp" and report["tools"] == {}
+    assert report["gui"] and not report["ok"]
+    assert "application control" in report["error"]

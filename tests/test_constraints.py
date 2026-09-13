@@ -230,9 +230,9 @@ def test_QtWebEngine_수신기_모듈이_설치되어_있다() -> None:
         assert importlib.util.find_spec(name) is not None, f"{name} 이 설치되지 않았다"
 
 
-def test_WebEngine은_수신기와_앱_배선에만_쓴다() -> None:
+def test_WebEngine은_수신기와_앱_배선_및_배포검증에만_쓴다() -> None:
     """다른 화면의 WebEngine/스크래핑 의존성 확대는 계속 금지한다."""
-    allowed = {SRC_ROOT / "app.py", SRC_ROOT / "backend" / "push_receiver.py"}
+    allowed = {SRC_ROOT / "app.py", SRC_ROOT / "backend" / "push_receiver.py", SRC_ROOT / "smoke.py"}
     offenders = [
         str(path.relative_to(REPO_ROOT))
         for path in python_sources()

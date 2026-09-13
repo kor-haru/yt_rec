@@ -42,7 +42,7 @@ Google 계정 연결, 채널 선택, 자동 녹화, 설정, 보관함, 로그와
 - 안정적인 인터넷 연결
 - 감시할 채널을 구독한 Google/YouTube 계정
 - 녹화 파일을 저장할 충분한 디스크 공간
-- Windows: 기본으로 포함된 PowerShell. macOS: 기본으로 포함된 터미널(zsh)
+- 소스에서 직접 실행할 때만: Windows의 PowerShell 또는 macOS의 터미널(zsh)
 
 Google에서 내려받은 OAuth JSON 파일에는 비밀 값이 들어 있다. 이 파일과 환경
 변수 값을 Git, GitHub, 메신저, 이메일, 스크린샷으로 공유하지 않는다. yt-rec가
@@ -53,17 +53,23 @@ Secret Service에 저장한다. 보안 저장소를 사용할 수 없다면 계�
 
 ### 실행 파일로 시작하기
 
-1. [Desktop bundle 빌드 목록](https://github.com/kor-haru/yt_rec/actions/workflows/desktop.yml)에서
-   성공한 빌드를 연다. 아래쪽 **Artifacts**에서 자신의 컴퓨터에 맞는 파일을 받는다.
-   다운로드에는 GitHub 로그인이 필요하다. 아직 성공한 빌드가 없으면 아래 소스 실행을 사용한다.
-2. 받은 압축 파일을 푼다. 안에 ZIP이나 `tar.gz`가 한 번 더 있으면 그것도 푼다.
-   Windows는 `windows-2022`(Intel/AMD 64비트), Apple Silicon Mac은 `macos-15`,
+1. Windows에서는 제공받은 **yt-rec-win32-x86_64.zip**을 준비한다(Intel/AMD 64비트용).
+   GitHub에서 받는 경우 [Desktop bundle 빌드 목록](https://github.com/kor-haru/yt_rec/actions/workflows/desktop.yml)의
+   성공한 빌드를 열고 **Artifacts**의 `yt-rec-windows-2022`를 받는다. GitHub 로그인이 필요하다.
+   Apple Silicon Mac은 `macos-15`,
    Intel Mac은 `macos-15-intel`, Linux는 자신의 CPU에 맞는 `ubuntu-22.04` 또는
    `ubuntu-24.04-arm`을 선택한다. Linux ARM64 실행 파일은 Ubuntu 24.04 이상이 필요하다.
-3. 풀린 폴더 전체를 계속 사용할 위치에 둔다. Windows는 그 안의 **yt-rec.exe**,
-   macOS는 **yt-rec.app**, Linux는 **yt-rec**를 실행한다. 실행 파일만 따로 옮기면 안 된다.
+2. Windows에서는 ZIP을 오른쪽 클릭해 **모두 압축 풀기**를 누른다. 안에 ZIP이나
+   `tar.gz`가 한 번 더 있으면 그것도 푼다. 압축 파일 안에서 바로 실행하지 않는다.
+3. 풀린 **yt-rec 폴더 전체**를 계속 사용할 위치에 둔다. 예를 들어 `D:\Apps\yt-rec`다.
+   안에 있는 `_internal` 폴더와 `README.md`를 그대로 둔다. 실행 파일 하나만 복사하면 작동하지 않는다.
+4. 이전 yt-rec가 켜져 있다면 먼저 **앱 → 종료**로 끝내고 녹화 마무리를 기다린다.
+   이 메뉴가 없는 구버전은 녹화 중이 아닌지 확인한 뒤 창의 **X**로 닫는다.
+   그다음 풀어 둔 폴더의 **yt-rec.exe**를 더블클릭한다. Python·uv·명령어 입력은 필요 없다.
+   예전 소스 폴더의 실행 명령이나 바로가기를 사용하면 이전 버전이 열릴 수 있으므로
+   이번에 받은 파일을 실행한다. macOS는 **yt-rec.app**, Linux는 **yt-rec**를 실행한다.
    macOS의 앱은 응용 프로그램 폴더에 옮긴 뒤 실행할 수 있다.
-4. 창이 열리면 아래 **6. Google 로그인 준비하기**로 이동한다. 이미 OAuth JSON이
+5. 창이 열리면 아래 **6. Google 로그인 준비하기**로 이동한다. 이미 OAuth JSON이
    있다면 **7. OAuth JSON 가져오기**부터 시작한다.
 
 자동 빌드 파일은 아직 정식 서명·공증 릴리스가 아니다. 운영체제나 조직 정책이 실행을
@@ -524,8 +530,13 @@ uv sync --frozen
 uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py
 ```
 
-완성 파일은 `dist/yt-rec-<OS>-<CPU>.zip` 또는 `.tar.gz`이고, 같은 폴더의
-`smoke-<OS>-<CPU>.json`은 GUI 렌더, 번들 도구 실행, 합성 영상·음성 병합과 재생 검증 결과다.
+Windows 결과물은 `dist/yt-rec/yt-rec.exe`와 폴더 전체를 담은
+`dist/yt-rec-win32-x86_64.zip`이다. 실행 파일 옆 `README.md`에서 사용법을 다시 볼 수 있다.
+다른 OS의 완성 파일은 `dist/yt-rec-<OS>-<CPU>.tar.gz`다. 같은 `dist` 폴더의
+`smoke-<OS>-<CPU>.json`은 GUI 렌더, 오프라인 Chromium 페이지·JavaScript 실행,
+번들 도구 실행, 합성 영상·음성 병합과 재생 검증 결과다. Windows 검사는 PATH에서
+개발 도구 경로를 제외하고 실행한다. `yt-rec/_internal/build-manifest.json`에는 소스 커밋,
+미커밋 변경 여부, 소스·잠금 파일·도구의 SHA256과 패키지 버전이 남는다.
 검사는 임시 폴더와 스텁만 사용하므로 실제 Google 계정이나 사용자 녹화를 건드리지 않는다.
 이 검사는 실제 OAuth·라이브 녹화 검증을 대신하지 않는다. 운영체제별 실제 설치·로그인·녹화와
 로그아웃 후 자동 시작 확인은 [수동 검증 절차](docs/recording-manual-checks.md)에 따라 수행한다.

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -141,6 +142,23 @@ def install_child_tools(bundle: Path) -> None:
             raise RuntimeError(f"Bundling changed the standalone executable: {source.name}")
 
 
+def smoke_environment(directory: Path) -> dict[str, str]:
+    """The built executable must work without host Python/tools or product data."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("PYTHON", "YT_REC_", "QTWEBENGINE_"))
+           and key not in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QML2_IMPORT_PATH")}
+    data_paths = {name: str(directory / name.lower()) for name in (
+        "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME", "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMP", "TEMP", "TMPDIR",
+    )}
+    env.update(data_paths)
+    for path in data_paths.values():
+        Path(path).mkdir(parents=True, exist_ok=True)
+    env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32") if sys.platform == "win32" else "/usr/bin:/bin"
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    return env
+
+
 def main() -> None:
     machine = {"AMD64": "x86_64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
     target = f"{sys.platform}-{machine}"
@@ -187,6 +205,10 @@ def main() -> None:
         shutil.copy2(archive, source_archive)
     collect_licenses()
     manifest = {"target": target, "python": sys.version, "pyinstaller": importlib.metadata.version("pyinstaller"),
+                "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, text=True).strip()),
+                "source_files": {str(path.relative_to(ROOT)): sha256(path)
+                                 for path in [*sorted((ROOT / "src").rglob("*.py")), ROOT / "packaging/build.py", ROOT / "uv.lock"]},
                 "tools": {path.name: sha256(path) for path in (VENDOR / "bin").iterdir()},
                 "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()}}
     (VENDOR / "build-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -199,10 +221,13 @@ def main() -> None:
     subprocess.run(args, cwd=ROOT, check=True)
     bundle = ROOT / "dist" / ("yt-rec.app" if sys.platform == "darwin" else "yt-rec")
     install_child_tools(bundle)
+    if sys.platform == "win32":
+        shutil.copy2(ROOT / "README.md", bundle / "README.md")
     executable = bundle / ("Contents/MacOS/yt-rec" if sys.platform == "darwin" else "yt-rec" + extension)
     report = ROOT / "dist" / f"smoke-{target}.json"
-    subprocess.run([str(executable), "--smoke-test", str(report)], check=True, timeout=120,
-                   env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    with tempfile.TemporaryDirectory(prefix="yt-rec-bundle-check-") as temporary:
+        subprocess.run([str(executable), "--smoke-test", str(report)], check=True, timeout=120,
+                       env=smoke_environment(Path(temporary)), cwd=temporary)
     if not json.loads(report.read_text(encoding="utf-8"))["ok"]:
         raise RuntimeError("Bundle smoke check did not pass")
     archive_kind = "zip" if sys.platform == "win32" else "gztar"
