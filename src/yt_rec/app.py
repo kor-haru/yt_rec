@@ -296,13 +296,17 @@ class DesktopSession(QObject):
             self._shutdown_error = exc
 
     def _check_shutdown(self) -> None:
-        if self._shutdown is not None and self._shutdown.is_alive():
+        if self._shutdown is None or self._shutdown.is_alive():
             return
         self._shutdown_timer.stop()
         if self._shutdown_error is not None:
-            self.context.window.statusBar().showMessage("종료 처리에 실패했습니다. 로그와 녹화 파일을 확인해 주세요.")
+            self.context.window.statusBar().showMessage(
+                "종료 실패 — 새 알림·녹화 시작 중단. 앱 → 종료로 다시 시도하세요."
+            )
+            # Rearm only the existing exit action. BackendSource and the receiver
+            # are already stopping/stopped; enabling normal commands is unsafe.
             self.context.window.exiting = False
-            self.context.window.centralWidget().setEnabled(True)
+            self.context.window.centralWidget().setEnabled(False)
             self._shutdown = None
             self._shutdown_error = None
             return

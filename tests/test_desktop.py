@@ -13,6 +13,8 @@ from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from yt_rec import desktop
 from yt_rec.app import AppContext, DesktopSession, NotificationSession
+from yt_rec.backend.selection import MemorySeenStore, MemorySelectionStore
+from yt_rec.backend.source import BackendSource
 from yt_rec.recording.options import RecordingOptions
 from yt_rec.state.events import RecordingStarted, SettingsChanged, SettingsSaveFailed
 from yt_rec.state.models import CompletedRecording, CompletionStatus, Recording
@@ -292,3 +294,98 @@ def test_shutdown_wait_does_not_block_gui(qapp, state, window_settings, monkeypa
     assert calls[1][1] != gui_thread
     window.desktop_managed = False
     window.close()
+
+
+@pytest.mark.parametrize("available", [False, True])
+@pytest.mark.parametrize("event_only", [False, True])
+def test_failed_shutdown_stays_disabled_and_menu_retry_waits_for_recorder(
+    qapp, state, window_settings, monkeypatch, tmp_path, fake_push_receiver,
+    available, event_only,
+):
+    started, retry_entered, release = (threading.Event() for _ in range(3))
+    joins = []
+
+    def join_recordings(*, timeout):
+        joins.append(timeout)
+        if len(joins) == 1:
+            raise RuntimeError("test recorder cleanup failure")
+        retry_entered.set()
+        assert release.wait(3), "test recorder was not released"
+
+    recorder = MagicMock()
+    recorder.join_all.side_effect = join_recordings
+    controller = SimpleNamespace(
+        event_only=event_only, _options=RecordingOptions(output_dir=tmp_path),
+        _recorder=recorder, _selection=MemorySelectionStore(), _seen=MemorySeenStore(),
+        start=started.set, tick=MagicMock(), handle_command=MagicMock(),
+    )
+    source = BackendSource(controller, background=True, poll_interval_ms=60000)
+    state.attach(source)
+    window, session, tray = _session(qapp, state, window_settings, monkeypatch, available, source)
+    notifications = NotificationSession(state, source, window)
+    session.context.notifications = notifications
+    notifications.start()
+    source.start()
+    assert started.wait(3)
+    original_timer = source._poll_timer
+    original_worker = source._worker
+    state.apply(RecordingStarted(Recording("finishing", "Live")))
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    try:
+        window.request_exit()
+        session._shutdown.join(3)
+        session._check_shutdown()
+        qapp.processEvents()
+        assert source._stopping and not original_worker.is_alive()
+        assert notifications._stopped and notifications.receiver.stops == 1
+        assert state.notification.code == "stopped"
+        assert not window.centralWidget().isEnabled()
+        assert "새 알림" in window.statusBar().currentMessage()
+        assert "다시 시도" in window.statusBar().currentMessage()
+        assert not session.stopped and not session._shutdown_timer.isActive()
+        qapp.quit.assert_not_called()
+        # A queued/stale timeout must not treat a failed attempt as success.
+        session._check_shutdown()
+        qapp.quit.assert_not_called()
+        source.handle_command(object())
+        source.tick()
+        notifications.start()
+        notifications.receiver.notification_received.emit(object())
+        assert not source.receive_notification(object(), trusted=True)
+        controller.handle_command.assert_not_called()
+        controller.tick.assert_not_called()
+        recorder.start.assert_not_called()
+        assert source._poll_timer is original_timer
+        assert original_timer is None or not original_timer.isActive()
+        assert notifications.receiver.starts == 1
+        assert state.recordings[0].recording_id == "finishing"
+        # Reuse the real menu action; disabled content must not trap the exit.
+        exit_action = window.menuBar().actions()[0].menu().actions()[0]
+        assert exit_action.isEnabled()
+        exit_action.trigger()
+        assert retry_entered.wait(3)
+        assert session._shutdown_timer.isActive()
+        session._check_shutdown()
+        qapp.processEvents()
+        assert window.exiting and not session.stopped
+        assert not window.centralWidget().isEnabled()
+        qapp.quit.assert_not_called()
+        release.set()
+        session._shutdown.join(3)
+        session._check_shutdown()
+        assert joins == [None, None]
+        assert session.stopped and not session._shutdown_timer.isActive()
+        qapp.quit.assert_called_once()
+        assert source._worker is original_worker and not original_worker.is_alive()
+        assert notifications.receiver.starts == notifications.receiver.stops == 1
+        if available:
+            tray.hide.assert_called_once()
+    finally:
+        release.set()
+        if session._shutdown is not None:
+            session._shutdown.join(3)
+        source.stop()
+        notifications.stop()
+        state.detach(source)
+        window.desktop_managed = False
+        window.close()
