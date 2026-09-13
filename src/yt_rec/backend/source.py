@@ -10,14 +10,16 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, QTimer, Slot
 
 from yt_rec.recording.options import RecordingOptions, default_settings_path, load_settings, save_settings
+from yt_rec.recording.events import ProgressReported
 from yt_rec.logs import LogStore, sanitize_event
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import CompletedRecording, CompletionStatus, LogEntry, Severity
+from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, Severity
 from yt_rec.state.store import EventSource, MAX_COMPLETED
 
 from .archive import ArchiveStore, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
+from .notifications import LiveNotification, NotificationRecorder, NotificationResult
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
 from .selection import FileSeenStore, FileSelectionStore
@@ -47,6 +49,8 @@ class BackendSource(EventSource):
         archive_store: ArchiveStore | None = None,
     ) -> None:
         super().__init__()
+        if controller.event_only and not background:
+            raise ValueError("이벤트 전용 소스는 백그라운드 작업 스레드가 필요합니다")
         self._controller = controller
         self._background = background
         self._poll_interval_ms = poll_interval_ms
@@ -60,6 +64,13 @@ class BackendSource(EventSource):
         self._archive_store = archive_store
         self._unsaved_results: dict[str, CompletedRecording] = {}
         self._results_lock = threading.Lock()
+        self._notification_capacity = controller._options.max_recordings
+        self._notifications = NotificationRecorder(
+            youtube=lambda: controller._youtube if controller._connected else None,
+            selection=controller._selection, recorder=controller._recorder,
+            seen=controller._seen, on_update=self._notification_update,
+            can_start=lambda: not self._stopping,
+        ) if controller.event_only else None
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
@@ -73,7 +84,60 @@ class BackendSource(EventSource):
                     self._warning(f"파일을 열지 못했습니다: {exc}")
             else:
                 self._controller.handle_command(command)  # type: ignore[arg-type]
+                if self._notifications is not None and isinstance(command, cmd.SetWatchedChannels):
+                    self._notifications.resume()
         self._run(handle)
+
+    def receive_notification(self, notice: LiveNotification, *, trusted: bool = False) -> bool:
+        """Queue one verified adapter input; True means accepted, not recorded.
+
+        ``trusted`` is an internal caller assertion, NOT authentication. The
+        future receiver must authenticate its source before calling this API.
+        Probe/synthetic input is rejected even with trusted=True. No raw payload,
+        URL, browser bridge, or launcher is connected by this method.
+        """
+        if self._stopping or self._worker is None:
+            return False
+        if (self._notifications is None or trusted is not True
+                or not isinstance(notice, LiveNotification) or notice.synthetic is not False):
+            self._run(lambda: self._warning("알림 거절: 이벤트 전용 모드의 검증된 실제 수신 입력만 허용합니다. 합성·프로브 입력은 녹화하지 않습니다."))
+            return False
+        def receive() -> None:
+            self._notification_update(NotificationResult(notice, "received"))
+            self._notifications.receive(notice)
+        self._run(receive)
+        return True
+
+    def _notification_update(self, result: NotificationResult) -> None:
+        self.publish(ev.LogAppended(LogEntry(
+            at=datetime.now(timezone.utc),
+            severity=Severity.WARNING if result.status == "failed" else Severity.INFO,
+            source="notification",
+            message=(f"알림 {result.notification.video_id}: {result.status}; "
+                     f"수신={result.notification.received_at}; 녹화 전달={result.handed_to_recorder_at}; "
+                     f"첫 미디어={result.first_media_at}; {result.reason}; "
+                     f"coverage={result.coverage}: {result.coverage_reason}"),
+        )))
+
+    def recording_progress(self, event: ProgressReported) -> None:
+        """Engine byte evidence only. This callback performs no network I/O."""
+        if self._notifications is not None:
+            self._notifications.report_progress(
+                event.video_id, int(event.snapshot.downloaded_bytes or 0), at=event.at,
+            )
+
+    def recording_finished(self, video_id: str, succeeded: bool) -> None:
+        """Post-slot-release bookkeeping survives shutdown; only the worker drains."""
+        if self._notifications is not None:
+            # Do not enqueue finalization: shutdown discards queued commands.
+            # The handler lock also orders actual byte evidence before completion.
+            self._notifications.recording_finished(video_id, succeeded, resume=False)
+            self._run(self._notifications.resume)
+        elif succeeded:
+            self._controller._seen.mark_done(video_id)
+        else:
+            self._controller._seen.unmark_started(video_id)
+        self._run(self._refresh_archive)
 
     def publish(self, event: object) -> None:
         """백엔드 사건을 가리고 저장한 다음 화면에 전달한다."""
@@ -94,6 +158,9 @@ class BackendSource(EventSource):
             except OSError as exc:
                 self._warning(f"로그를 저장하지 못했습니다: {exc}", persist=False)
         self.event_ready.emit(event)
+        if (self._notifications is not None and isinstance(event, ev.ConnectionChanged)
+                and event.state is ConnectionState.CONNECTED):
+            self._run(self._notifications.resume)
         if isinstance(event, ev.SettingsChanged):
             if self.log_store is not None:
                 try:
@@ -108,6 +175,9 @@ class BackendSource(EventSource):
                 except OSError as exc:
                     self._warning(f"보관함 위치를 저장하지 못했습니다: {exc}")
             self._refresh_archive()
+            if self._notifications is not None and event.options.max_recordings != self._notification_capacity:
+                self._notification_capacity = event.options.max_recordings
+                self._run(self._notifications.resume)
 
     def _warning(self, message: str, *, persist: bool = True) -> None:
         event = ev.LogAppended(LogEntry(
@@ -147,7 +217,7 @@ class BackendSource(EventSource):
             )
             self._worker.start()
         self._run(self._controller.start)
-        if self._poll_interval_ms > 0:
+        if self._poll_interval_ms > 0 and not self._controller.event_only:
             timer = QTimer(self)
             timer.setInterval(self._poll_interval_ms)
             timer.timeout.connect(self._on_poll)
@@ -163,9 +233,9 @@ class BackendSource(EventSource):
             self._poll_timer.stop()
         recorder = getattr(self._controller, "_recorder", None)
         if recorder is not None:
-            stop_all = getattr(recorder, "stop_all", None)
-            if stop_all is not None:
-                stop_all()
+            shutdown = getattr(recorder, "begin_shutdown", None) or getattr(recorder, "stop_all", None)
+            if shutdown is not None:
+                shutdown()
         if self._background:
             while True:
                 try:
@@ -200,7 +270,8 @@ class BackendSource(EventSource):
                 self._warning(f"로그 파일을 닫지 못했습니다: {exc}", persist=False)
 
     def tick(self) -> None:
-        self._run(self._controller.tick, coalesce_poll=True)
+        if not self._controller.event_only:
+            self._run(self._controller.tick, coalesce_poll=True)
 
     def _on_poll(self) -> None:
         self.tick()
@@ -246,8 +317,12 @@ def create_backend_source(
     *,
     background: bool = True,
     poll_interval: float | None = None,
+    event_only: bool = False,
 ) -> BackendSource:
-    """생산용 소스. 앱 전체가 같은 사용자 설정과 출력 위치를 쓴다."""
+    """생산용 소스. event_only는 수신기를 설치하지 않는 명시적 내부 옵션이다."""
+
+    if event_only and not background:
+        raise ValueError("이벤트 전용 소스는 백그라운드 작업 스레드가 필요합니다")
 
     box: dict[str, BackendSource] = {}
     seen = FileSeenStore()
@@ -257,11 +332,7 @@ def create_backend_source(
         box["source"].publish(event)
 
     def on_result(video_id: str, ok: bool) -> None:
-        if ok:
-            seen.mark_done(video_id)
-        else:
-            seen.unmark_started(video_id)
-        box["source"]._run(box["source"]._refresh_archive)
+        box["source"].recording_finished(video_id, ok)
 
     options = load_settings()
     if not default_settings_path().exists():
@@ -269,7 +340,10 @@ def create_backend_source(
             options.output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             startup_warnings.append(f"기본 녹화 폴더를 만들지 못했습니다. 설정에서 폴더를 선택하세요: {exc}")
-    recorder = EngineRecorder(options, emit, on_result=on_result)  # type: ignore[arg-type]
+    recorder = EngineRecorder(
+        options, emit, on_result=on_result,
+        on_progress=lambda event: box["source"].recording_progress(event),
+    )  # type: ignore[arg-type]
 
     def persist_settings(updated: RecordingOptions) -> None:
         previous = recorder.options
@@ -301,6 +375,7 @@ def create_backend_source(
         seen=seen,
         options=options,
         settings_saver=persist_settings,
+        event_only=event_only,
     )
     source = BackendSource(
         controller,

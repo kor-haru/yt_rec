@@ -200,12 +200,15 @@ class EngineRecorder:
         *,
         engine_cls: type[RecordingEngine] = RecordingEngine,
         on_result: ResultHook | None = None,
+        on_progress: Callable[[ProgressReported], None] | None = None,
     ) -> None:
         self._options = options
         self._emit = emit
         self._engine_cls = engine_cls
         self._on_result = on_result
+        self._on_progress = on_progress
         self._lock = threading.Lock()
+        self._closing = False
         self._engines: dict[str, RecordingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._meta: dict[str, dict[str, str]] = {}
@@ -233,6 +236,8 @@ class EngineRecorder:
         title: str = "",
     ) -> bool:
         with self._lock:
+            if self._closing:
+                return False
             if video_id in self._engines:
                 return False
             if len(self._engines) >= self._options.max_recordings:
@@ -290,6 +295,12 @@ class EngineRecorder:
         for engine in engines:
             engine.request_stop()
 
+    def begin_shutdown(self) -> None:
+        """Permanently reject new starts; logout's stop_all remains reversible."""
+        with self._lock:
+            self._closing = True
+        self.stop_all()
+
     def join_all(self, timeout: float | None = 600) -> None:
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._lock:
@@ -331,13 +342,22 @@ class EngineRecorder:
         finally:
             with self._lock:
                 self._engines.pop(video_id, None)
-                self._threads.pop(video_id, None)
                 self._meta.pop(video_id, None)
                 self._last_progress.pop(video_id, None)
-            if self._on_result is not None:
-                self._on_result(video_id, ok)
+            try:
+                if self._on_result is not None:
+                    self._on_result(video_id, ok)
+            finally:
+                # Release capacity before the hook, but let shutdown join the
+                # final seen/history writes too. A new same-ID thread may exist.
+                with self._lock:
+                    if self._threads.get(video_id) is threading.current_thread():
+                        self._threads.pop(video_id, None)
 
     def _on_engine_event(self, video_id: str, event: RecordingEvent) -> None:
+        # Use original byte reports, not cached bytes replayed for stall/status UI.
+        if isinstance(event, ProgressReported) and self._on_progress is not None:
+            self._on_progress(event)
         with self._lock:
             meta = dict(self._meta.get(video_id) or {})
             last = self._last_progress.get(video_id)

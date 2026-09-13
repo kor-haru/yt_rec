@@ -50,6 +50,7 @@ class WatchController:
         seen: object | None = None,
         options: RecordingOptions | None = None,
         settings_saver: Callable[[RecordingOptions], object] = save_settings,
+        event_only: bool = False,
     ) -> None:
         self._emit = emit
         self._auth = auth
@@ -63,6 +64,7 @@ class WatchController:
             recorder, "options", RecordingOptions(output_dir=Path("recordings"))
         )
         self._settings_saver = settings_saver
+        self.event_only = event_only
         self._requested_poll_interval = (
             options.poll_interval_seconds if options is not None else poll_interval
         )
@@ -154,6 +156,8 @@ class WatchController:
             self._poll_locked()
 
     def tick(self) -> None:
+        if self.event_only:
+            return
         if not self._lock.acquire(blocking=False):
             return
         try:
@@ -302,6 +306,20 @@ class WatchController:
 
     def _poll_locked(self) -> None:
         selected = tuple(self._selection.load())
+        if self.event_only:
+            # This construction option does not establish a push receiver.
+            self._emit(ev.ChannelsChanged(tuple(
+                WatchedChannel(channel_id=cid, name=self._names.get(cid, cid),
+                               last_check_result="이벤트 대기 · 수신 경로 미검증")
+                for cid in selected
+            )))
+            self._emit(ev.WatchStatusChanged(
+                state=WatchState.UNKNOWN if selected else WatchState.STOPPED,
+                channel_count=len(selected),
+                stop_reason=None if selected else StopReason.NO_CHANNELS,
+                next_check_at=None,
+            ))
+            return
         now = self._clock()
         limit = int(getattr(self._youtube, "quota_limit", 10_000) or 10_000)
         interval = max(
@@ -415,7 +433,7 @@ class WatchController:
                 state=WatchState.STOPPED,
                 channel_count=len(self._selection.load()),
                 stop_reason=reason,
-                next_check_at=self._clock() + timedelta(seconds=self.poll_interval),
+                next_check_at=None if self.event_only else self._clock() + timedelta(seconds=self.poll_interval),
             )
         )
 

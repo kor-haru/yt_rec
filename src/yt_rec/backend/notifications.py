@@ -2,7 +2,8 @@
 
 This is NOT a YouTube push receiver. A trusted adapter must deliver verified
 notifications on the backend worker; constructing a synthetic event proves only
-this downstream contract. Production polling is intentionally unchanged.
+this downstream contract. BackendSource's explicit event-only option wires this
+handler; legacy construction still uses polling. No receiver is installed here.
 
 Wire recorder's post-slot-release on_result to recording_finished(), and ONLY
 positive-byte engine ProgressReported events to report_progress(). Call resume()
@@ -66,6 +67,7 @@ class NotificationRecorder:
         recorder: Recorder, seen: SeenStore | None = None,
         on_update: Callable[[NotificationResult], None] | None = None,
         clock: Callable[[], float] = time.time,
+        can_start: Callable[[], bool] = lambda: True,
     ) -> None:
         self._youtube = youtube
         self._selection = selection
@@ -73,6 +75,10 @@ class NotificationRecorder:
         self._seen = seen if seen is not None else MemorySeenStore()
         self._on_update = on_update
         self._clock = clock
+        self._can_start = can_start
+        # Dispatch -> state is the only lock order. Engine callbacks use state
+        # alone, so a slow API lookup cannot stall an already-running engine.
+        self._dispatch_lock = threading.RLock()
         self._lock = threading.RLock()
         self._pending: dict[str, LiveNotification] = {}
         self._active: dict[str, NotificationResult] = {}
@@ -94,81 +100,98 @@ class NotificationRecorder:
 
     def receive(self, notification: LiveNotification) -> NotificationResult:
         """Process one trusted event now; duplicate notices issue no API request."""
-        with self._lock:
-            video_id = notification.video_id
-            if video_id in self._active:
-                return self._active[video_id]
-            if video_id in self._pending:
-                return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
+        with self._dispatch_lock:
+            with self._lock:
+                video_id = notification.video_id
+                if video_id in self._active:
+                    return self._active[video_id]
+                if video_id in self._pending:
+                    return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
             return self._attempt(notification)
 
     def _attempt(self, notice: LiveNotification) -> NotificationResult:
         video_id = notice.video_id
-        self._pending.pop(video_id, None)
         base = NotificationResult(notice, "ignored")
         try:
-            if self._seen.is_done(video_id):
-                return self._publish(replace(base, reason="이미 완료한 영상입니다"))
-            if self._recorder.is_recording(video_id):
-                return self._publish(replace(base, reason="이미 녹화 중입니다"))
-            if not self._selection.load():
-                return self._publish(replace(base, reason="선택한 채널이 없습니다"))
-            api = self._youtube()
-            if api is None:
-                self._pending[video_id] = notice
-                return self._publish(replace(base, status="queued", reason="연결 복구를 기다립니다"))
+            with self._lock:
+                self._pending.pop(video_id, None)
+                if not self._can_start():
+                    return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
+                if self._seen.is_done(video_id):
+                    return self._publish(replace(base, reason="이미 완료한 영상입니다"))
+                if self._recorder.is_recording(video_id):
+                    return self._publish(replace(base, reason="이미 녹화 중입니다"))
+                if not self._selection.load():
+                    return self._publish(replace(base, reason="선택한 채널이 없습니다"))
+                api = self._youtube()
+                if api is None:
+                    self._pending[video_id] = notice
+                    return self._publish(replace(base, status="queued", reason="연결 복구를 기다립니다"))
             live = api.get_live(video_id)
-            if live is None or live.video_id != video_id:
-                return self._publish(replace(base, reason="현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)"))
-            # Re-read AFTER network I/O: selection may have changed while waiting.
-            if live.channel_id not in self._selection.load():
-                return self._publish(replace(base, reason="선택이 해제되었거나 선택하지 않은 채널입니다"))
-            self._seen.mark_started(video_id)
-            handed = replace(base, status="handed", handed_to_recorder_at=self._clock())
-            self._active[video_id] = handed
-            accepted = self._recorder.start(
-                video_id, channel_id=live.channel_id, channel_name=live.channel_name, title=live.title,
-            )
-            if accepted is False:
+            with self._lock:
+                if not self._can_start():
+                    return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
+                if live is None or live.video_id != video_id:
+                    return self._publish(replace(base, reason="현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)"))
+                # Re-read AFTER network I/O: selection may have changed while waiting.
+                if live.channel_id not in self._selection.load():
+                    return self._publish(replace(base, reason="선택이 해제되었거나 선택하지 않은 채널입니다"))
+                self._seen.mark_started(video_id)
+                handed = replace(base, status="handed", handed_to_recorder_at=self._clock())
+                self._active[video_id] = handed
+                accepted = self._recorder.start(
+                    video_id, channel_id=live.channel_id, channel_name=live.channel_name, title=live.title,
+                )
+                if accepted is False:
+                    self._active.pop(video_id, None)
+                    self._seen.unmark_started(video_id)
+                    if not self._can_start():
+                        return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
+                    self._pending[video_id] = notice
+                    return self._publish(replace(base, status="queued", reason="녹화 슬롯을 기다립니다"))
+                return self._publish(handed)  # Handoff, not first media or success.
+        except Exception as exc:
+            with self._lock:
                 self._active.pop(video_id, None)
                 self._seen.unmark_started(video_id)
-                self._pending[video_id] = notice
-                return self._publish(replace(base, status="queued", reason="녹화 슬롯을 기다립니다"))
-            return self._publish(handed)  # Handoff, not first media or success.
-        except Exception as exc:
-            self._active.pop(video_id, None)
-            self._seen.unmark_started(video_id)
             return self._publish(replace(base, status="failed", reason=redact(str(exc))))
 
-    def recording_finished(self, video_id: str, succeeded: bool) -> None:
+    def recording_finished(self, video_id: str, succeeded: bool, *, resume: bool = True) -> None:
         """Invoke after the recorder releases its slot, including failed starts."""
-        with self._lock:
-            result = self._active.pop(video_id, None)
-            try:
-                if succeeded:
-                    self._seen.mark_done(video_id)
-                else:
-                    self._seen.unmark_started(video_id)
-            finally:
-                if result is not None:
-                    self._publish(replace(result, status="completed" if succeeded else "failed"))
+        try:
+            with self._lock:
+                result = self._active.pop(video_id, None)
+                try:
+                    if succeeded:
+                        self._seen.mark_done(video_id)
+                    else:
+                        self._seen.unmark_started(video_id)
+                finally:
+                    if result is not None:
+                        self._publish(replace(result, status="completed" if succeeded else "failed"))
+        finally:
+            if resume:
                 self.resume()
 
     def resume(self) -> None:
         """One FIFO drain after an explicit event; no autonomous retry or timer."""
-        with self._lock:
-            if self._draining:
-                return
-            self._draining = True
+        with self._dispatch_lock:
+            with self._lock:
+                if self._draining or not self._can_start():
+                    return
+                self._draining = True
+                notices = tuple(self._pending.values())
             try:
-                for notice in tuple(self._pending.values()):
+                for notice in notices:
                     result = self._attempt(notice)
                     if result.status == "queued":
                         # Keep the blocked head ahead of later arrivals.
-                        self._pending = {notice.video_id: notice, **self._pending}
+                        with self._lock:
+                            self._pending = {notice.video_id: notice, **self._pending}
                         break
             finally:
-                self._draining = False
+                with self._lock:
+                    self._draining = False
 
     def report_progress(self, video_id: str, downloaded_bytes: int, *, at: float | None = None) -> None:
         """Observe first actual positive-byte progress, never process creation."""
