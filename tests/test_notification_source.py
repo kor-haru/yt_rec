@@ -46,6 +46,8 @@ def flush(source, qapp):
     done = threading.Event()
     source._run(done.set)
     until(qapp, done.is_set)
+    # Worker completion guarantees emission, not delivery of queued Qt signals.
+    qapp.processEvents()
 
 
 @pytest.fixture
@@ -210,6 +212,45 @@ def test_production_rejects_probe_synthetic_and_untrusted_inputs(wired, qapp):
     assert len([e for e in events if isinstance(e, ev.LogAppended) and "알림 거절" in e.entry.message]) == 3
     with pytest.raises(ValueError, match="백그라운드"):
         production.create_backend_source(event_only=True, background=False)
+
+
+def test_flush_delivers_logs_queued_after_the_first_gui_event_pass(wired, qapp, monkeypatch):
+    source, api, engines, _, _, events = wired
+    entered, release, drained = (threading.Event() for _ in range(3))
+
+    def block_worker():
+        entered.set()
+        assert release.wait(5)
+
+    run, process_events = source._run, qapp.processEvents
+    source._run(block_worker)
+    try:
+        assert entered.wait(5)
+        assert not source.receive_notification(LiveNotification(VIDEO, time.time()), trusted=True)
+        assert not source.receive_notification(notice())
+        assert not source.receive_notification({"video_id": VIDEO, "synthetic": False}, trusted=True)
+
+        def mark_drained(work):
+            def finish():
+                work()
+                drained.set()
+            run(finish)
+
+        def worker_finishes_after_event_pass():
+            process_events()
+            release.set()
+            assert drained.wait(5)
+
+        # Force the worker to finish between processEvents() and done.is_set().
+        # Its three Qt log signals remain queued even though the FIFO is empty.
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "_run", mark_drained)
+            patch.setattr(qapp, "processEvents", worker_finishes_after_event_pass)
+            flush(source, qapp)
+        assert api.get_calls == [] and not engines
+        assert len([e for e in events if isinstance(e, ev.LogAppended) and "알림 거절" in e.entry.message]) == 3
+    finally:
+        release.set()
 
 
 def test_trusted_notice_handoff_actual_progress_completion_and_dedup(wired, qapp):
