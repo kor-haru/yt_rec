@@ -20,6 +20,65 @@ def _builder():
     return module
 
 
+@pytest.mark.parametrize("system,machine", [
+    ("darwin", "arm64"), ("darwin", "x86_64"),
+    ("win32", "AMD64"), ("linux", "x86_64"),
+])
+def test_mac_webengine_core_keeps_canonical_framework_destination(monkeypatch, tmp_path, system, machine):
+    builder = _builder()
+    monkeypatch.setattr(builder, "ROOT", tmp_path)
+    monkeypatch.setattr(builder, "VENDOR", tmp_path / "vendor")
+    (builder.VENDOR / "bin").mkdir(parents=True)
+    (builder.VENDOR / "licenses/ffmpeg").mkdir(parents=True)
+    monkeypatch.setattr(builder.sys, "platform", system)
+    monkeypatch.setattr(builder.platform, "machine", lambda: machine)
+    download = tmp_path / "download"
+    download.write_bytes(b"test-only archive")
+    monkeypatch.setattr(builder, "download", lambda *args: download)
+    monkeypatch.setattr(builder, "copy_binary", lambda *args: None)
+    monkeypatch.setattr(builder, "collect_licenses", lambda: None)
+    monkeypatch.setattr(builder, "sha256", lambda path: "test-sha256")
+    monkeypatch.setattr(builder.subprocess, "check_output", lambda *args, **kwargs: "test-source")
+
+    def extract(_archive, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in ("ffmpeg", "ffprobe"):
+            (destination / (name + (".exe" if system == "win32" else ""))).write_bytes(b"tool")
+
+    monkeypatch.setattr(builder, "extract", extract)
+    monkeypatch.setattr(builder.importlib.metadata, "version", lambda name: "test-version")
+    monkeypatch.setattr(builder.importlib.metadata, "distributions", lambda: [])
+    distribution = MagicMock()
+    distribution.locate_file.side_effect = lambda relative: tmp_path / "site-packages" / relative
+    locate_distribution = MagicMock(return_value=distribution)
+    monkeypatch.setattr(builder.importlib.metadata, "distribution", locate_distribution)
+    commands = []
+
+    class CommandCaptured(Exception):
+        pass
+
+    def run(command, **kwargs):
+        if command[1:3] == ["-m", "PyInstaller"]:
+            commands.append(command)
+            raise CommandCaptured
+
+    monkeypatch.setattr(builder.subprocess, "run", run)
+    with pytest.raises(CommandCaptured):
+        builder.main()
+    command, = commands
+    if system == "darwin":
+        relative = Path("PySide6/Qt/lib/QtWebEngineCore.framework/Versions/A")
+        locate_distribution.assert_called_once_with("PySide6-Addons")
+        distribution.locate_file.assert_called_once_with(relative / "QtWebEngineCore")
+        source = tmp_path / "site-packages" / relative / "QtWebEngineCore"
+        assert command[command.index("--add-binary") + 1] == f"{source}{builder.os.pathsep}{relative}"
+    else:
+        locate_distribution.assert_not_called()
+        assert "--add-binary" not in command
+    assert command[-1] == str(tmp_path / "packaging/entry.py")
+    assert "--windowed" in command and "--onedir" in command
+
+
 def test_bundle_download_rejects_changed_cached_binary(monkeypatch, tmp_path):
     builder = _builder()
     monkeypatch.setattr(builder, "CACHE", tmp_path)

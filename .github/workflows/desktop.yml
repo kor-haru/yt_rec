@@ -67,6 +67,9 @@ jobs:
                       if path.name == "Info.plist":
                           info = plistlib.loads(path.read_bytes())
                           print({key: info.get(key) for key in ("CFBundleExecutable", "CFBundleIdentifier", "CFBundlePackageType")})
+          for path in Path("dist").rglob("QtWebEngineCore"):
+              target = path.readlink() if path.is_symlink() else "regular file"
+              print(f"CORE {path} -> {target} exists={path.exists()}")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
