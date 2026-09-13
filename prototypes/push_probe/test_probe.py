@@ -8,11 +8,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, Signal, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QTimer, QUrl, Signal, Qt
 from PySide6.QtWebEngineCore import QWebEnginePermission
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
-from probe import CHANNEL, LOOKUP, Probe, WORLD, summarize_data
+from probe import CHANNEL, LOOKUP, Probe, WORLD, create_window, summarize_data
 
 VIDEO_ID = "sxyDRUJYFYw"
 CHANNEL_ID = "UC" + "a" * 22
@@ -115,6 +116,38 @@ def test_data_candidates_are_strict_and_ambiguous_values_are_not_guessed():
     assert summarize_data({"url": "https://www.youtube.com.evil.invalid/watch?v=" + VIDEO_ID})["video_id"] is None
     assert summarize_data({"url": "https://[invalid"})["video_id"] is None
     assert summarize_data({"url": "https://www.youtube.com/watch?v=" + VIDEO_ID})["video_id"] == VIDEO_ID
+
+
+def test_window_reserves_space_for_the_browser_and_opens_only_normal_settings(app, tmp_path, monkeypatch):
+    probe = Probe(tmp_path / "profile", "https://www.youtube.com", synthetic=True)
+    navigation, checks, scripts = [], [], []
+    monkeypatch.setattr(probe.page, "setUrl", lambda url: navigation.append(url.toString()))
+    monkeypatch.setattr(probe.page, "runJavaScript", lambda *args: scripts.append(args))
+    monkeypatch.setattr(probe, "inspect_registration", lambda: checks.append(True))
+    window = create_window(probe)
+    try:
+        window.show()
+        app.processEvents()
+        view = window.findChild(QWebEngineView)
+        assert view.page() is probe.page
+        assert view.height() > window.height() * 0.7, (view.height(), window.height())
+        assert all(label.height() < window.height() * 0.1 for label in window.findChildren(QLabel))
+        assert navigation == checks == scripts == []
+        settings = next(button for button in window.findChildren(QPushButton) if button.text() == "알림 설정 열기")
+        settings.click()
+        assert navigation == ["https://www.youtube.com/account_notifications"]
+        assert checks == scripts == []
+        check = next(button for button in window.findChildren(QPushButton) if "구독 확인" in button.text())
+        check.click()
+        assert checks == [True]
+        assert scripts == []
+        window.grab().save(str(tmp_path / "probe-layout.png"))
+        print("Layout evidence:", tmp_path / "probe-layout.png", "browser height:", view.height())
+    finally:
+        window.close()
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        probe.close()
 
 
 def test_lookup_is_callback_driven_one_shot_and_checks_identity():

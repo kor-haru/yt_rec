@@ -243,20 +243,17 @@ class Probe(QObject):
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
-    app = QApplication(sys.argv[:1])
-    # Fixed dedicated location: never accept another browser's profile directory.
-    probe = Probe(Path(__file__).resolve().parent / ".profile-youtube", YOUTUBE)
+def create_window(probe: Probe) -> QWidget:
     window = QWidget()
     window.setWindowTitle("yt-rec 푸시 가능성 시험 — 녹화하지 않음")
     layout = QVBoxLayout(window)
     layout.addWidget(QLabel("별도 시험 프로필입니다. 기존 Google OAuth·Chrome 프로필·녹화에 접근하지 않습니다."))
+    settings = QPushButton("알림 설정 열기")
+    settings.clicked.connect(lambda: probe.page.setUrl(QUrl(YOUTUBE + "/account_notifications")))
+    layout.addWidget(settings)
     view = QWebEngineView(window)
     view.setPage(probe.page)
-    layout.addWidget(view)
+    layout.addWidget(view, 1)
     status = QLabel("실제 YouTube 알림 수신·영상 ID 추출은 아직 검증되지 않았습니다.")
     status.setWordWrap(True)
     layout.addWidget(status)
@@ -266,8 +263,19 @@ def main():
     probe.evidence.connect(lambda item: status.setText(json.dumps(item, ensure_ascii=False)))
     probe.evidence.connect(lambda item: print(json.dumps(item, ensure_ascii=False), flush=True))
     window.resize(1000, 800)
+    return window
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    app = QApplication(sys.argv[:1])
+    # Fixed dedicated location: never accept another browser's profile directory.
+    probe = Probe(Path(__file__).resolve().parent / ".profile-youtube", YOUTUBE)
+    window = create_window(probe)
     window.show()
-    view.setUrl(QUrl(YOUTUBE))
+    probe.page.setUrl(QUrl(YOUTUBE))
     app.aboutToQuit.connect(probe.close)
     return app.exec()
 
