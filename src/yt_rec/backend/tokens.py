@@ -33,6 +33,10 @@ KEYCHAIN_ACCOUNT = "yt-rec"
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
 _ERROR_NOT_FOUND = 1168
+_ERR_SEC_ITEM_NOT_FOUND = -25300
+_ERR_SEC_DUPLICATE_ITEM = -25299
+_SECURITY_FRAMEWORK = "/System/Library/Frameworks/Security.framework/Security"
+_CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
 
 class TokenStoreError(RuntimeError):
@@ -87,7 +91,7 @@ class WindowsCredentialStore:
 
 
 class MacOSKeychainStore:
-    """macOS Keychain generic password. ``security`` 명령으로만 읽고 쓴다."""
+    """macOS Keychain generic password. 비밀은 Security.framework 로 직접 전달한다."""
 
     def __init__(
         self,
@@ -100,37 +104,13 @@ class MacOSKeychainStore:
         self.account = account
 
     def load(self) -> str | None:
-        proc = _security(
-            ["find-generic-password", "-s", self.service, "-a", self.account, "-w"]
-        )
-        if proc.returncode != 0:
-            if _security_not_found(proc):
-                return None
-            raise TokenStoreError(f"Keychain 을 읽지 못했다: {proc.returncode}")
-        return (proc.stdout or "").rstrip("\r\n")
+        return _keychain_read(self.service, self.account)
 
     def save(self, blob: str) -> None:
-        proc = _security(
-            [
-                "add-generic-password",
-                "-U",
-                "-s",
-                self.service,
-                "-a",
-                self.account,
-                "-w",
-                blob,
-            ]
-        )
-        if proc.returncode != 0:
-            raise TokenStoreError(f"Keychain 에 쓰지 못했다: {proc.returncode}")
+        _keychain_write(self.service, self.account, blob)
 
     def clear(self) -> None:
-        proc = _security(
-            ["delete-generic-password", "-s", self.service, "-a", self.account]
-        )
-        if proc.returncode != 0 and not _security_not_found(proc):
-            raise TokenStoreError(f"Keychain 에서 지우지 못했다: {proc.returncode}")
+        _keychain_delete(self.service, self.account)
 
 
 class _UnsupportedTokenStore:
@@ -195,16 +175,150 @@ def default_token_store() -> TokenStore:
     return _UnsupportedTokenStore()
 
 
-def _security(args: list[str]) -> subprocess.CompletedProcess[str]:
+def _security_framework():
     try:
-        return subprocess.run(["security", *args], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as extra:
+        dll = ctypes.CDLL(_SECURITY_FRAMEWORK)
+    except (OSError, AttributeError) as extra:
         raise TokenStoreError("macOS Keychain에 연결하지 못했습니다.") from extra
+    dll.SecKeychainAddGenericPassword.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    dll.SecKeychainAddGenericPassword.restype = ctypes.c_int32
+    dll.SecKeychainFindGenericPassword.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    dll.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+    dll.SecKeychainItemModifyAttributesAndData.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    dll.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
+    dll.SecKeychainItemDelete.argtypes = [ctypes.c_void_p]
+    dll.SecKeychainItemDelete.restype = ctypes.c_int32
+    dll.SecKeychainItemFreeContent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dll.SecKeychainItemFreeContent.restype = ctypes.c_int32
+    return dll
 
 
-def _security_not_found(proc: subprocess.CompletedProcess[str]) -> bool:
-    text = f"{proc.stderr or ''}{proc.stdout or ''}".lower()
-    return proc.returncode == 44 or "could not be found" in text or "not found" in text
+def _cf_release(value: ctypes.c_void_p) -> None:
+    try:
+        dll = ctypes.CDLL(_CORE_FOUNDATION)
+    except (OSError, AttributeError) as extra:
+        raise TokenStoreError("macOS Keychain에 연결하지 못했습니다.") from extra
+    dll.CFRelease.argtypes = [ctypes.c_void_p]
+    dll.CFRelease.restype = None
+    dll.CFRelease(value)
+
+
+def _keychain_names(service: str, account: str) -> tuple[bytes, bytes]:
+    return service.encode("utf-8"), account.encode("utf-8")
+
+
+def _find_keychain_item(dll, service: bytes, account: bytes) -> tuple[int, ctypes.c_void_p]:
+    item = ctypes.c_void_p()
+    status = dll.SecKeychainFindGenericPassword(
+        None,
+        len(service),
+        service,
+        len(account),
+        account,
+        None,
+        None,
+        ctypes.byref(item),
+    )
+    return status, item
+
+
+def _keychain_read(service: str, account: str) -> str | None:
+    dll = _security_framework()
+    service_bytes, account_bytes = _keychain_names(service, account)
+    length = ctypes.c_uint32()
+    data = ctypes.c_void_p()
+    status = dll.SecKeychainFindGenericPassword(
+        None,
+        len(service_bytes),
+        service_bytes,
+        len(account_bytes),
+        account_bytes,
+        ctypes.byref(length),
+        ctypes.byref(data),
+        None,
+    )
+    if status == _ERR_SEC_ITEM_NOT_FOUND:
+        return None
+    if status != 0:
+        raise TokenStoreError(f"Keychain 을 읽지 못했다: {status}")
+    try:
+        raw = ctypes.string_at(data, length.value) if length.value else b""
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as extra:
+        raise TokenStoreError("Keychain 값을 UTF-8로 읽지 못했다") from extra
+    finally:
+        if data.value:
+            dll.SecKeychainItemFreeContent(None, data)
+
+
+def _keychain_write(service: str, account: str, blob: str) -> None:
+    dll = _security_framework()
+    service_bytes, account_bytes = _keychain_names(service, account)
+    secret = blob.encode("utf-8")
+    buffer = ctypes.create_string_buffer(secret, len(secret) + 1)
+    data = ctypes.cast(buffer, ctypes.c_void_p)
+    status = dll.SecKeychainAddGenericPassword(
+        None,
+        len(service_bytes),
+        service_bytes,
+        len(account_bytes),
+        account_bytes,
+        len(secret),
+        data,
+        None,
+    )
+    if status == _ERR_SEC_DUPLICATE_ITEM:
+        status, item = _find_keychain_item(dll, service_bytes, account_bytes)
+        if status == 0:
+            try:
+                status = dll.SecKeychainItemModifyAttributesAndData(
+                    item, None, len(secret), data
+                )
+            finally:
+                if item.value:
+                    _cf_release(item)
+    if status != 0:
+        raise TokenStoreError(f"Keychain 에 쓰지 못했다: {status}")
+
+
+def _keychain_delete(service: str, account: str) -> None:
+    dll = _security_framework()
+    service_bytes, account_bytes = _keychain_names(service, account)
+    status, item = _find_keychain_item(dll, service_bytes, account_bytes)
+    if status == _ERR_SEC_ITEM_NOT_FOUND:
+        return
+    if status != 0:
+        raise TokenStoreError(f"Keychain 에서 지우지 못했다: {status}")
+    try:
+        status = dll.SecKeychainItemDelete(item)
+    finally:
+        if item.value:
+            _cf_release(item)
+    if status not in (0, _ERR_SEC_ITEM_NOT_FOUND):
+        raise TokenStoreError(f"Keychain 에서 지우지 못했다: {status}")
 
 
 class _CREDENTIAL(ctypes.Structure):
