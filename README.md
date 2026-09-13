@@ -521,13 +521,15 @@ GUI 실행과 Google OAuth 준비는 위의 [사용법](#사용법)을 기준으
 ### 독립 실행 파일 만들기
 
 대상 운영체제와 같은 OS·CPU에서 다음 명령을 실행한다. `uv.lock`의 앱 의존성을 쓰고,
-PyInstaller만 빌드 시 임시로 설치한다. 고정 버전의 yt-dlp, Deno, FFmpeg/ffprobe를 내려받아
+빌드 도구인 PyInstaller도 앱과 같은 `.venv`에 설치한다. 별도 임시 환경에서 실행하면 macOS의
+Qt 구성 파일이 서로 다른 위치에 묶일 수 있다. 고정 버전의 yt-dlp, Deno, FFmpeg/ffprobe를 내려받아
 SHA256을 확인하고, 라이선스·빌드 기록과 함께 묶는다. macOS는 Xcode Command Line Tools의
 clang과 make로 FFmpeg를 소스 빌드한다. 새로운 런타임 의존성은 추가하지 않는다.
 
 ```text
 uv sync --frozen
-uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py
+uv pip install --python .venv pyinstaller==6.22.2
+uv run --frozen --no-sync python packaging/build.py
 ```
 
 Windows 결과물은 `dist/yt-rec/yt-rec.exe`와 폴더 전체를 담은

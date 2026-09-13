@@ -35,10 +35,12 @@ jobs:
         if: runner.os == 'Linux'
         run: find .venv/lib -path '*/PySide6/Qt/lib/libQt6WebEngineCore.so.6' -exec ldd {} \;
       - run: uv run --frozen pytest -m "not integration"
+      - name: Install bundle builder in project environment
+        run: uv pip install --python .venv pyinstaller==6.22.2
       - name: Build native bundle and run isolated GUI/media smoke
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py
+        run: uv run --frozen --no-sync python packaging/build.py
       - name: Diagnose macOS WebEngine framework after build failure
         if: failure() && runner.os == 'macOS'
         run: |

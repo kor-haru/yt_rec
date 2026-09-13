@@ -24,7 +24,7 @@ def _builder():
     ("darwin", "arm64"), ("darwin", "x86_64"),
     ("win32", "AMD64"), ("linux", "x86_64"),
 ])
-def test_mac_webengine_core_keeps_canonical_framework_destination(monkeypatch, tmp_path, system, machine):
+def test_bundle_uses_project_interpreter_without_duplicate_frameworks(monkeypatch, tmp_path, system, machine):
     builder = _builder()
     monkeypatch.setattr(builder, "ROOT", tmp_path)
     monkeypatch.setattr(builder, "VENDOR", tmp_path / "vendor")
@@ -48,10 +48,6 @@ def test_mac_webengine_core_keeps_canonical_framework_destination(monkeypatch, t
     monkeypatch.setattr(builder, "extract", extract)
     monkeypatch.setattr(builder.importlib.metadata, "version", lambda name: "test-version")
     monkeypatch.setattr(builder.importlib.metadata, "distributions", lambda: [])
-    distribution = MagicMock()
-    distribution.locate_file.side_effect = lambda relative: tmp_path / "site-packages" / relative
-    locate_distribution = MagicMock(return_value=distribution)
-    monkeypatch.setattr(builder.importlib.metadata, "distribution", locate_distribution)
     commands = []
 
     class CommandCaptured(Exception):
@@ -66,17 +62,21 @@ def test_mac_webengine_core_keeps_canonical_framework_destination(monkeypatch, t
     with pytest.raises(CommandCaptured):
         builder.main()
     command, = commands
-    if system == "darwin":
-        relative = Path("PySide6/Qt/lib/QtWebEngineCore.framework/Versions/A")
-        locate_distribution.assert_called_once_with("PySide6-Addons")
-        distribution.locate_file.assert_called_once_with(relative / "QtWebEngineCore")
-        source = tmp_path / "site-packages" / relative / "QtWebEngineCore"
-        assert command[command.index("--add-binary") + 1] == f"{source}{builder.os.pathsep}{relative}"
-    else:
-        locate_distribution.assert_not_called()
-        assert "--add-binary" not in command
+    assert command[0] == builder.sys.executable
+    assert "--add-binary" not in command
     assert command[-1] == str(tmp_path / "packaging/entry.py")
     assert "--windowed" in command and "--onedir" in command
+
+
+def test_ci_and_build_guide_keep_pyinstaller_in_project_environment():
+    root = Path(__file__).parents[1]
+    install = "uv pip install --python .venv pyinstaller==6.22.2"
+    build = "uv run --frozen --no-sync python packaging/build.py"
+    for relative in (".github/workflows/desktop.yml", "README.md"):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert text.index("uv sync --frozen") < text.index(install) < text.index(build)
+        assert "--with pyinstaller" not in text
+    assert "--with pyinstaller" not in (root / "packaging/build.py").read_text(encoding="utf-8")
 
 
 def test_bundle_download_rejects_changed_cached_binary(monkeypatch, tmp_path):

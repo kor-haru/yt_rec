@@ -1,5 +1,6 @@
-"""Native portable bundle: uv run --frozen --with pyinstaller==6.22.2 python packaging/build.py.
+"""Native portable bundle: uv run --frozen --no-sync python packaging/build.py.
 
+Install pyinstaller==6.22.2 into the project .venv before running this script.
 Downloads are version/SHA256 pinned. Build on the destination OS/architecture;
 PyInstaller is a build tool only, never an application dependency.
 """
@@ -217,11 +218,6 @@ def main() -> None:
             "--workpath", str(ROOT / "build/pyinstaller"), "--specpath", str(ROOT / "build"),
             "--add-data", f"{VENDOR / 'licenses'}{os.pathsep}licenses",
             "--add-data", f"{VENDOR / 'build-manifest.json'}{os.pathsep}."]
-    if sys.platform == "darwin":
-        # Keep the core beside the hook's resources so PyInstaller restores framework links.
-        relative = Path("PySide6/Qt/lib/QtWebEngineCore.framework/Versions/A")
-        core = importlib.metadata.distribution("PySide6-Addons").locate_file(relative / "QtWebEngineCore")
-        args += ["--add-binary", f"{core}{os.pathsep}{relative}"]
     args += [str(ROOT / "packaging/entry.py")]
     subprocess.run(args, cwd=ROOT, check=True)
     bundle = ROOT / "dist" / ("yt-rec.app" if sys.platform == "darwin" else "yt-rec")
