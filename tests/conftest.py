@@ -153,6 +153,7 @@ def fake_push_receiver(monkeypatch):
 
     class Receiver(QObject):
         notification_received = Signal(object)
+        notification_arrived = Signal(object)
         status_changed = Signal(str, str)
 
         def __init__(self, parent=None):

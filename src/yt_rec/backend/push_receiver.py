@@ -13,6 +13,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -37,6 +38,7 @@ from PySide6.QtWebEngineCore import (
 from PySide6.QtWidgets import QMessageBox
 
 from .notifications import LiveNotification
+from .notification_history import ReceivedNotification
 
 YOUTUBE = "https://www.youtube.com"
 NOTIFICATION_SETTINGS_URL = YOUTUBE + "/account_notifications"
@@ -205,6 +207,7 @@ class YouTubePushReceiver(QObject):
     """
 
     notification_received = Signal(object)  # LiveNotification, never raw web data.
+    notification_arrived = Signal(object)  # Native display text, before video identification.
     status_changed = Signal(str, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -342,6 +345,9 @@ class YouTubePushReceiver(QObject):
             notification.close()
             self._status("error", "식별할 수 없는 알림을 무시했습니다")
             return
+        self.notification_arrived.emit(ReceivedNotification(
+            datetime.now(timezone.utc), title, body, synthetic=False,
+        ))
         # origin+tag identifies a replacement chain, not a unique notification.
         # Retire the old request without closing its newly replaced chain.
         for nonce, old in tuple(self._pending.items()):

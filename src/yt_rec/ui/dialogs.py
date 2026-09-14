@@ -4,6 +4,7 @@ from .account import AccountDialog
 from .archive import ArchiveDialog
 from .channels import ChannelsDialog
 from .logs import LogDialog
+from .notification_history import NotificationHistoryDialog
 from .settings import SettingsDialog
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "ArchiveDialog",
     "SettingsDialog",
     "LogDialog",
+    "NotificationHistoryDialog",
     "AccountDialog",
 ]

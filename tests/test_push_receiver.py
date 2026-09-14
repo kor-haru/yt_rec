@@ -110,19 +110,23 @@ def reply(receiver, nonce, generation, **values):
 
 
 def test_native_request_is_required_and_is_consumed_once(receiver, capsys):
-    events, status = [], []
+    events, status, history = [], [], []
+    receiver.notification_arrived.connect(history.append)
     receiver.notification_received.connect(events.append)
     receiver.status_changed.connect(lambda code, detail: status.append((code, detail)))
     reply(receiver, "unsolicited", 0, status="matched", data={"videoId": VIDEO})
     notice, nonce, generation = present(receiver)
     pending = receiver._pending[nonce]
     assert notice.shown == 1 and events == []
+    assert len(history) == 1 and history[0].title == "SYNTHETIC" and history[0].body == "private body"
+    assert history[0].synthetic is False and history[0].received_at.utcoffset() is not None
     script, world = receiver.page.calls[-1]
     assert world == module._WORLD and nonce in script
     assert '"tag": "same-tag"' in script and '"body": "private body"' in script
     reply(receiver, nonce, generation, status="matched", data={"videoId": VIDEO, "token": "private-token"})
     reply(receiver, nonce, generation, status="matched", data={"videoId": VIDEO})
     assert len(events) == 1
+    assert len(history) == 1  # Bridge replies/replays never create arrival history.
     assert events[0].video_id == VIDEO and events[0].synthetic is False
     assert events[0].received_at == pending.received_at
     assert notice.close_calls == 1 and not receiver._pending
@@ -228,10 +232,23 @@ def test_current_origin_is_rechecked_on_reply(receiver):
     {"title": "x" * 4097}, {"body": "x" * 16385},
 ])
 def test_foreign_or_oversized_native_notices_do_not_query(receiver, notice_args):
+    history = []
+    receiver.notification_arrived.connect(history.append)
     receiver.start()
     notice = Notice(**notice_args)
     receiver.profile.presenter(notice)
     assert notice.close_calls == 1 and not receiver._pending and not receiver.page.calls
+    assert history == []
+
+
+def test_native_history_survives_video_identification_failure(receiver):
+    history, videos = [], []
+    receiver.notification_arrived.connect(history.append)
+    receiver.notification_received.connect(videos.append)
+    _, nonce, generation = present(receiver, title="SYNTHETIC no video", body="original notification")
+    reply(receiver, nonce, generation, status="matched", data={"unknown": "not-an-id"})
+    assert videos == [] and len(history) == 1
+    assert history[0].title == "SYNTHETIC no video" and history[0].body == "original notification"
 
 
 def test_tag_replacement_retires_old_request_but_empty_tags_are_independent(receiver):
@@ -425,7 +442,8 @@ def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qa
     # Local showNotification needs no push transport or external subscription.
     receiver.profile.setPushServiceEnabled(False)
     receiver.profile.queryPermission(QUrl(local_site), QWebEnginePermission.PermissionType.Notifications).grant()
-    events, statuses, presenter_calls = [], [], []
+    events, statuses, presenter_calls, history = [], [], [], []
+    receiver.notification_arrived.connect(history.append)
     loop = QEventLoop()
     deadline = QTimer()
     deadline.setSingleShot(True)
@@ -489,6 +507,8 @@ def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qa
         loop.exec()
         assert len(presenter_calls) == (2 if duplicate else 1), statuses
         assert len(events) == (0 if duplicate else 1), statuses
+        assert len(history) == 1 and history[0].title == "SYNTHETIC receiver notice"
+        assert history[0].body == "Not a real YouTube push"
         if duplicate:
             assert statuses[-1][0] == "error"
         else:

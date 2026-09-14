@@ -36,6 +36,7 @@ from .dashboard import Dashboard
 from .dialogs import (
     AccountDialog,
     ArchiveDialog,
+    NotificationHistoryDialog,
     ChannelsDialog,
     LogDialog,
     SettingsDialog,
@@ -186,6 +187,9 @@ class MainWindow(QMainWindow):
         notification_checks.addWidget(self.system_notification_settings_button)
         notification_checks.addStretch()
         notification_layout.addLayout(notification_checks)
+        self.notification_history_button = QPushButton("알림 이력", self.notification_panel)
+        self.notification_history_button.clicked.connect(self.open_notification_history)
+        notification_layout.addWidget(self.notification_history_button, 0, Qt.AlignmentFlag.AlignLeft)
         central_layout.addWidget(self.notification_panel)
 
         self.scroll_area = QScrollArea(central)
@@ -462,6 +466,9 @@ class MainWindow(QMainWindow):
 
     def open_archive(self) -> QDialog:
         return self._open(ArchiveDialog)
+
+    def open_notification_history(self) -> QDialog:
+        return self._open(NotificationHistoryDialog)
 
     def open_settings(self) -> QDialog:
         return self._open(SettingsDialog)
