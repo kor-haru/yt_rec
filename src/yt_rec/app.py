@@ -20,14 +20,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton,
-    QStyle, QSystemTrayIcon, QVBoxLayout,
+    QSystemTrayIcon, QVBoxLayout,
 )
 
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .backend import create_backend_source
+from .desktop import set_app_id
 from .logs import redact
 from .recording.options import load_settings
 from .state import commands as cmd, events as ev
@@ -181,8 +183,7 @@ class DesktopSession(QObject):
         menu = window.menuBar().addMenu("앱")
         menu.addAction("종료", window.request_exit)
         context.app.setQuitOnLastWindowClosed(False)
-        icon = context.app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-        window.setWindowIcon(icon)
+        icon = context.app.windowIcon()
         self.tray: QSystemTrayIcon | None = None
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(icon, self)
@@ -350,11 +351,13 @@ def build_application(
     """QApplication과 창을 구성해 돌려준다. 이벤트 루프는 돌리지 않는다."""
     args = parse_args(argv)
 
+    set_app_id()
     if app is None:
         app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setOrganizationName(ORGANIZATION)
     app.setApplicationName(APPLICATION)
     app.setApplicationDisplayName("yt-rec")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "recording.png")))
 
     # 백엔드가 붙기 전까지 연결 상태는 `연결 안 됨`이 기본이다.
     state = AppState(emit_interval_ms=args.emit_interval_ms)

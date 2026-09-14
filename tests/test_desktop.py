@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,9 +14,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QDialog, QMessageBox, QSystemTrayIcon
 
-from yt_rec import desktop
+from yt_rec import app as application, desktop
 from yt_rec.app import AppContext, DesktopSession, NotificationSession
 from yt_rec.backend.selection import MemorySeenStore, MemorySelectionStore
 from yt_rec.backend.source import BackendSource
@@ -92,6 +95,76 @@ print(json.dumps(result))
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout)
     assert result == {"watchdog": False, "exit_code": 0, "stopped": True, "worker_alive": False}
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+def test_recording_icon_is_shared_by_application_dialog_window_and_tray(
+    qapp, window_settings, monkeypatch, tmp_path, frozen,
+):
+    if frozen:
+        package = tmp_path / "bundle/_internal/yt_rec"
+        shutil.copytree(Path(application.__file__).with_name("assets"), package / "assets")
+        monkeypatch.setattr(application, "__file__", str(package / "app.py"))
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", str(package.parent), raising=False)
+    original = qapp.windowIcon()
+    qapp.setWindowIcon(QIcon())
+    tray_type = MagicMock()
+    tray_type.isSystemTrayAvailable.return_value = True
+    monkeypatch.setattr(application, "QSystemTrayIcon", tray_type)
+    monkeypatch.setattr(application, "load_settings", lambda: SimpleNamespace(start_hidden=True))
+    context = application.build_application(["--stub", "empty"], app=qapp, settings=window_settings)
+    dialog = QDialog()
+    try:
+        icon = qapp.windowIcon()
+        assert not icon.isNull()
+        assert context.window.windowIcon().cacheKey() == icon.cacheKey()
+        assert dialog.windowIcon().cacheKey() == icon.cacheKey()
+        session = DesktopSession(context)
+        assert context.window.windowIcon().cacheKey() == icon.cacheKey()
+        assert tray_type.call_args.args[0].cacheKey() == icon.cacheKey()
+        assert session.tray is tray_type.return_value
+    finally:
+        dialog.close()
+        context.source.stop()
+        context.window.desktop_managed = False
+        context.window.close()
+        qapp.setWindowIcon(original)
+
+
+@pytest.mark.parametrize("system,result", [("win32", 0), ("win32", -1), ("linux", 0)])
+def test_taskbar_identity_is_windows_only_and_checks_hresult(monkeypatch, system, result):
+    setter = MagicMock(return_value=result)
+    loader = MagicMock(return_value=SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=setter))
+    monkeypatch.setattr(ctypes, "WinDLL", loader, raising=False)
+    monkeypatch.setattr(sys, "platform", system)
+    if result < 0:
+        with pytest.raises(OSError, match="작업 표시줄"):
+            desktop.set_app_id()
+    else:
+        desktop.set_app_id()
+    if system == "win32":
+        setter.assert_called_once_with("io.github.kor-haru.yt-rec")
+        assert setter.argtypes == [ctypes.c_wchar_p]
+        assert setter.restype is ctypes.c_long
+    else:
+        loader.assert_not_called()
+
+
+def test_taskbar_identity_precedes_qapplication_lookup(qapp, window_settings, monkeypatch):
+    calls = []
+    original = qapp.windowIcon()
+    monkeypatch.setattr(application, "set_app_id", lambda: calls.append("id"))
+
+    def instance():
+        assert calls == ["id"]
+        return qapp
+
+    monkeypatch.setattr(application.QApplication, "instance", instance)
+    context = application.build_application(["--stub", "empty"], settings=window_settings)
+    context.source.stop()
+    context.window.close()
+    qapp.setWindowIcon(original)
 
 
 def test_windows_startup_only_changes_our_value(monkeypatch):

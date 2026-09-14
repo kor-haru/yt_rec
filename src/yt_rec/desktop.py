@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import plistlib
 import subprocess
 import sys
 from pathlib import Path
+
+
+def set_app_id() -> None:
+    """Separate Windows taskbar identity from Python; call before creating windows."""
+    if sys.platform == "win32":
+        setter = ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID
+        setter.argtypes = [ctypes.c_wchar_p]
+        setter.restype = ctypes.c_long
+        if setter("io.github.kor-haru.yt-rec") < 0:
+            raise OSError("작업 표시줄 앱 식별자를 설정하지 못했습니다.")
 
 
 def startup_command() -> list[str]:

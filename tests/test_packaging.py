@@ -28,6 +28,10 @@ def test_bundle_uses_project_interpreter_without_duplicate_frameworks(monkeypatc
     builder = _builder()
     monkeypatch.setattr(builder, "ROOT", tmp_path)
     monkeypatch.setattr(builder, "VENDOR", tmp_path / "vendor")
+    assets = tmp_path / "src/yt_rec/assets"
+    assets.mkdir(parents=True)
+    for suffix in ("png", "ico", "icns"):
+        (assets / f"recording.{suffix}").write_bytes(b"test-only icon")
     (builder.VENDOR / "bin").mkdir(parents=True)
     (builder.VENDOR / "licenses/ffmpeg").mkdir(parents=True)
     monkeypatch.setattr(builder.sys, "platform", system)
@@ -66,6 +70,42 @@ def test_bundle_uses_project_interpreter_without_duplicate_frameworks(monkeypatc
     assert "--add-binary" not in command
     assert command[-1] == str(tmp_path / "packaging/entry.py")
     assert "--windowed" in command and "--onedir" in command
+    manifest = json.loads((builder.VENDOR / "build-manifest.json").read_text())
+    for suffix in ("png", "ico", "icns"):
+        assert manifest["source_files"][str(Path(f"src/yt_rec/assets/recording.{suffix}"))] == "test-sha256"
+    assert f"{tmp_path / 'src/yt_rec/assets'}{builder.os.pathsep}yt_rec/assets" in command
+    if system in ("win32", "darwin"):
+        suffix = "ico" if system == "win32" else "icns"
+        assert command[command.index("--icon") + 1] == str(tmp_path / f"src/yt_rec/assets/recording.{suffix}")
+    else:
+        assert "--icon" not in command
+
+
+@pytest.mark.parametrize("extension,sizes", [
+    ("ico", {16, 24, 32, 48, 64, 128, 256}),
+    ("icns", {128, 256, 512, 1024}),
+])
+def test_recording_icon_containers_decode_every_size(extension, sizes):
+    from PySide6.QtGui import QImageReader
+
+    path = Path(__file__).parents[1] / "src/yt_rec/assets" / f"recording.{extension}"
+    reader = QImageReader(str(path))
+    assert reader.imageCount() == len(sizes)
+    found = set()
+    for index in range(reader.imageCount()):
+        assert reader.jumpToImage(index)
+        image = reader.read()
+        assert not image.isNull() and image.width() == image.height()
+        size = image.width()
+        found.add(size)
+        # Red dot and red tile remain distinct from the white body at tray sizes.
+        center = image.pixelColor(size // 2, size // 2)
+        body = image.pixelColor(size // 4, size // 2)
+        corner = image.pixelColor(0, 0)
+        assert center.red() > 220 and center.green() < 40
+        assert body.red() > 230 and body.green() > 230 and body.blue() > 230
+        assert corner.red() > 220 and corner.green() < 40
+    assert found == sizes
 
 
 def test_ci_and_build_guide_keep_pyinstaller_in_project_environment():
