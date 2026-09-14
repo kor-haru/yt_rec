@@ -209,15 +209,21 @@ def main() -> None:
                 "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                 "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, text=True).strip()),
                 "source_files": {str(path.relative_to(ROOT)): sha256(path)
-                                 for path in [*sorted((ROOT / "src").rglob("*.py")), ROOT / "packaging/build.py", ROOT / "uv.lock"]},
+                                 for path in [*sorted((ROOT / "src").rglob("*.py")),
+                                              *sorted((ROOT / "src/yt_rec/assets").glob("*")),
+                                              ROOT / "packaging/build.py", ROOT / "uv.lock"]},
                 "tools": {path.name: sha256(path) for path in (VENDOR / "bin").iterdir()},
                 "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()}}
     (VENDOR / "build-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--onedir",
             "--name", "yt-rec", "--paths", str(ROOT / "src"), "--distpath", str(ROOT / "dist"),
             "--workpath", str(ROOT / "build/pyinstaller"), "--specpath", str(ROOT / "build"),
+            "--add-data", f"{ROOT / 'src/yt_rec/assets'}{os.pathsep}yt_rec/assets",
             "--add-data", f"{VENDOR / 'licenses'}{os.pathsep}licenses",
             "--add-data", f"{VENDOR / 'build-manifest.json'}{os.pathsep}."]
+    if sys.platform in ("win32", "darwin"):
+        suffix = "ico" if sys.platform == "win32" else "icns"
+        args += ["--icon", str(ROOT / f"src/yt_rec/assets/recording.{suffix}")]
     args += [str(ROOT / "packaging/entry.py")]
     subprocess.run(args, cwd=ROOT, check=True)
     bundle = ROOT / "dist" / ("yt-rec.app" if sys.platform == "darwin" else "yt-rec")
