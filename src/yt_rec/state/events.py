@@ -28,11 +28,14 @@ import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timedelta
 
+from yt_rec.recording.options import RecordingOptions
+
 from .models import (
     AccountInfo,
     CompletedRecording,
     ConnectionState,
     LogEntry,
+    NotificationStatus,
     QuotaStatus,
     Recording,
     RecordingState,
@@ -49,10 +52,14 @@ __all__ = [
     "RecordingStarted",
     "RecordingProgress",
     "RecordingFinished",
+    "CompletedChanged",
     "LogAppended",
     "QuotaChanged",
     "AccountChanged",
     "SubscriptionsChanged",
+    "SettingsChanged",
+    "SettingsSaveFailed",
+    "NotificationStatusChanged",
     "BackendEvent",
     "NaiveDatetimeWarning",
     "naive_datetime_fields",
@@ -122,6 +129,13 @@ class RecordingFinished:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletedChanged:
+    """디스크에서 복원한 전체 보관함. 최근 완료와 달리 200건으로 자르지 않는다."""
+
+    completed: tuple[CompletedRecording, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class LogAppended:
     """로그 한 줄이 쌓였다. ``ERROR`` 수준이면 오류 카운터가 함께 올라간다."""
 
@@ -149,6 +163,23 @@ class SubscriptionsChanged:
     subscriptions: tuple[Subscription, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SettingsChanged:
+    """저장·적용된 설정. 시작 시에는 복원한 설정을 알린다."""
+
+    options: RecordingOptions
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsSaveFailed:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationStatusChanged:
+    status: NotificationStatus
+
+
 BackendEvent = (
     ConnectionChanged
     | WatchStatusChanged
@@ -156,10 +187,14 @@ BackendEvent = (
     | RecordingStarted
     | RecordingProgress
     | RecordingFinished
+    | CompletedChanged
     | LogAppended
     | QuotaChanged
     | AccountChanged
     | SubscriptionsChanged
+    | SettingsChanged
+    | SettingsSaveFailed
+    | NotificationStatusChanged
 )
 
 

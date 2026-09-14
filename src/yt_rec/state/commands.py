@@ -45,6 +45,10 @@ __all__ = [
     "ConnectAccount",
     "DisconnectAccount",
     "RefreshSubscriptions",
+    "RefreshArchive",
+    "OpenRecordingPath",
+    "OpenNotificationBrowser",
+    "OpenNotificationSettings",
     "GuiCommand",
 ]
 
@@ -99,6 +103,9 @@ class ConnectAccount:
     못하므로, 이 명령만 백엔드 소스가 붙어 있으면 통과한다.
     """
 
+    session_only: bool = False
+    """사용자가 명시적으로 선택했을 때만 토큰을 OS 저장소에 쓰지 않는다."""
+
 
 @dataclass(frozen=True, slots=True)
 class DisconnectAccount:
@@ -110,6 +117,29 @@ class RefreshSubscriptions:
     """구독 채널 목록을 다시 불러 달라."""
 
 
+@dataclass(frozen=True, slots=True)
+class RefreshArchive:
+    """보관함 이력과 완료 파일 존재 여부를 다시 읽어 달라."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRecordingPath:
+    """완료 파일을 재생하거나 파일 관리자에 표시해 달라."""
+
+    path: str
+    reveal: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class OpenNotificationBrowser:
+    """앱 전용 YouTube 브라우저를 열어 로그인한다. API 계정 연결과 별개다."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenNotificationSettings:
+    """같은 브라우저의 YouTube 알림 설정을 연다."""
+
+
 GuiCommand = (
     StopRecording
     | SetWatchedChannels
@@ -117,5 +147,9 @@ GuiCommand = (
     | ConnectAccount
     | DisconnectAccount
     | RefreshSubscriptions
+    | RefreshArchive
+    | OpenRecordingPath
+    | OpenNotificationBrowser
+    | OpenNotificationSettings
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

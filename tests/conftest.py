@@ -35,7 +35,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtCore import QSettings  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QSettings, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -43,6 +43,10 @@ from yt_rec.recording.binaries import BinaryNotFoundError, Toolchain, resolve_to
 from yt_rec.state.store import AppState  # noqa: E402
 from yt_rec.state.stub import StubEventSource  # noqa: E402
 from yt_rec.ui.settings_store import WindowSettings  # noqa: E402
+
+# Match the real entrypoint before the shared QApplication is constructed.
+QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402, F401
 
 
 @pytest.fixture(scope="session")
@@ -138,6 +142,52 @@ def window_settings(tmp_path) -> WindowSettings:
     """사용자 설정을 건드리지 않는 임시 INI 기반 설정."""
     path = tmp_path / "yt-rec-test.ini"
     return WindowSettings(QSettings(str(path), QSettings.Format.IniFormat))
+
+
+@pytest.fixture
+def fake_push_receiver(monkeypatch):
+    """Native receiver contract double: no WebEngine profile or real network."""
+    import types
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QWidget
+
+    class Receiver(QObject):
+        notification_received = Signal(object)
+        status_changed = Signal(str, str)
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.page = object()
+            self.starts = self.stops = self.browser_opens = self.settings_opens = 0
+
+        def start(self):
+            self.starts += 1
+            self.status_changed.emit("ready", "ready is not delivery proof")
+
+        def stop(self):
+            self.stops += 1
+            self.status_changed.emit("stopped", "알림 수신 종료")
+
+        def open_browser(self):
+            self.browser_opens += 1
+            self.status_changed.emit("login_required", "YouTube 로그인이 필요합니다")
+
+        def open_settings(self):
+            self.settings_opens += 1
+            self.status_changed.emit("permission_required", "알림 권한이 필요합니다")
+
+        def inspect_registration(self):
+            self.status_changed.emit("ready", "ready is not delivery proof")
+
+    class View(QWidget):
+        def setPage(self, page):
+            self.page = page
+
+    module = types.ModuleType("yt_rec.backend.push_receiver")
+    module.YouTubePushReceiver = Receiver
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr("yt_rec.app.QWebEngineView", View)
+    return Receiver
 
 
 SAMPLE_SECONDS = 4

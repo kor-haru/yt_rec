@@ -61,6 +61,9 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
+from yt_rec.recording.options import RecordingOptions
+from ..logs import sanitize_event
+
 from . import commands as cmd
 from . import events as ev
 from .models import (
@@ -69,6 +72,7 @@ from .models import (
     CompletedRecording,
     ConnectionState,
     LogEntry,
+    NotificationStatus,
     QuotaStatus,
     Recording,
     Severity,
@@ -152,6 +156,17 @@ class AppState(QObject):
     subscriptions_changed = Signal(object)
     """payload: ``tuple[Subscription, ...]``"""
 
+    settings_changed = Signal(object)
+    """payload: 저장·적용된 RecordingOptions"""
+
+    settings_save_failed = Signal(str)
+
+    notification_changed = Signal(object)
+    """payload: NotificationStatus — 앱 전용 YouTube 알림 수신기 상태"""
+
+    archive_changed = Signal(object)
+    """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
+
     snapshot_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.AppSnapshot` — 무엇이든 바뀌면 방출.
 
@@ -190,12 +205,16 @@ class AppState(QObject):
         self._channels: tuple[WatchedChannel, ...] = ()
         self._recordings: dict[str, Recording] = {}
         self._completed: list[CompletedRecording] = []
+        self._archive: tuple[CompletedRecording, ...] = ()
         self._logs: list[LogEntry] = []
+        self._log_directory: str | None = None
         self._error_count = 0
         self._unseen_error_count = 0
         self._quota = QuotaStatus()
         self._account = AccountInfo()
         self._subscriptions: tuple[Subscription, ...] = ()
+        self._settings: RecordingOptions | None = None
+        self._notification = NotificationStatus()
 
         self._dirty: set[str] = set()
         self._sources: list[EventSource] = []
@@ -257,6 +276,11 @@ class AppState(QObject):
         return tuple(self._completed)
 
     @property
+    def archive(self) -> tuple[CompletedRecording, ...]:
+        self._require_gui_thread("archive")
+        return self._archive
+
+    @property
     def logs(self) -> tuple[LogEntry, ...]:
         self._require_gui_thread("logs")
         return tuple(self._logs)
@@ -286,6 +310,16 @@ class AppState(QObject):
         self._require_gui_thread("subscriptions")
         return self._subscriptions
 
+    @property
+    def settings(self) -> RecordingOptions | None:
+        self._require_gui_thread("settings")
+        return self._settings
+
+    @property
+    def notification(self) -> NotificationStatus:
+        self._require_gui_thread("notification")
+        return self._notification
+
     def snapshot(self) -> AppSnapshot:
         """현재 상태 전체를 한 덩어리로 돌려준다. GUI 스레드 전용."""
         self._require_gui_thread("snapshot()")
@@ -300,12 +334,14 @@ class AppState(QObject):
             channels=self._channels,
             recordings=tuple(self._recordings.values()),
             completed=tuple(self._completed),
+            archive=self._archive,
             logs=tuple(self._logs),
             error_count=self._error_count,
             unseen_error_count=self._unseen_error_count,
             quota=self._quota,
             account=self._account,
             subscriptions=self._subscriptions,
+            notification=self._notification,
         )
 
     # ------------------------------------------------------------------
@@ -323,8 +359,25 @@ class AppState(QObject):
         스레드에서 부르면 GUI 스레드의 갱신과 뒤엉킨다.
         """
         self._require_gui_thread("attach()")
+        log_store = getattr(source, "log_store", None)
+        if log_store is not None:
+            self._log_directory = str(log_store.directory)
+            if not self._logs:
+                try:
+                    self._logs = list(log_store.read_recent(MAX_LOGS))
+                except OSError:
+                    self._logs = [LogEntry(at=_now(), severity=Severity.WARNING,
+                                           source="logs", message="이전 로그를 읽지 못했습니다")]
+                self._error_count = sum(entry.severity is Severity.ERROR for entry in self._logs)
+                self._dirty.update({"logs", "errors"})
+                self._schedule_emit()
         source.event_ready.connect(self._on_source_event)
         self._sources.append(source)
+
+    @property
+    def log_directory(self) -> str | None:
+        self._require_gui_thread("log_directory")
+        return self._log_directory
 
     def detach(self, source: EventSource) -> None:
         """연결을 끊는다. 마지막 소스가 빠지면 `연결 안 됨` 으로 되돌린다.
@@ -379,6 +432,7 @@ class AppState(QObject):
         아니라 예외인지는 모듈 docstring `스레드 계약` 에 적어 두었다.
         """
         self._require_gui_thread("apply()")
+        event = sanitize_event(event)
         handler = self._HANDLERS.get(type(event))
         if handler is None:
             raise TypeError(f"알 수 없는 백엔드 이벤트: {type(event)!r}")
@@ -429,13 +483,14 @@ class AppState(QObject):
         if not isinstance(command, cmd.GuiCommand):
             raise TypeError(f"알 수 없는 화면 명령: {type(command)!r}")
         connected = self._connection is ConnectionState.CONNECTED
-        login_while_attached = (
-            isinstance(command, cmd.ConnectAccount) and bool(self._sources)
+        usable_while_attached = (
+            isinstance(command, (
+                cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
+                cmd.RefreshArchive, cmd.OpenRecordingPath,
+                cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
+            )) and bool(self._sources)
         )
-        stop_while_attached = (
-            isinstance(command, cmd.StopRecording) and bool(self._sources)
-        )
-        if not connected and not login_while_attached and not stop_while_attached:
+        if not connected and not usable_while_attached:
             self.command_rejected.emit(command, "백엔드에 연결되지 않았습니다")
             return False
         self.command_requested.emit(command)
@@ -464,9 +519,9 @@ class AppState(QObject):
         """
         return self.send_command(cmd.UpdateSettings(dict(values)))
 
-    def connect_account(self) -> bool:
+    def connect_account(self, *, session_only: bool = False) -> bool:
         """Google 계정 연결을 시작해 달라. 미연결에서도 백엔드가 붙어 있으면 보낸다."""
-        return self.send_command(cmd.ConnectAccount())
+        return self.send_command(cmd.ConnectAccount(session_only=session_only))
 
     def disconnect_account(self) -> bool:
         """Google 계정 연결을 끊으라."""
@@ -475,6 +530,20 @@ class AppState(QObject):
     def refresh_subscriptions(self) -> bool:
         """구독 목록을 다시 불러 달라."""
         return self.send_command(cmd.RefreshSubscriptions())
+
+    def refresh_archive(self) -> bool:
+        """로그인 없이 로컬 보관함을 다시 읽는다."""
+        return self.send_command(cmd.RefreshArchive())
+
+    def open_recording_path(self, path: str, *, reveal: bool = False) -> bool:
+        """완료 파일 재생 또는 파일 위치 열기를 요청한다."""
+        return self.send_command(cmd.OpenRecordingPath(path, reveal=reveal))
+
+    def open_notification_browser(self) -> bool:
+        return self.send_command(cmd.OpenNotificationBrowser())
+
+    def open_notification_settings(self) -> bool:
+        return self.send_command(cmd.OpenNotificationSettings())
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -551,8 +620,18 @@ class AppState(QObject):
             done = _replace(done, finished_at=_now())
         self._completed.insert(0, done)
         del self._completed[MAX_COMPLETED:]
+        self._archive = (done,) + tuple(
+            item for item in self._archive
+            if (item.recording_id, item.output_path) != (done.recording_id, done.output_path)
+        )
         self._dirty.add("recordings")
         self._dirty.add("completed")
+        self._dirty.add("archive")
+
+    def _on_completed(self, event: ev.CompletedChanged) -> None:
+        self._archive = tuple(event.completed)
+        self._completed = list(self._archive[:MAX_COMPLETED])
+        self._dirty.update({"completed", "archive"})
 
     def _on_log(self, event: ev.LogAppended) -> None:
         self._logs.insert(0, event.entry)
@@ -575,6 +654,17 @@ class AppState(QObject):
         self._subscriptions = tuple(event.subscriptions)
         self._dirty.add("subscriptions")
 
+    def _on_settings(self, event: ev.SettingsChanged) -> None:
+        self._settings = event.options
+        self._dirty.add("settings")
+
+    def _on_settings_failed(self, event: ev.SettingsSaveFailed) -> None:
+        self.settings_save_failed.emit(event.message)
+
+    def _on_notification(self, event: ev.NotificationStatusChanged) -> None:
+        self._notification = event.status
+        self._dirty.add("notification")
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -582,10 +672,14 @@ class AppState(QObject):
         ev.RecordingStarted: _on_recording_started,
         ev.RecordingProgress: _on_recording_progress,
         ev.RecordingFinished: _on_recording_finished,
+        ev.CompletedChanged: _on_completed,
         ev.LogAppended: _on_log,
         ev.QuotaChanged: _on_quota,
         ev.AccountChanged: _on_account,
         ev.SubscriptionsChanged: _on_subscriptions,
+        ev.SettingsChanged: _on_settings,
+        ev.SettingsSaveFailed: _on_settings_failed,
+        ev.NotificationStatusChanged: _on_notification,
     }
 
     # ------------------------------------------------------------------
@@ -619,6 +713,8 @@ class AppState(QObject):
             self.recordings_changed.emit(tuple(self._recordings.values()))
         if "completed" in dirty:
             self.completed_changed.emit(tuple(self._completed))
+        if "archive" in dirty:
+            self.archive_changed.emit(self._archive)
         if "logs" in dirty:
             self.logs_changed.emit(tuple(self._logs))
         if "errors" in dirty:
@@ -629,5 +725,9 @@ class AppState(QObject):
             self.account_changed.emit(self._account)
         if "subscriptions" in dirty:
             self.subscriptions_changed.emit(self._subscriptions)
+        if "settings" in dirty:
+            self.settings_changed.emit(self._settings)
+        if "notification" in dirty:
+            self.notification_changed.emit(self._notification)
 
         self.snapshot_changed.emit(self._snapshot())

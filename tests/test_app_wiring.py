@@ -20,17 +20,24 @@ class _FakeBackend(EventSource):
     def start(self) -> None:
         self.started = True
 
+    def publish(self, event) -> None:
+        self.event_ready.emit(event)
 
-def test_스텁_없이_실제_백엔드를_붙인다(qapp, monkeypatch) -> None:
+
+def test_스텁_없이_실제_백엔드를_붙인다(qapp, monkeypatch, fake_push_receiver, window_settings) -> None:
     fake = _FakeBackend()
-    monkeypatch.setattr("yt_rec.app.create_backend_source", lambda: fake)
-    context = build_application([])
+    def factory(**kwargs):
+        assert kwargs == {"event_only": True}
+        return fake
+    monkeypatch.setattr("yt_rec.app.create_backend_source", factory)
+    context = build_application([], settings=window_settings)
     try:
         assert context.source is fake
         assert fake.started is True
         assert not isinstance(context.source, StubEventSource)
         assert context.state.connection is ConnectionState.DISCONNECTED
     finally:
+        context.notifications.stop()
         context.window.close()
 
 

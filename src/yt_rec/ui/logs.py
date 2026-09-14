@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableView,
     QVBoxLayout,
@@ -252,6 +253,11 @@ class LogDialog(QDialog):
         self.copy_button.setAccessibleName("선택한 로그 복사")
         self.copy_button.setEnabled(False)
         buttons.addButton(self.copy_button, QDialogButtonBox.ButtonRole.ActionRole)
+        self.open_folder_button = QPushButton("전체 로그 파일 위치 열기", self)
+        self.open_folder_button.setObjectName("openLogFolder")
+        self.open_folder_button.setEnabled(state.log_directory is not None)
+        self.open_folder_button.clicked.connect(self.open_log_folder)
+        buttons.addButton(self.open_folder_button, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("닫기")
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -279,7 +285,13 @@ class LogDialog(QDialog):
 
     def _on_logs(self, logs: tuple[LogEntry, ...]) -> None:
         self.model.set_logs(logs)
+        self.open_folder_button.setEnabled(self._state.log_directory is not None)
         self._update_copy_enabled()
+
+    def open_log_folder(self) -> None:
+        directory = self._state.log_directory
+        if directory is not None and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            QMessageBox.warning(self, "로그 폴더", "로그 폴더를 열지 못했습니다.")
 
     def _update_copy_enabled(self, *_args: object) -> None:
         self.copy_button.setEnabled(bool(self.table.selectionModel().selectedRows()))

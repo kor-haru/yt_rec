@@ -7,13 +7,13 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from yt_rec.recording.engine import RecordingEngine
 from yt_rec.recording.events import (
     FragmentRetried,
     FragmentSkipped,
+    LogLine,
     MetadataReady,
     ProgressReported,
     RecordingEvent,
@@ -76,6 +76,14 @@ def translate_engine_event(
     """엔진 사건을 상태 계층 이벤트로 옮긴다. 파일 크기를 다시 재지 않는다."""
     recording_id = event.video_id
     at = _aware(event.at)
+    if isinstance(event, LogLine):
+        from yt_rec.logs import redact
+
+        text = redact(event.text)
+        level = Severity.ERROR if "ERROR" in text.upper() else (
+            Severity.WARNING if "WARNING" in text.upper() else Severity.INFO
+        )
+        return [ev.LogAppended(LogEntry(at=at, severity=level, source=recording_id, message=text))]
     if isinstance(event, MetadataReady):
         meta_title = event.metadata.display_title or title
         meta_channel = event.metadata.channel or channel_name
@@ -192,28 +200,28 @@ class EngineRecorder:
         *,
         engine_cls: type[RecordingEngine] = RecordingEngine,
         on_result: ResultHook | None = None,
+        on_progress: Callable[[ProgressReported], None] | None = None,
     ) -> None:
         self._options = options
         self._emit = emit
         self._engine_cls = engine_cls
         self._on_result = on_result
+        self._on_progress = on_progress
         self._lock = threading.Lock()
+        self._closing = False
         self._engines: dict[str, RecordingEngine] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._meta: dict[str, dict[str, str]] = {}
         self._last_progress: dict[str, tuple[int, timedelta]] = {}
 
     def update_options(self, values: Mapping[str, Any]) -> None:
-        changes: dict[str, Any] = {}
-        if "output_dir" in values and values["output_dir"]:
-            changes["output_dir"] = Path(str(values["output_dir"]))
-        if "max_height" in values:
-            height = values["max_height"]
-            changes["max_height"] = int(height) if height is not None else None
-        if "live_from_start" in values:
-            changes["live_from_start"] = bool(values["live_from_start"])
-        if changes:
-            self._options = self._options.with_(**changes)
+        with self._lock:
+            self._options = self._options.with_(**dict(values))
+
+    @property
+    def options(self) -> RecordingOptions:
+        with self._lock:
+            return self._options
 
     def is_recording(self, video_id: str) -> bool:
         with self._lock:
@@ -226,10 +234,14 @@ class EngineRecorder:
         channel_id: str = "",
         channel_name: str = "",
         title: str = "",
-    ) -> None:
+    ) -> bool:
         with self._lock:
+            if self._closing:
+                return False
             if video_id in self._engines:
-                return
+                return False
+            if len(self._engines) >= self._options.max_recordings:
+                return False
             quality = quality_label(self._options.max_height)
             meta = {
                 "title": title or video_id,
@@ -251,7 +263,7 @@ class EngineRecorder:
                     title=title or video_id,
                     channel_id=channel_id,
                     channel_name=channel_name,
-                    quality=quality_label(self._options.max_height),
+                    quality=quality,
                     state=RecordingState.STARTING,
                     started_at=datetime.now(timezone.utc),
                 )
@@ -266,6 +278,7 @@ class EngineRecorder:
         with self._lock:
             self._threads[video_id] = thread
         thread.start()
+        return True
 
     def stop(self, recording_id: str) -> None:
         with self._lock:
@@ -281,6 +294,12 @@ class EngineRecorder:
             engines = list(self._engines.values())
         for engine in engines:
             engine.request_stop()
+
+    def begin_shutdown(self) -> None:
+        """Permanently reject new starts; logout's stop_all remains reversible."""
+        with self._lock:
+            self._closing = True
+        self.stop_all()
 
     def join_all(self, timeout: float | None = 600) -> None:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -323,13 +342,22 @@ class EngineRecorder:
         finally:
             with self._lock:
                 self._engines.pop(video_id, None)
-                self._threads.pop(video_id, None)
                 self._meta.pop(video_id, None)
                 self._last_progress.pop(video_id, None)
-            if self._on_result is not None:
-                self._on_result(video_id, ok)
+            try:
+                if self._on_result is not None:
+                    self._on_result(video_id, ok)
+            finally:
+                # Release capacity before the hook, but let shutdown join the
+                # final seen/history writes too. A new same-ID thread may exist.
+                with self._lock:
+                    if self._threads.get(video_id) is threading.current_thread():
+                        self._threads.pop(video_id, None)
 
     def _on_engine_event(self, video_id: str, event: RecordingEvent) -> None:
+        # Use original byte reports, not cached bytes replayed for stall/status UI.
+        if isinstance(event, ProgressReported) and self._on_progress is not None:
+            self._on_progress(event)
         with self._lock:
             meta = dict(self._meta.get(video_id) or {})
             last = self._last_progress.get(video_id)

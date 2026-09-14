@@ -8,6 +8,7 @@ import pytest
 from PySide6.QtCore import QThread
 from PySide6.QtTest import QTest
 
+from test_notification_source import until
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
 from yt_rec.state.models import (
@@ -199,9 +200,10 @@ def test_스냅샷이_전체_상태를_담는다(state: AppState) -> None:
 # ----------------------------------------------------------------------
 # 갱신 빈도 제한
 # ----------------------------------------------------------------------
-def test_진행_이벤트_다수가_한_번의_방출로_묶인다(qapp) -> None:
+@pytest.mark.parametrize("emit_interval_ms", [50, 200])
+def test_진행_이벤트_다수가_한_번의_방출로_묶인다(qapp, emit_interval_ms) -> None:
     """초당 수십~수백 건이 들어와도 화면 갱신 횟수는 묶여야 한다."""
-    store = AppState(emit_interval_ms=50)
+    store = AppState(emit_interval_ms=emit_interval_ms)
     emissions: list[object] = []
     store.recordings_changed.connect(lambda payload: emissions.append(payload))
 
@@ -218,7 +220,8 @@ def test_진행_이벤트_다수가_한_번의_방출로_묶인다(qapp) -> None
     assert emissions == []
     assert store.recordings[0].reported_bytes == 499 * 1024
 
-    QTest.qWait(120)
+    # Wait for delivery, not a wall-clock guess that assumes prompt scheduling.
+    until(qapp, lambda: bool(emissions), timeout=2)
     assert len(emissions) == 1
     assert emissions[0][0].reported_bytes == 499 * 1024
     store.deleteLater()

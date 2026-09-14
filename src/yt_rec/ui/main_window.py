@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..state.models import ConnectionState, QuotaStatus, StopReason, WatchState, WatchStatus
+from ..state.models import ConnectionState, NotificationStatus, QuotaStatus, StopReason, WatchState, WatchStatus
 from ..state.store import AppState
 from .dashboard import Dashboard
 from .dialogs import (
@@ -124,6 +124,8 @@ QWidget#topBar QPushButton { padding: 4px 10px; }
 class MainWindow(QMainWindow):
     """앱의 단일 메인 창."""
 
+    exit_requested = Signal()
+
     def __init__(
         self,
         state: AppState,
@@ -135,6 +137,9 @@ class MainWindow(QMainWindow):
         self._state = state
         self._settings = settings if settings is not None else WindowSettings()
         self._child_windows: dict[str, QDialog] = {}
+        self.desktop_managed = False
+        self.tray_available = False
+        self.exiting = False
         # 최소 크기는 처음 보일 때 한 번 더 잡는다. 상태 표시줄의 크기 조절
         # 손잡이가 show() 시점에야 폭을 보고하므로(실측 439px → 462px), 생성
         # 시점의 값만 믿으면 상태 표시줄이 창보다 넓어져 손잡이가 잘린다.
@@ -151,6 +156,25 @@ class MainWindow(QMainWindow):
 
         self.top_bar = self._build_top_bar(central)
         central_layout.addWidget(self.top_bar)
+
+        self.notification_panel = QWidget(central)
+        notification_layout = QVBoxLayout(self.notification_panel)
+        notification_layout.setContentsMargins(12, 0, 12, 8)
+        self.notification_label = QLabel(self.notification_panel)
+        self.notification_label.setObjectName("notificationStatus")
+        self.notification_label.setWordWrap(True)
+        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
+        notification_layout.addWidget(self.notification_label)
+        notification_buttons = QHBoxLayout()
+        self.notification_login_button = QPushButton("YouTube 로그인", self.notification_panel)
+        self.notification_login_button.clicked.connect(state.open_notification_browser)
+        notification_buttons.addWidget(self.notification_login_button)
+        self.notification_settings_button = QPushButton("YouTube 알림 설정", self.notification_panel)
+        self.notification_settings_button.clicked.connect(state.open_notification_settings)
+        notification_buttons.addWidget(self.notification_settings_button)
+        notification_buttons.addStretch()
+        notification_layout.addLayout(notification_buttons)
+        central_layout.addWidget(self.notification_panel)
 
         self.scroll_area = QScrollArea(central)
         self.scroll_area.setWidgetResizable(True)
@@ -177,6 +201,7 @@ class MainWindow(QMainWindow):
         state.watch_changed.connect(self._on_watch)
         state.errors_changed.connect(self._on_errors)
         state.quota_changed.connect(self._on_quota)
+        state.notification_changed.connect(self._on_notification)
 
         # 남은 시간 표시 재렌더링. 백엔드를 조회하지 않는다.
         self._countdown_repaint_timer = QTimer(self)
@@ -191,6 +216,7 @@ class MainWindow(QMainWindow):
         self._on_watch(state.watch)
         self._on_errors(state.error_count, state.unseen_error_count)
         self._on_quota(state.quota)
+        self._on_notification(state.notification)
 
     # ------------------------------------------------------------------
     # 구성
@@ -224,6 +250,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.settings_button)
 
         self.log_button = QPushButton("로그", bar)
+        self.log_button.setMinimumWidth(self.log_button.fontMetrics().horizontalAdvance("로그 99+") + 28)
         self.log_button.clicked.connect(self.open_logs)
         layout.addWidget(self.log_button)
 
@@ -349,6 +376,13 @@ class MainWindow(QMainWindow):
         elif watch.state is WatchState.WATCHING:
             kind = "ok"
             detail = ""
+        elif self._state.notification.code != "disabled" and watch.stop_reason is None:
+            ready = self._state.notification.code in ("ready", "received")
+            text = f"알림 대기 {watch.channel_count}채널" if ready else "수신 설정 필요"
+            if self._state.notification.code == "error":
+                text = "알림 수신 오류"
+            kind = "neutral" if ready else "warn"
+            detail = "방송 알림이 도착하면 해당 영상만 확인합니다. 아래 수신기 상태를 확인하세요."
         else:
             kind = "warn"
             detail = stop_reason_text(watch.stop_reason)
@@ -359,7 +393,18 @@ class MainWindow(QMainWindow):
         # 최소 너비가 커지면 Qt 가 창을 그만큼 넓혀 복원된 창 크기를 무효로
         # 만든다. 대신 생성 시 최장 문구(BADGE_WIDTH_SAMPLE)로 한 번 잡는다.
 
+    def _on_notification(self, status: NotificationStatus) -> None:
+        self.notification_panel.setVisible(status.code != "disabled")
+        self.notification_label.setText(status.detail)
+        self.notification_login_button.setEnabled(status.code != "stopped")
+        self.notification_settings_button.setEnabled(status.code != "stopped")
+        self._refresh_badge(self._state.connection, self._state.watch)
+        self._repaint_countdowns()
+
     def _on_errors(self, total: int, unseen: int) -> None:
+        badge = str(unseen) if unseen <= 99 else "99+"
+        self.log_button.setText(f"로그 {badge}" if unseen else "로그")
+        self.log_button.setToolTip(f"미확인 오류 {unseen}건 · 전체 오류 {total}건")
         text = f"오류 {total}건"
         if unseen:
             text += f" (새 {unseen}건)"
@@ -377,7 +422,9 @@ class MainWindow(QMainWindow):
     def _repaint_countdowns(self) -> None:
         """남은 시간 문자열만 다시 만든다. 상태 조회는 하지 않는다."""
         watch = self._state.watch
-        if self._state.connection is not ConnectionState.CONNECTED:
+        if self._state.notification.code != "disabled":
+            self.next_check_label.setText("주기 확인 없음")
+        elif self._state.connection is not ConnectionState.CONNECTED:
             self.next_check_label.setText("다음 확인 —")
         else:
             self.next_check_label.setText(f"다음 확인 {format_countdown(watch.next_check_at)}")
@@ -477,8 +524,43 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt 명명 규칙
         self.save_window_state()
+        if self.desktop_managed:
+            event.ignore()
+            if self.exiting:
+                return
+            if self.tray_available:
+                for dialog in self._child_windows.values():
+                    dialog.hide()
+                self.hide()
+            else:
+                self.request_exit()
+            return
         self._countdown_repaint_timer.stop()
         super().closeEvent(event)
+
+    def request_exit(self) -> None:
+        """Explicit exit keeps the GUI alive while the backend saves its recordings."""
+        if self.exiting:
+            return
+        if self._state.recordings:
+            answer = QMessageBox.question(
+                self,
+                "yt-rec 종료",
+                f"녹화 {len(self._state.recordings)}건이 진행 중입니다.\n"
+                "받은 부분을 저장하고 종료할까요? 마무리에 시간이 걸릴 수 있습니다.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.exiting = True
+        self.save_window_state()
+        self.showNormal()
+        self.statusBar().showMessage("녹화를 마무리하고 있습니다. 잠시 기다려 주세요.")
+        self.centralWidget().setEnabled(False)
+        for dialog in tuple(self._child_windows.values()):
+            dialog.close()
+        self.exit_requested.emit()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt 명명 규칙
         """다시 보일 때 남은 시간 재렌더링을 되살린다.

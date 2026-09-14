@@ -47,6 +47,7 @@ __all__ = [
     "AccountInfo",
     "Subscription",
     "AppSnapshot",
+    "NotificationStatus",
 ]
 
 
@@ -203,7 +204,7 @@ class CompletedRecording:
 
     duration: timedelta = timedelta()
     total_bytes: int = 0
-    """녹화 프로세스가 마지막으로 보고한 최종 크기."""
+    """마지막 보고 크기 또는 백엔드가 확인한 완료 파일 크기. -1은 알 수 없음."""
 
     status: CompletionStatus = CompletionStatus.COMPLETED
     output_path: str | None = None
@@ -261,6 +262,14 @@ class Subscription:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationStatus:
+    """수신기 준비 상태. ready는 실제 알림 도착이나 전체 방송 수신 보장이 아니다."""
+
+    code: str = "disabled"
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class AppSnapshot:
     """어느 시점의 상태 전체. 화면을 처음 그릴 때와 통째로 다시 그릴 때 쓴다."""
 
@@ -279,3 +288,6 @@ class AppSnapshot:
     quota: QuotaStatus = field(default_factory=QuotaStatus)
     account: AccountInfo = field(default_factory=AccountInfo)
     subscriptions: tuple[Subscription, ...] = ()
+    archive: tuple[CompletedRecording, ...] = ()
+    """백엔드에서 복원한 전체 보관함. completed는 대시보드 최근 200건이다."""
+    notification: NotificationStatus = field(default_factory=NotificationStatus)

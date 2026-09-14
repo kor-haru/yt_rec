@@ -1,0 +1,84 @@
+name: Desktop bundle
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15, macos-15-intel, ubuntu-22.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libxkbcommon0 libdbus-1-3 libopus0
+          if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+            sudo apt-get install -y libminizip1t64
+          fi
+      - run: uv sync --frozen
+      - name: Inspect Linux WebEngine runtime dependencies
+        if: runner.os == 'Linux'
+        run: find .venv/lib -path '*/PySide6/Qt/lib/libQt6WebEngineCore.so.6' -exec ldd {} \;
+      - run: uv run --frozen pytest -m "not integration"
+      - name: Install bundle builder in project environment
+        run: uv pip install --python .venv pyinstaller==6.22.2
+      - name: Build native bundle and run isolated GUI/media smoke
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --frozen --no-sync python packaging/build.py
+      - name: Diagnose macOS WebEngine framework after build failure
+        if: failure() && runner.os == 'macOS'
+        run: |
+          uv run --frozen python <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          relative = "PySide6/Qt/lib/QtWebEngineCore.framework"
+          roots = [
+              *Path(".venv/lib").glob(f"python*/site-packages/{relative}"),
+              Path("dist/yt-rec/_internal") / relative,
+              Path("dist/yt-rec.app/Contents/Frameworks") / relative,
+              Path("dist/yt-rec.app/Contents/Resources") / relative,
+          ]
+          for root in roots:
+              print(f"FRAMEWORK {root}")
+              if not root.is_dir():
+                  print("  missing")
+                  continue
+              print("  entries:", sorted(p.name for p in root.iterdir()))
+              for path in sorted(root.rglob("*")):
+                  if path.is_symlink():
+                      print(f"  LINK {path.relative_to(root)} -> {path.readlink()} exists={path.exists()}")
+                  elif path.name in {"Info.plist", "QtWebEngineCore", "QtWebEngineProcess"}:
+                      print(f"  FILE {path.relative_to(root)} bytes={path.stat().st_size}")
+                      if path.name == "Info.plist":
+                          info = plistlib.loads(path.read_bytes())
+                          print({key: info.get(key) for key in ("CFBundleExecutable", "CFBundleIdentifier", "CFBundlePackageType")})
+          for path in Path("dist").rglob("QtWebEngineCore"):
+              target = path.readlink() if path.is_symlink() else "regular file"
+              print(f"CORE {path} -> {target} exists={path.exists()}")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yt-rec-${{ matrix.os }}
+          path: |
+            dist/yt-rec-*.zip
+            dist/yt-rec-*.tar.gz
+            dist/smoke-*.json
+          if-no-files-found: warn

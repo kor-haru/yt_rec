@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from yt_rec.backend.controller import WatchController
 from yt_rec.backend.oauth import AuthError, ClientConfigError
 from yt_rec.backend.selection import MemorySelectionStore
-from yt_rec.backend.tokens import MemoryTokenStore
+from yt_rec.backend.tokens import MemoryTokenStore, TokenStoreError
 from yt_rec.backend.youtube import ChannelRef, LiveBroadcast, YouTubeError
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
@@ -233,6 +233,68 @@ def test_복원_invalid_grant는_토큰을_지운다() -> None:
     controller.start()
     assert tokens.load() is None
     assert _of(events, ev.WatchStatusChanged)[-1].stop_reason is StopReason.AUTH_EXPIRED
+
+
+def test_키링_실패시_연결되지_않고_명시적인_세션_로그인만_허용한다() -> None:
+    class LockedStore:
+        def load(self):
+            raise TokenStoreError("보안 저장소 잠김")
+
+        def save(self, blob):
+            raise TokenStoreError("보안 저장소 잠김")
+
+        def clear(self):
+            raise TokenStoreError("보안 저장소 잠김")
+
+    controller, events, youtube, *_ = make_controller(tokens=LockedStore())
+    controller.start()
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+    controller.handle_command(cmd.ConnectAccount())
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+    assert any("이번 실행에서만" in item.entry.message for item in _of(events, ev.LogAppended))
+    controller.handle_command(cmd.ConnectAccount(session_only=True))
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.CONNECTED
+    controller.handle_command(cmd.DisconnectAccount())
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+    assert any("삭제하지 못했습니다" in item.entry.message for item in _of(events, ev.LogAppended))
+
+
+def test_세션_로그인_연결_해제는_복원_실패했던_기존_계정도_삭제한다() -> None:
+    tokens = MemoryTokenStore("account-A")
+    auth = FakeAuth("account-B")
+    auth.fail = ConnectionError("offline")
+    controller, events, *_ = make_controller(tokens=tokens, auth=auth)
+    controller.start()
+    assert tokens.load() == "account-A"
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+
+    auth.fail = None
+    controller.handle_command(cmd.ConnectAccount(session_only=True))
+    assert tokens.load() == "account-A"
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.CONNECTED
+    controller.handle_command(cmd.DisconnectAccount())
+    assert tokens.load() is None
+    assert auth.credentials is None
+
+    restarted_auth = FakeAuth()
+    restarted, restart_events, *_ = make_controller(tokens=tokens, auth=restarted_auth)
+    restarted.start()
+    assert restarted_auth.restore_calls == 0
+    assert _of(restart_events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+
+
+def test_키링_삭제_실패에도_계정_연결은_해제된다() -> None:
+    class LockedClear(MemoryTokenStore):
+        def clear(self):
+            raise TokenStoreError("잠김")
+
+    auth = FakeAuth()
+    controller, events, *_ = make_controller(tokens=LockedClear(), auth=auth)
+    controller.handle_command(cmd.ConnectAccount())
+    controller.handle_command(cmd.DisconnectAccount())
+    assert auth.credentials is None
+    assert _of(events, ev.ConnectionChanged)[-1].state is ConnectionState.DISCONNECTED
+    assert any("삭제하지 못했습니다" in item.entry.message for item in _of(events, ev.LogAppended))
 
 
 def test_시작_시_미완료_녹화를_복구한다() -> None:
