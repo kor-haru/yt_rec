@@ -314,6 +314,7 @@ class DesktopSession(QObject):
 
     def _finish_shutdown(self) -> None:
         self.stopped = True
+        self.context.window.desktop_managed = False  # Let QApplication.quit close the finished window.
         if self.tray is not None:
             self.tray.hide()
         self.context.app.quit()
