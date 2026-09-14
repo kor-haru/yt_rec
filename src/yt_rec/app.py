@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton,
     QSystemTrayIcon, QVBoxLayout,
@@ -117,6 +117,21 @@ class NotificationSession(QObject):
     def handle_command(self, command: object) -> None:
         if self._stopped:
             return
+        if isinstance(command, cmd.OpenSystemNotificationSettings):
+            if sys.platform != "win32":
+                message = "이 버튼은 Windows에서 지원됩니다. 운영체제의 설정 → 알림을 직접 열어 확인하세요."
+            elif not QDesktopServices.openUrl(QUrl("ms-settings:notifications")):
+                message = "Windows 알림 설정을 열지 못했습니다. 시작 → 설정 → 시스템 → 알림을 직접 열어 주세요."
+            else:
+                message = "Windows 알림 설정 열기를 요청했습니다. OS 허용 여부는 앱에서 확인하지 않습니다."
+            self.window.statusBar().showMessage(message, 15000)
+            return
+        if isinstance(command, cmd.InspectNotificationRegistration):
+            if self.receiver is None:
+                self.start()  # Initial page load already performs one inspection.
+            else:
+                self.receiver.inspect_registration()
+            return
         if not isinstance(command, (cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings)):
             self.source.handle_command(command)
             return
@@ -126,6 +141,7 @@ class NotificationSession(QObject):
             return
         if self.browser is None:
             self.browser = QDialog(self.window)
+            self.browser.finished.connect(self.state.inspect_notification_registration)
             self.browser.setWindowTitle("YouTube 로그인·알림 설정 — yt-rec")
             self.browser.resize(1000, 760)
             layout = QVBoxLayout(self.browser)
@@ -134,7 +150,7 @@ class NotificationSession(QObject):
             layout.addWidget(note)
             controls = QHBoxLayout()
             check = QPushButton("알림 상태 확인", self.browser)
-            check.clicked.connect(self.receiver.inspect_registration)
+            check.clicked.connect(self.state.inspect_notification_registration)
             controls.addWidget(check)
             controls.addStretch()
             layout.addLayout(controls)

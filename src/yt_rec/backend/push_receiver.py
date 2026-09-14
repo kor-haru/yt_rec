@@ -125,11 +125,16 @@ _LOOKUP = """
     }));
     try {
         if (location.origin !== request.origin) return send({status: 'origin_changed'});
-        const registration = await navigator.serviceWorker.getRegistration(location.href);
-        if (!registration) return send({status: 'no_registration'});
-        const notices = await registration.getNotifications({tag: request.tag});
-        // Empty tag returns all stored notices. Never truncate and guess.
-        if (notices.length > 128) return send({status: 'too_many_notices'});
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        if (registrations.length > 32) return send({status: 'lookup_failed'});
+        const notices = [];
+        for (const registration of registrations) {
+            if (new URL(registration.scope).origin !== request.origin)
+                return send({status: 'origin_changed'});
+            notices.push(...await registration.getNotifications({tag: request.tag}));
+            // Empty tag returns all stored notices. Bound the total across scopes.
+            if (notices.length > 128) return send({status: 'too_many_notices'});
+        }
         const matches = notices.filter(notice => notice.tag === request.tag &&
             notice.title === request.title && notice.body === request.body);
         if (matches.length !== 1) return send({status: 'missing_or_ambiguous'});
@@ -148,9 +153,18 @@ _REGISTRATION = """
     }));
     try {
         if (location.origin !== request.origin) return send({status: 'origin_changed'});
-        const reg = await navigator.serviceWorker.getRegistration(location.href);
-        const sub = reg ? await reg.pushManager.getSubscription() : null;
-        send({status: 'registration', worker: !!reg, subscription: !!sub,
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        if (registrations.length > 32) return send({status: 'lookup_failed'});
+        let active = false, subscription = false;
+        for (const reg of registrations) {
+            if (new URL(reg.scope).origin !== request.origin)
+                return send({status: 'origin_changed'});
+            if (reg.active?.state === 'activated') {
+                active = true;
+                if (await reg.pushManager.getSubscription()) subscription = true;
+            }
+        }
+        send({status: 'registration', worker: registrations.length > 0, active, subscription,
               permission: Notification.permission});
     } catch (_) { send({status: 'lookup_failed'}); }
 })();
@@ -358,6 +372,7 @@ class YouTubePushReceiver(QObject):
         if request is not None:
             nonce, pending = request
             payload = {"nonce": nonce, "generation": pending.generation, "origin": YOUTUBE}
+            self._status("checking", "브라우저의 알림 권한과 수신 등록을 한 번 확인하는 중입니다")
             self.page.runJavaScript(_REGISTRATION.replace("REQUEST", json.dumps(payload)), _WORLD)
 
     def _receive(self, text: str) -> None:
@@ -383,14 +398,23 @@ class YouTubePushReceiver(QObject):
             self._status("received", "영상 알림 수신 · 채널과 현재 방송 상태 확인 중")
             self.notification_received.emit(LiveNotification(video_id, pending.received_at, synthetic=False))
         elif status == "registration" and pending.kind == "registration":
-            if value.get("permission") != "granted":
-                self._status("permission_required", "수신 브라우저에서 YouTube 알림 권한을 허용하세요")
-            elif value.get("worker") is True and value.get("subscription") is True:
-                self._status("ready", "알림 수신 준비됨 · 실제 도착 대기 중")
+            permission = value.get("permission")
+            if (permission not in ("default", "denied", "granted")
+                    or any(type(value.get(key)) is not bool for key in ("worker", "active", "subscription"))):
+                self._status("error", "브라우저 알림 상태를 확인하지 못했습니다. 알림 상태 확인으로 다시 확인하세요")
+            elif permission != "granted":
+                self._status("permission_required", "브라우저의 YouTube 알림 권한이 허용되지 않았습니다. YouTube 알림 설정에서 권한 요청을 확인하세요")
+            elif not value["worker"]:
+                self._status("worker_missing", "브라우저 알림 권한은 허용됨 · YouTube 수신 프로그램(서비스 워커)이 등록되지 않았습니다. YouTube 로그인과 알림 설정을 확인하세요")
+            elif not value["active"]:
+                self._status("worker_inactive", "브라우저 알림 권한은 허용됨 · YouTube 수신 프로그램이 아직 활성화되지 않았습니다. 페이지가 열린 뒤 알림 상태 확인을 누르세요")
+            elif not value["subscription"]:
+                self._status("unsubscribed", "브라우저 알림 권한은 허용됨 · 푸시 수신 등록이 없습니다. YouTube 데스크톱 알림이 이미 켜져 있어도 등록이 없을 수 있습니다. YouTube 알림 설정을 확인한 뒤 알림 상태 확인을 누르세요")
             else:
-                self._status("unsubscribed", "알림 설정에서 이 브라우저의 데스크톱 알림을 켠 뒤 확인하세요")
+                self._status("ready", "알림 수신 준비됨 · 실제 도착 대기 중")
         else:
-            self._status("error", "일치하는 알림을 확인하지 못해 응답을 폐기했습니다")
+            self._status("error", "브라우저 알림 상태 조회에 실패했습니다. 알림 상태 확인으로 다시 확인하세요"
+                         if pending.kind == "registration" else "일치하는 알림을 확인하지 못해 응답을 폐기했습니다")
 
     @Slot()
     def stop(self) -> None:

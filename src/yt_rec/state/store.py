@@ -488,6 +488,7 @@ class AppState(QObject):
                 cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
                 cmd.RefreshArchive, cmd.OpenRecordingPath,
                 cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
+                cmd.InspectNotificationRegistration, cmd.OpenSystemNotificationSettings,
             )) and bool(self._sources)
         )
         if not connected and not usable_while_attached:
@@ -544,6 +545,12 @@ class AppState(QObject):
 
     def open_notification_settings(self) -> bool:
         return self.send_command(cmd.OpenNotificationSettings())
+
+    def inspect_notification_registration(self) -> bool:
+        return self.send_command(cmd.InspectNotificationRegistration())
+
+    def open_system_notification_settings(self) -> bool:
+        return self.send_command(cmd.OpenSystemNotificationSettings())
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리

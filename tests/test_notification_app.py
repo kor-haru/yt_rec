@@ -7,6 +7,7 @@ covered separately. The app still uses the real queued source/controller/recorde
 from __future__ import annotations
 
 import time
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import Qt
@@ -118,7 +119,7 @@ def test_synthetic_notice_cannot_start_through_app_adapter(notification_app, qap
     assert not context.notifications._received
 
 
-def test_browser_controls_work_without_oauth_and_closing_keeps_receiver(notification_app, qapp):
+def test_browser_controls_work_without_oauth_and_closing_keeps_receiver(notification_app, qapp, monkeypatch):
     context, (source, _, _, _, _, _) = notification_app
     context.state.disconnect_account()
     until(qapp, lambda: context.state.connection is ConnectionState.DISCONNECTED)
@@ -128,8 +129,12 @@ def test_browser_controls_work_without_oauth_and_closing_keeps_receiver(notifica
     qapp.processEvents()
     assert receiver.browser_opens == 1 and browser.isVisible()
     assert context.state.notification.code == "login_required"
+    inspect = Mock(wraps=receiver.inspect_registration)
+    monkeypatch.setattr(receiver, "inspect_registration", inspect)
     browser.close()
     qapp.processEvents()
+    inspect.assert_called_once_with()
+    assert context.state.notification.code == "ready"
     assert not browser.isVisible() and receiver.stops == 0
     context.window.notification_settings_button.click()
     assert context.notifications.browser is browser
@@ -137,8 +142,66 @@ def test_browser_controls_work_without_oauth_and_closing_keeps_receiver(notifica
     for button in browser.findChildren(QPushButton):
         if button.text() == "알림 상태 확인":
             button.click()
+    assert inspect.call_count == 2
     assert context.state.notification.code == "ready"
     flush(source, qapp)
+    context.notifications.stop()
+    browser.close()
+    assert inspect.call_count == 2  # Closing during shutdown cannot restart inspection.
+
+
+def test_main_inspection_is_one_shot_without_browser_navigation_or_oauth(notification_app, qapp, monkeypatch):
+    context, (source, api, engines, _, _, _) = notification_app
+    context.state.disconnect_account()
+    until(qapp, lambda: context.state.connection is ConnectionState.DISCONNECTED)
+    receiver = context.notifications.receiver
+    inspect = Mock(wraps=receiver.inspect_registration)
+    monkeypatch.setattr(receiver, "inspect_registration", inspect)
+    context.window.notification_check_button.click()
+    inspect.assert_called_once_with()
+    assert context.notifications.browser is None
+    assert receiver.browser_opens == receiver.settings_opens == 0
+    flush(source, qapp)
+    assert api.find_calls == api.get_calls == [] and not engines
+    assert source._poll_timer is None
+    context.notifications.stop()
+    context.window.notification_check_button.click()
+    assert inspect.call_count == 1
+
+
+@pytest.mark.parametrize("system,opened,expected", [
+    ("win32", True, "열기를 요청"), ("win32", False, "열지 못했습니다"),
+    ("darwin", False, "Windows에서 지원"), ("linux", False, "Windows에서 지원"),
+])
+def test_system_notification_button_only_opens_fixed_uri(notification_app, monkeypatch, system, opened, expected):
+    context, (_, api, engines, _, _, _) = notification_app
+    open_url = Mock(return_value=opened)
+    monkeypatch.setattr(application.sys, "platform", system)
+    monkeypatch.setattr(application.QDesktopServices, "openUrl", open_url)
+    status = context.state.notification
+    context.window.system_notification_settings_button.click()
+    assert expected in context.window.statusBar().currentMessage()
+    if system == "win32":
+        assert open_url.call_count == 1
+        assert open_url.call_args.args[0].toString() == "ms-settings:notifications"
+    else:
+        open_url.assert_not_called()
+    assert context.state.notification == status  # Opening settings proves no permission.
+    assert context.notifications.browser is None
+    assert api.find_calls == api.get_calls == [] and not engines
+
+
+@pytest.mark.parametrize("code,text", [
+    ("connecting", "수신기 연결 중"), ("checking", "알림 확인 중"),
+    ("stopped", "알림 수신 종료"), ("worker_missing", "수신 등록 없음"),
+    ("worker_inactive", "수신기 준비 중"), ("unsubscribed", "푸시 등록 없음"),
+    ("permission_required", "알림 권한 필요"), ("error", "알림 수신 오류"),
+])
+def test_notification_badge_distinguishes_setup_from_lifecycle(notification_app, code, text):
+    context, _ = notification_app
+    context.notifications.receiver.status_changed.emit(code, "고정 상태 안내")
+    assert context.window.watch_badge.text() == text
+    assert context.window.notification_check_button.isEnabled() is (code not in ("connecting", "checking", "stopped"))
 
 
 def test_shutdown_stops_receiver_and_blocks_late_native_input(notification_app, monkeypatch, qapp):
