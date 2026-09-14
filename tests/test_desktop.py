@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ctypes
+import json
+import os
 import plistlib
 import shutil
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -22,6 +25,76 @@ from yt_rec.recording.options import RecordingOptions
 from yt_rec.state.events import RecordingStarted, SettingsChanged, SettingsSaveFailed
 from yt_rec.state.models import CompletedRecording, CompletionStatus, Recording
 from yt_rec.ui.main_window import MainWindow
+
+
+@pytest.mark.parametrize("backend", [False, True])
+def test_completed_shutdown_leaves_real_qt_event_loop(tmp_path, backend):
+    script = '''
+import json, sys
+from pathlib import Path
+from types import SimpleNamespace
+from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+from yt_rec import app as module
+from yt_rec.app import AppContext, DesktopSession
+from yt_rec.backend.selection import MemorySelectionStore, MemorySeenStore
+from yt_rec.backend.source import BackendSource
+from yt_rec.recording.options import RecordingOptions
+from yt_rec.state.store import AppState
+from yt_rec.state.stub import StubEventSource
+from yt_rec.ui.main_window import MainWindow
+from yt_rec.ui.settings_store import WindowSettings
+
+directory = Path(sys.argv[1])
+options = RecordingOptions(output_dir=directory)
+module.load_settings = lambda: options
+QSystemTrayIcon.isSystemTrayAvailable = lambda: False
+app = QApplication([])
+state = AppState(emit_interval_ms=0)
+window = MainWindow(state, settings=WindowSettings(QSettings(str(directory / "window.ini"), QSettings.IniFormat)))
+if sys.argv[2] == "True":
+    controller = SimpleNamespace(
+        event_only=True, _options=options, _recorder=None,
+        _selection=MemorySelectionStore(), _seen=MemorySeenStore(), start=lambda: None,
+    )
+    source = BackendSource(controller, background=True)
+    source.start()
+else:
+    source = StubEventSource()
+desktop = DesktopSession(AppContext(app, state, window, source))
+desktop.show_initial()
+result = {"watchdog": False}
+
+def cleanup_failed_test():
+    result.update(watchdog=True, stopped=desktop.stopped, exiting=window.exiting,
+                  central_enabled=window.centralWidget().isEnabled())
+    # Release only this test window after capturing the quit-veto evidence.
+    window.desktop_managed = False
+    window.close()
+    app.quit()
+
+QTimer.singleShot(1000, cleanup_failed_test)
+QTimer.singleShot(0, window.request_exit)
+result["exit_code"] = app.exec()
+source.stop()
+result["stopped"] = desktop.stopped
+result["worker_alive"] = bool(getattr(source, "_worker", None) and source._worker.is_alive())
+print(json.dumps(result))
+'''
+    env = os.environ.copy()
+    for key in ("APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME",
+                "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        directory = tmp_path / key
+        directory.mkdir()
+        env[key] = str(directory)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(backend)],
+        env=env, capture_output=True, text=True, timeout=10,
+    )
+    assert process.returncode == 0, process.stderr
+    result = json.loads(process.stdout)
+    assert result == {"watchdog": False, "exit_code": 0, "stopped": True, "worker_alive": False}
 
 
 @pytest.mark.parametrize("frozen", [False, True])
@@ -358,6 +431,7 @@ def test_shutdown_wait_does_not_block_gui(qapp, state, window_settings, monkeypa
     window, session, _tray = _session(qapp, state, window_settings, monkeypatch, False, source)
     window.request_exit()
     assert not session.stopped
+    assert window.desktop_managed
     assert calls[0] == ("begin", gui_thread)
     qapp.processEvents()
     release.set()
@@ -413,6 +487,7 @@ def test_failed_shutdown_stays_disabled_and_menu_retry_waits_for_recorder(
         assert notifications._stopped and notifications.receiver.stops == 1
         assert state.notification.code == "stopped"
         assert not window.centralWidget().isEnabled()
+        assert window.desktop_managed
         assert "새 알림" in window.statusBar().currentMessage()
         assert "다시 시도" in window.statusBar().currentMessage()
         assert not session.stopped and not session._shutdown_timer.isActive()
@@ -441,6 +516,7 @@ def test_failed_shutdown_stays_disabled_and_menu_retry_waits_for_recorder(
         session._check_shutdown()
         qapp.processEvents()
         assert window.exiting and not session.stopped
+        assert window.desktop_managed
         assert not window.centralWidget().isEnabled()
         qapp.quit.assert_not_called()
         release.set()
