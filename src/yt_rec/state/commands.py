@@ -49,6 +49,8 @@ __all__ = [
     "OpenRecordingPath",
     "OpenNotificationBrowser",
     "OpenNotificationSettings",
+    "InspectNotificationRegistration",
+    "OpenSystemNotificationSettings",
     "GuiCommand",
 ]
 
@@ -140,6 +142,16 @@ class OpenNotificationSettings:
     """같은 브라우저의 YouTube 알림 설정을 연다."""
 
 
+@dataclass(frozen=True, slots=True)
+class InspectNotificationRegistration:
+    """현재 브라우저 알림 등록을 한 번만 확인한다. 권한을 바꾸지 않는다."""
+
+
+@dataclass(frozen=True, slots=True)
+class OpenSystemNotificationSettings:
+    """운영체제의 알림 표시 설정 화면만 연다. 허용 여부를 판정하지 않는다."""
+
+
 GuiCommand = (
     StopRecording
     | SetWatchedChannels
@@ -151,5 +163,7 @@ GuiCommand = (
     | OpenRecordingPath
     | OpenNotificationBrowser
     | OpenNotificationSettings
+    | InspectNotificationRegistration
+    | OpenSystemNotificationSettings
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

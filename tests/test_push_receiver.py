@@ -284,7 +284,7 @@ def test_registration_is_event_driven_coalesced_and_not_a_recording(receiver):
     receiver.inspect_registration()
     assert len(receiver.page.calls) == 1
     nonce, pending = next(iter(receiver._pending.items()))
-    reply(receiver, nonce, pending.generation, status="registration", worker=True, subscription=True, permission="granted")
+    reply(receiver, nonce, pending.generation, status="registration", worker=True, active=True, subscription=True, permission="granted")
     assert receiver._last_status[0] == "ready" and "실제 도착 대기" in receiver._last_status[1]
     assert events == []
     receiver.open_settings()
@@ -295,17 +295,36 @@ def test_registration_is_event_driven_coalesced_and_not_a_recording(receiver):
     assert events == [] and receiver._last_status[0] == "error"
 
 
-@pytest.mark.parametrize("permission, worker, subscription, status", [
-    ("default", True, False, "permission_required"), ("denied", True, True, "permission_required"),
-    ("granted", False, False, "unsubscribed"), ("granted", True, False, "unsubscribed"),
-    ("granted", True, 1, "unsubscribed"),
+@pytest.mark.parametrize("permission, worker, active, subscription, status", [
+    ("default", True, True, False, "permission_required"),
+    ("denied", True, True, True, "permission_required"),
+    ("granted", False, False, False, "worker_missing"),
+    ("granted", True, False, False, "worker_inactive"),
+    ("granted", True, True, False, "unsubscribed"),
+    ("granted", True, True, True, "ready"),
+    ("granted", True, True, 1, "error"),
+    ("granted", True, None, True, "error"),
+    ("invalid", True, True, True, "error"),
 ])
-def test_registration_status_is_truthful(receiver, permission, worker, subscription, status):
+def test_registration_status_is_truthful(receiver, permission, worker, active, subscription, status):
     receiver.start()
     receiver.inspect_registration()
     nonce, pending = next(iter(receiver._pending.items()))
-    reply(receiver, nonce, pending.generation, status="registration", worker=worker, subscription=subscription, permission=permission)
+    reply(receiver, nonce, pending.generation, status="registration", worker=worker, active=active,
+          subscription=subscription, permission=permission)
     assert receiver._last_status[0] == status
+    if status == "unsubscribed":
+        assert "이미 켜져 있어도" in receiver._last_status[1]
+
+
+def test_failed_registration_lookup_does_not_claim_permission_or_subscription(receiver):
+    receiver.start()
+    receiver.inspect_registration()
+    assert receiver._last_status[0] == "checking"
+    nonce, pending = next(iter(receiver._pending.items()))
+    reply(receiver, nonce, pending.generation, status="lookup_failed")
+    assert receiver._last_status[0] == "error"
+    assert "조회에 실패" in receiver._last_status[1]
 
 
 def test_shutdown_blocks_new_inputs_and_deletes_page_before_profile(receiver):
@@ -338,11 +357,14 @@ def test_bridge_is_not_exposed_to_page_scripts_or_subframes(receiver):
     assert script.injectionPoint() == QWebEngineScript.InjectionPoint.DocumentCreation
     assert "qt.webChannelTransport" in script.sourceCode()
     assert module._LOOKUP.count("getNotifications(") == 1
-    assert module._LOOKUP.count("getRegistration(") == 1
+    assert module._LOOKUP.count("getRegistrations(") == 1
     assert module._REGISTRATION.count("getSubscription(") == 1
     assert "notices.length > 128" in module._LOOKUP
     assert "matches.length !== 1" in module._LOOKUP
     for code in (module._LOOKUP, module._REGISTRATION):
+        assert code.count("getRegistrations(") == 1
+        assert "registrations.length > 32" in code
+        assert ".scope).origin !== request.origin" in code
         assert ".ready" not in code and "setInterval" not in code and "setTimeout" not in code
         assert ".subscribe(" not in code and "console." not in code
 
@@ -374,9 +396,9 @@ def local_site():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             body = (b"self.addEventListener('activate', e => e.waitUntil(clients.claim()));"
-                    if self.path == "/sw.js" else b"<!doctype html><title>SYNTHETIC receiver test</title>")
+                    if self.path.endswith("/sw.js") else b"<!doctype html><title>SYNTHETIC receiver test</title>")
             self.send_response(200)
-            self.send_header("Content-Type", "application/javascript" if self.path == "/sw.js" else "text/html")
+            self.send_header("Content-Type", "application/javascript" if self.path.endswith("/sw.js") else "text/html")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -392,11 +414,13 @@ def local_site():
     thread.join()
 
 
-def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qapp, tmp_path, monkeypatch, local_site):
+@pytest.mark.parametrize("scope,duplicate", [("/", False), ("/push/", False), ("/push/", True)])
+def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qapp, tmp_path, monkeypatch, local_site, scope, duplicate):
     """Real native Qt/JS/WebChannel wiring; SYNTHETIC, not YouTube/FCM proof."""
     monkeypatch.setattr(module, "default_profile_directory", lambda: tmp_path / "synthetic-profile")
     monkeypatch.setattr(module, "YOUTUBE", local_site)
-    monkeypatch.setattr(module, "_is_youtube_url", lambda value: value == local_site + "/" or value == local_site)
+    monkeypatch.setattr(module, "_is_youtube_url", lambda value:
+                        QUrl(value).scheme() == "http" and QUrl(value).authority() == QUrl(local_site).authority())
     receiver = module.YouTubePushReceiver()
     # Local showNotification needs no push transport or external subscription.
     receiver.profile.setPushServiceEnabled(False)
@@ -408,17 +432,31 @@ def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qa
     deadline.timeout.connect(loop.quit)
 
     def presenter(notice):
-        presenter_calls.append(True)
-        receiver._present(notice)
+        presenter_calls.append(notice)
+        if duplicate:
+            notice.show()
+        else:
+            receiver._present(notice)  # Keep the real production callback timing.
 
     receiver.profile.setNotificationPresenter(presenter)
+
+    def notifications_stored(value):
+        if duplicate and value == "synthetic_complete":
+            receiver._present(presenter_calls[0])
+
+    receiver._bridge.received.connect(notifications_stored)
 
     def collect(notice):
         events.append(notice)
         loop.quit()
 
     receiver.notification_received.connect(collect)
-    receiver.status_changed.connect(lambda code, detail: statuses.append((code, detail)))
+    def status_changed(code, detail):
+        statuses.append((code, detail))
+        if code == "error" and duplicate and presenter_calls:
+            loop.quit()
+
+    receiver.status_changed.connect(status_changed)
 
     def loaded(ok):
         if not ok:
@@ -426,7 +464,8 @@ def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qa
             return
         receiver.page.runJavaScript("""
             (async () => {
-                const reg = await navigator.serviceWorker.register('/sw.js');
+                for (const script of SCRIPT_URLS) {
+                const reg = await navigator.serviceWorker.register(script);
                 if (!reg.active) await new Promise(resolve => {
                     const worker = reg.installing || reg.waiting;
                     worker.addEventListener('statechange', () => {
@@ -437,17 +476,23 @@ def test_real_qt_local_service_worker_empty_tag_notification_reaches_receiver(qa
                     tag: '', body: 'Not a real YouTube push',
                     data: {videoId: 'sxyDRUJYFYw', secret: 'must-not-be-logged'}
                 });
+                }
+                const bridge = await window.ytRecReady;
+                bridge.deliver('synthetic_complete');
             })();
-        """)
+        """.replace("SCRIPT_URLS", json.dumps([scope + "sw.js"] + (["/other/sw.js"] if duplicate else []))), module._WORLD)
 
     receiver.page.loadFinished.connect(loaded)
     try:
         receiver.start()
         deadline.start(15000)
         loop.exec()
-        assert presenter_calls == [True], statuses
-        assert len(events) == 1, statuses
-        assert events[0].video_id == VIDEO and events[0].synthetic is False
+        assert len(presenter_calls) == (2 if duplicate else 1), statuses
+        assert len(events) == (0 if duplicate else 1), statuses
+        if duplicate:
+            assert statuses[-1][0] == "error"
+        else:
+            assert events[0].video_id == VIDEO and events[0].synthetic is False
         assert "must-not-be-logged" not in str(statuses)
         assert Path(receiver.profile.persistentStoragePath()) == tmp_path / "synthetic-profile" / "storage"
     finally:

@@ -174,6 +174,18 @@ class MainWindow(QMainWindow):
         notification_buttons.addWidget(self.notification_settings_button)
         notification_buttons.addStretch()
         notification_layout.addLayout(notification_buttons)
+        notification_checks = QHBoxLayout()
+        self.notification_check_button = QPushButton("알림 상태 확인", self.notification_panel)
+        self.notification_check_button.clicked.connect(state.inspect_notification_registration)
+        notification_checks.addWidget(self.notification_check_button)
+        self.system_notification_settings_button = QPushButton("Windows 알림 설정", self.notification_panel)
+        self.system_notification_settings_button.clicked.connect(state.open_system_notification_settings)
+        self.system_notification_settings_button.setToolTip(
+            "Windows의 배너·방해 금지 설정을 엽니다. 앱은 OS 허용 여부를 검사하거나 변경하지 않습니다."
+        )
+        notification_checks.addWidget(self.system_notification_settings_button)
+        notification_checks.addStretch()
+        notification_layout.addLayout(notification_checks)
         central_layout.addWidget(self.notification_panel)
 
         self.scroll_area = QScrollArea(central)
@@ -377,12 +389,22 @@ class MainWindow(QMainWindow):
             kind = "ok"
             detail = ""
         elif self._state.notification.code != "disabled" and watch.stop_reason is None:
-            ready = self._state.notification.code in ("ready", "received")
-            text = f"알림 대기 {watch.channel_count}채널" if ready else "수신 설정 필요"
-            if self._state.notification.code == "error":
-                text = "알림 수신 오류"
-            kind = "neutral" if ready else "warn"
-            detail = "방송 알림이 도착하면 해당 영상만 확인합니다. 아래 수신기 상태를 확인하세요."
+            code = self._state.notification.code
+            if code in ("ready", "received"):
+                text, kind = f"알림 대기 {watch.channel_count}채널", "neutral"
+            else:
+                text, kind = {
+                    "connecting": ("수신기 연결 중", "neutral"),
+                    "checking": ("알림 확인 중", "neutral"),
+                    "stopped": ("알림 수신 종료", "neutral"),
+                    "error": ("알림 수신 오류", "error"),
+                    "login_required": ("수신 로그인 필요", "warn"),
+                    "permission_required": ("알림 권한 필요", "warn"),
+                    "worker_missing": ("수신 등록 없음", "warn"),
+                    "worker_inactive": ("수신기 준비 중", "warn"),
+                    "unsubscribed": ("푸시 등록 없음", "warn"),
+                }.get(code, ("수신 상태 미확인", "warn"))
+            detail = self._state.notification.detail
         else:
             kind = "warn"
             detail = stop_reason_text(watch.stop_reason)
@@ -398,6 +420,8 @@ class MainWindow(QMainWindow):
         self.notification_label.setText(status.detail)
         self.notification_login_button.setEnabled(status.code != "stopped")
         self.notification_settings_button.setEnabled(status.code != "stopped")
+        self.notification_check_button.setEnabled(status.code not in ("stopped", "connecting", "checking"))
+        self.system_notification_settings_button.setEnabled(status.code != "stopped")
         self._refresh_badge(self._state.connection, self._state.watch)
         self._repaint_countdowns()
 
