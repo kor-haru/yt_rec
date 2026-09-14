@@ -84,6 +84,7 @@ class NotificationSession(QObject):
 
             self.receiver = YouTubePushReceiver(self)
             self.receiver.notification_received.connect(self._notification)
+            self.receiver.notification_arrived.connect(self._notification_arrived)
             self.receiver.status_changed.connect(self._status)
             self.receiver.start()
         except Exception as exc:
@@ -100,6 +101,12 @@ class NotificationSession(QObject):
         if self.source.receive_notification(notice, trusted=True):
             self._received = True
             self._status("ready", "")
+
+    def _notification_arrived(self, notice: object) -> None:
+        if not self._stopped:
+            # Persistence is queued separately: a missing video ID still leaves history.
+            if self.source.record_notification_history(notice, trusted=True):
+                self._received = True
 
     def _status(self, code: str, detail: str) -> None:
         if self._stopped and code != "stopped":

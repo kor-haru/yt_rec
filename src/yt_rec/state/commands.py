@@ -51,6 +51,7 @@ __all__ = [
     "OpenNotificationSettings",
     "InspectNotificationRegistration",
     "OpenSystemNotificationSettings",
+    "DeleteNotificationHistory",
     "GuiCommand",
 ]
 
@@ -148,6 +149,13 @@ class InspectNotificationRegistration:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteNotificationHistory:
+    """확인한 알림 이력 한 건만 삭제한다. 녹화 파일과 무관하다."""
+
+    entry_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class OpenSystemNotificationSettings:
     """운영체제의 알림 표시 설정 화면만 연다. 허용 여부를 판정하지 않는다."""
 
@@ -165,5 +173,6 @@ GuiCommand = (
     | OpenNotificationSettings
     | InspectNotificationRegistration
     | OpenSystemNotificationSettings
+    | DeleteNotificationHistory
 )
 """화면이 백엔드에 보낼 수 있는 명령 전체."""

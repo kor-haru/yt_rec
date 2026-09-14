@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from uuid import uuid4
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -14,12 +15,13 @@ from yt_rec.recording.events import ProgressReported
 from yt_rec.logs import LogStore, sanitize_event
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, Severity
+from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, NotificationHistoryEntry, Severity
 from yt_rec.state.store import EventSource, MAX_COMPLETED
 
 from .archive import ArchiveStore, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
 from .notifications import LiveNotification, NotificationRecorder, NotificationResult
+from .notification_history import MAX_HISTORY, NotificationHistoryStore, ReceivedNotification
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
 from .selection import FileSeenStore, FileSelectionStore
@@ -47,6 +49,7 @@ class BackendSource(EventSource):
         poll_interval_ms: int = WATCH_INTERVAL_SECONDS * 1000,
         log_store: LogStore | None = None,
         archive_store: ArchiveStore | None = None,
+        notification_history_store: NotificationHistoryStore | None = None,
     ) -> None:
         super().__init__()
         if controller.event_only and not background:
@@ -62,6 +65,10 @@ class BackendSource(EventSource):
         self._stopping = False
         self.log_store = log_store
         self._archive_store = archive_store
+        self._history_store = notification_history_store
+        self._history: tuple[NotificationHistoryEntry, ...] = ()
+        self._history_error = ""
+        self._history_loaded = False
         self._unsaved_results: dict[str, CompletedRecording] = {}
         self._results_lock = threading.Lock()
         self._notification_capacity = controller._options.max_recordings
@@ -77,6 +84,8 @@ class BackendSource(EventSource):
         def handle() -> None:
             if isinstance(command, cmd.RefreshArchive):
                 self._refresh_archive()
+            elif isinstance(command, cmd.DeleteNotificationHistory):
+                self._delete_notification_history(command.entry_id)
             elif isinstance(command, cmd.OpenRecordingPath):
                 try:
                     open_archive_path(command.path, reveal=command.reveal)
@@ -87,6 +96,58 @@ class BackendSource(EventSource):
                 if self._notifications is not None and isinstance(command, cmd.SetWatchedChannels):
                     self._notifications.resume()
         self._run(handle)
+
+    def record_notification_history(self, notice: ReceivedNotification, *, trusted: bool = False) -> bool:
+        """Native-only metadata input. No API calls; saving cannot reject a video."""
+        if (self._stopping or self._worker is None or self._notifications is None
+                or trusted is not True or not isinstance(notice, ReceivedNotification)
+                or notice.synthetic is not False):
+            return False
+        # Keep accepted arrivals on normal shutdown even when other queued work is discarded.
+        self._queue.put(notice)
+        return True
+
+    def _publish_history(self) -> None:
+        self.publish(ev.NotificationHistoryChanged(self._history, self._history_error))
+
+    def _load_notification_history(self) -> None:
+        if self._history_store is None or self._history_loaded:
+            return
+        self._history_loaded = True
+        try:
+            self._history = self._history_store.load()
+        except (OSError, ValueError, TypeError, RecursionError):
+            self._history_error = "기존 알림 이력을 읽지 못했습니다. 원본 파일을 보존하며 새 알림은 이번 실행에서만 표시합니다."
+            self._warning(self._history_error)
+        self._publish_history()
+
+    def _save_notification_history(self) -> bool:
+        try:
+            if self._history_store is None:
+                raise OSError("알림 이력 저장소 없음")
+            self._history_store.save(self._history)
+        except (OSError, ValueError, TypeError):
+            self._history_error = "알림 이력을 저장하지 못했습니다. 기존 파일은 보존됩니다. 새 알림은 이번 실행에서만 표시될 수 있으며 녹화 처리는 계속됩니다."
+            self._warning(self._history_error)
+            return False
+        self._history_error = ""
+        return True
+
+    def _record_notification_history(self, notice: ReceivedNotification) -> None:
+        self._load_notification_history()
+        entry = NotificationHistoryEntry(uuid4().hex, notice.received_at, notice.title, notice.body)
+        self._history = tuple(sorted((entry, *self._history), key=lambda item: item.received_at, reverse=True))[:MAX_HISTORY]
+        self._save_notification_history()
+        self._publish_history()
+
+    def _delete_notification_history(self, entry_id: str) -> None:
+        previous = self._history
+        self._history = tuple(item for item in previous if item.entry_id != entry_id)
+        if self._history == previous:
+            return
+        if not self._save_notification_history():
+            self._history = previous
+        self._publish_history()
 
     def receive_notification(self, notice: LiveNotification, *, trusted: bool = False) -> bool:
         """Queue one verified adapter input; True means accepted, not recorded.
@@ -216,6 +277,7 @@ class BackendSource(EventSource):
                 target=self._worker_loop, name="yt-rec-backend", daemon=False
             )
             self._worker.start()
+        self._run(self._load_notification_history)
         self._run(self._controller.start)
         if self._poll_interval_ms > 0 and not self._controller.event_only:
             timer = QTimer(self)
@@ -237,11 +299,16 @@ class BackendSource(EventSource):
             if shutdown is not None:
                 shutdown()
         if self._background:
+            arrivals = []
             while True:
                 try:
-                    self._queue.get_nowait()
+                    queued = self._queue.get_nowait()
+                    if isinstance(queued, ReceivedNotification):
+                        arrivals.append(queued)
                 except queue.Empty:
                     break
+            for arrival in arrivals:
+                self._queue.put(arrival)
             self._queue.put(_SENTINEL)
 
     def stop(self) -> None:
@@ -304,7 +371,7 @@ class BackendSource(EventSource):
             item = self._queue.get()
             if item is _SENTINEL:
                 return
-            fn = item
+            fn = (lambda: self._record_notification_history(item)) if isinstance(item, ReceivedNotification) else item
             assert callable(fn)
             try:
                 fn()
@@ -386,6 +453,7 @@ def create_backend_source(
         background=background,
         # 짧은 타이머는 일정을 확인할 뿐 API는 controller가 실제 간격대로 호출한다.
         poll_interval_ms=1000 if effective_interval > 0 else 0,
+        notification_history_store=NotificationHistoryStore(default_settings_path().with_name("notification-history.json")),
     )
     try:
         source._archive_store = ArchiveStore()

@@ -48,6 +48,7 @@ __all__ = [
     "Subscription",
     "AppSnapshot",
     "NotificationStatus",
+    "NotificationHistoryEntry",
 ]
 
 
@@ -262,6 +263,16 @@ class Subscription:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationHistoryEntry:
+    """앱이 받은 알림의 표시 내용만 보관한다. 녹화 결과가 아니다."""
+
+    entry_id: str
+    received_at: datetime
+    title: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
 class NotificationStatus:
     """수신기 준비 상태. ready는 실제 알림 도착이나 전체 방송 수신 보장이 아니다."""
 
@@ -291,3 +302,5 @@ class AppSnapshot:
     archive: tuple[CompletedRecording, ...] = ()
     """백엔드에서 복원한 전체 보관함. completed는 대시보드 최근 200건이다."""
     notification: NotificationStatus = field(default_factory=NotificationStatus)
+    notification_history: tuple[NotificationHistoryEntry, ...] = ()
+    notification_history_error: str = ""

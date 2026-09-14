@@ -73,6 +73,7 @@ from .models import (
     ConnectionState,
     LogEntry,
     NotificationStatus,
+    NotificationHistoryEntry,
     QuotaStatus,
     Recording,
     Severity,
@@ -164,6 +165,8 @@ class AppState(QObject):
     notification_changed = Signal(object)
     """payload: NotificationStatus — 앱 전용 YouTube 알림 수신기 상태"""
 
+    notification_history_changed = Signal(object)
+
     archive_changed = Signal(object)
     """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
 
@@ -215,6 +218,8 @@ class AppState(QObject):
         self._subscriptions: tuple[Subscription, ...] = ()
         self._settings: RecordingOptions | None = None
         self._notification = NotificationStatus()
+        self._notification_history: tuple[NotificationHistoryEntry, ...] = ()
+        self._notification_history_error = ""
 
         self._dirty: set[str] = set()
         self._sources: list[EventSource] = []
@@ -320,6 +325,16 @@ class AppState(QObject):
         self._require_gui_thread("notification")
         return self._notification
 
+    @property
+    def notification_history(self) -> tuple[NotificationHistoryEntry, ...]:
+        self._require_gui_thread("notification_history")
+        return self._notification_history
+
+    @property
+    def notification_history_error(self) -> str:
+        self._require_gui_thread("notification_history_error")
+        return self._notification_history_error
+
     def snapshot(self) -> AppSnapshot:
         """현재 상태 전체를 한 덩어리로 돌려준다. GUI 스레드 전용."""
         self._require_gui_thread("snapshot()")
@@ -342,6 +357,8 @@ class AppState(QObject):
             account=self._account,
             subscriptions=self._subscriptions,
             notification=self._notification,
+            notification_history=self._notification_history,
+            notification_history_error=self._notification_history_error,
         )
 
     # ------------------------------------------------------------------
@@ -489,6 +506,7 @@ class AppState(QObject):
                 cmd.RefreshArchive, cmd.OpenRecordingPath,
                 cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
                 cmd.InspectNotificationRegistration, cmd.OpenSystemNotificationSettings,
+                cmd.DeleteNotificationHistory,
             )) and bool(self._sources)
         )
         if not connected and not usable_while_attached:
@@ -551,6 +569,9 @@ class AppState(QObject):
 
     def open_system_notification_settings(self) -> bool:
         return self.send_command(cmd.OpenSystemNotificationSettings())
+
+    def delete_notification_history(self, entry_id: str) -> bool:
+        return self.send_command(cmd.DeleteNotificationHistory(entry_id))
 
     # ------------------------------------------------------------------
     # 개별 이벤트 처리
@@ -672,6 +693,11 @@ class AppState(QObject):
         self._notification = event.status
         self._dirty.add("notification")
 
+    def _on_notification_history(self, event: ev.NotificationHistoryChanged) -> None:
+        self._notification_history = event.entries
+        self._notification_history_error = event.error
+        self._dirty.add("notification_history")
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -687,6 +713,7 @@ class AppState(QObject):
         ev.SettingsChanged: _on_settings,
         ev.SettingsSaveFailed: _on_settings_failed,
         ev.NotificationStatusChanged: _on_notification,
+        ev.NotificationHistoryChanged: _on_notification_history,
     }
 
     # ------------------------------------------------------------------
@@ -736,5 +763,7 @@ class AppState(QObject):
             self.settings_changed.emit(self._settings)
         if "notification" in dirty:
             self.notification_changed.emit(self._notification)
+        if "notification_history" in dirty:
+            self.notification_history_changed.emit(self._notification_history)
 
         self.snapshot_changed.emit(self._snapshot())
