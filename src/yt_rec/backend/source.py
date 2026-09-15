@@ -88,6 +88,8 @@ class BackendSource(EventSource):
                 self._delete_notification_history(command.entry_id)
             elif isinstance(command, cmd.DismissArchive):
                 self._dismiss_archive(command)
+            elif isinstance(command, cmd.DeleteArchiveFile):
+                self._delete_archive_file(command)
             elif isinstance(command, cmd.OpenRecordingPath):
                 try:
                     open_archive_path(command.path, reveal=command.reveal)
@@ -274,6 +276,8 @@ class BackendSource(EventSource):
     def _refresh_archive(self) -> None:
         try:
             self.publish(ev.CompletedChanged(self._archive_items()))
+            if self._archive_store is not None and self._archive_store.dismiss_error:
+                self._warning(self._archive_store.dismiss_error)
         except (OSError, ValueError) as exc:
             self._warning(f"보관함을 불러오지 못했습니다: {exc}")
 
@@ -293,6 +297,25 @@ class BackendSource(EventSource):
             self.publish(ev.ArchiveDismissFinished(removed_count=len(selected)))
         except (OSError, ValueError) as exc:
             self.publish(ev.ArchiveDismissFinished(error=f"이력을 제거하지 못했습니다: {exc}"))
+
+    def _delete_archive_file(self, command: cmd.DeleteArchiveFile) -> None:
+        trashed = False
+        try:
+            if self._archive_store is None:
+                raise ValueError("저장된 보관함을 사용할 수 없습니다. 로그를 확인하세요.")
+            if self._controller._recorder.is_recording(command.recording.recording_id):
+                raise ValueError("진행 중이거나 병합 중인 녹화는 삭제할 수 없습니다")
+            self._archive_store.trash(command.recording)
+            trashed = True
+            self._archive_store.dismiss((command.recording,))
+        except (OSError, ValueError) as exc:
+            message = (f"파일은 휴지통으로 이동했지만 이력 저장에 실패했습니다. '이력에서 제거'로 다시 시도하세요: {exc}"
+                       if trashed else f"파일을 삭제하지 못했습니다: {exc}")
+            result = ev.ArchiveDeleteFinished(file_trashed=trashed, error=message)
+        else:
+            result = ev.ArchiveDeleteFinished(file_trashed=True, history_removed=True)
+        self._refresh_archive()
+        self.publish(result)
 
     def start(self) -> None:
         if self._background and self._worker is None:

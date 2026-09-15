@@ -39,7 +39,7 @@ def save_record(root: Path, video_id: str, **changes: object) -> Path:
     ("disconnected", False), ("directory", False),
 ])
 def test_bulk_cleanup_requires_missing_file_and_readable_parent(tmp_path, monkeypatch, condition, confirmed):
-    output = tmp_path / "unmounted" / "video.mp4" if condition == "disconnected" else tmp_path / "video.mp4"
+    output = tmp_path.parent / "unmounted-issue45" / "video.mp4" if condition == "disconnected" else tmp_path / "video.mp4"
     save_record(tmp_path, "vid", output_path=str(output))
     if condition == "permission":
         original_stat = Path.stat
@@ -109,11 +109,68 @@ def test_dismiss_write_failure_preserves_previous_exclusions_and_memory(tmp_path
 @pytest.mark.parametrize("contents", ["broken", "{}", '[["only-id"]]', '[["id", null, "date"]]'])
 def test_corrupt_dismiss_list_is_not_silently_overwritten(tmp_path, contents):
     path = tmp_path / "roots.json"
+    save_record(tmp_path, "vid")
+    backend.ArchiveStore(path).remember(tmp_path)
     dismissed = path.with_suffix(".dismissed.json")
     dismissed.write_text(contents, encoding="utf-8")
-    with pytest.raises(ValueError):
-        backend.ArchiveStore(path)
+    store = backend.ArchiveStore(path)
+    assert len(store.load()) == 1
+    assert store.dismiss_error
+    with pytest.raises(ValueError, match="제외목록"):
+        store.dismiss(store.load())
     assert dismissed.read_text(encoding="utf-8") == contents
+
+
+def test_missing_parent_within_connected_output_is_confirmed(tmp_path):
+    output = tmp_path / "output"
+    old = output / "moved" / "video.mp4"
+    save_record(output, "vid", output_path=str(old))
+    old.parent.mkdir()
+    old.write_bytes(b"moved media")
+    old.parent.rename(tmp_path / "relocated")
+    item, = backend.load_archive(output)
+    assert item.file_missing
+    assert (tmp_path / "relocated" / "video.mp4").read_bytes() == b"moved media"
+    custom = tmp_path / "work"
+    (output / ".yt-rec").rename(custom)
+    output.rmdir()
+    item, = backend.load_archive(output, work_root=custom)
+    assert not item.file_missing
+
+
+def test_dismiss_fsync_failure_preserves_disk_and_memory(tmp_path, monkeypatch):
+    save_record(tmp_path, "vid")
+    store = backend.ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    before = store.load()
+    def fail(_fd):
+        raise OSError("fsync failed")
+    monkeypatch.setattr(backend.os, "fsync", fail)
+    with pytest.raises(OSError, match="fsync failed"):
+        store.dismiss(before)
+    assert store.load() == before
+    assert backend.ArchiveStore(store.path).load() == before
+    assert not store.dismissed_path.exists()
+
+
+def test_archive_writes_flush_and_fsync_before_replace(tmp_path, monkeypatch):
+    save_record(tmp_path, "vid")
+    store = backend.ArchiveStore(tmp_path / "roots.json")
+    calls = []
+    fsync, replace = backend.os.fsync, backend.os.replace
+    def synced(fd):
+        fsync(fd)
+        calls.append("fsync")
+    def replaced(source, target):
+        assert calls[-1] == "fsync"
+        assert json.loads(source.read_text(encoding="utf-8"))
+        replace(source, target)
+        calls.append("replace")
+    monkeypatch.setattr(backend.os, "fsync", synced)
+    monkeypatch.setattr(backend.os, "replace", replaced)
+    store.remember(tmp_path)
+    store.dismiss(store.load())
+    assert calls == ["fsync", "replace", "fsync", "replace"]
 
 
 def test_archive_cleanup_confirmation_cancellation_and_persisted_result(state, monkeypatch):

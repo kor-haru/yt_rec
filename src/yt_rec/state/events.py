@@ -55,6 +55,7 @@ __all__ = [
     "RecordingFinished",
     "CompletedChanged",
     "ArchiveDismissFinished",
+    "ArchiveDeleteFinished",
     "LogAppended",
     "QuotaChanged",
     "AccountChanged",
@@ -147,6 +148,13 @@ class ArchiveDismissFinished:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveDeleteFinished:
+    file_trashed: bool = False
+    history_removed: bool = False
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class LogAppended:
     """로그 한 줄이 쌓였다. ``ERROR`` 수준이면 오류 카운터가 함께 올라간다."""
 
@@ -206,6 +214,7 @@ BackendEvent = (
     | RecordingFinished
     | CompletedChanged
     | ArchiveDismissFinished
+    | ArchiveDeleteFinished
     | LogAppended
     | QuotaChanged
     | AccountChanged

@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime, timezone
 
 from backend_fakes import FakeAuth, FakeRecorder, FakeYouTube
+from PySide6.QtCore import QTimer
+from yt_rec.backend import archive as archive_backend
 from yt_rec.backend.archive import ArchiveStore
 from yt_rec.backend.controller import WatchController
 from yt_rec.backend.selection import MemorySeenStore, MemorySelectionStore
@@ -37,6 +40,52 @@ def test_loaded_diagnostic_notes_and_save_errors_are_redacted():
     error = sanitize_event(ev.SettingsSaveFailed("token=private"))
     assert error.message == "token=[REDACTED]"
     assert sanitize_event(ev.ArchiveDismissFinished(error="token=private")).error == "token=[REDACTED]"
+
+
+def test_archive_delete_uses_worker_queue_while_gui_responds(state, tmp_path, qapp, monkeypatch):
+    save_record(tmp_path, "vid")
+    media = tmp_path / "vid.mp4"
+    media.write_bytes(b"temporary media")
+    store = ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    selected, = store.load()
+    source = BackendSource(controller(RecordingOptions(output_dir=tmp_path), lambda _: None),
+                           background=True, poll_interval_ms=0, archive_store=store)
+    entered, release = threading.Event(), threading.Event()
+    worker_ids = []
+    def move():
+        worker_ids.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        media.rename(tmp_path / "test-trash.mp4")
+        return True
+    monkeypatch.setattr(archive_backend, "QFile", lambda path: SimpleNamespace(
+        moveToTrash=move, errorString=lambda: "fake error"))
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    results = []
+    state.archive_delete_finished.connect(results.append)
+    source.start()
+    try:
+        assert state.delete_archive_file(selected)
+        assert entered.wait(2)
+        ticks = []
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        qapp.processEvents()
+        assert ticks and media.exists() and not results
+        assert worker_ids == [source._worker.ident]
+        assert worker_ids[0] != threading.get_ident()
+        release.set()
+        deadline = time.monotonic() + 3
+        while not results and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert results == [ev.ArchiveDeleteFinished(True, True)]
+        assert not state.archive and not state.completed
+    finally:
+        release.set()
+        source.stop()
+        state.detach(source)
 
 
 def test_archive_dismiss_rechecks_missing_active_and_unfinished_records(state, tmp_path):

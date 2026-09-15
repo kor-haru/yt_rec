@@ -212,6 +212,8 @@ class CompletedRecording:
     note: str = ""
     file_missing: bool = False
     """파일 없음과 부모 폴더 접근을 모두 확인했을 때만 참. 접근 오류는 제외."""
+    deletion_token: tuple[str, ...] = ()
+    """백엔드가 조회한 원본 상태 해시와 파일 식별값. 삭제 직전에 다시 대조한다."""
 
 
 @dataclass(frozen=True, slots=True)

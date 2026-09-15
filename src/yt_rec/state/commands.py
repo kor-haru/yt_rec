@@ -49,6 +49,7 @@ __all__ = [
     "RefreshSubscriptions",
     "RefreshArchive",
     "DismissArchive",
+    "DeleteArchiveFile",
     "OpenRecordingPath",
     "OpenNotificationBrowser",
     "OpenNotificationSettings",
@@ -145,6 +146,11 @@ class DismissArchive:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteArchiveFile:
+    recording: CompletedRecording
+
+
+@dataclass(frozen=True, slots=True)
 class OpenNotificationBrowser:
     """앱 전용 YouTube 브라우저를 열어 로그인한다. API 계정 연결과 별개다."""
 
@@ -180,6 +186,7 @@ GuiCommand = (
     | RefreshSubscriptions
     | RefreshArchive
     | DismissArchive
+    | DeleteArchiveFile
     | OpenRecordingPath
     | OpenNotificationBrowser
     | OpenNotificationSettings
