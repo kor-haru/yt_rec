@@ -38,6 +38,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .models import CompletedRecording
+
 __all__ = [
     "StopRecording",
     "SetWatchedChannels",
@@ -46,6 +48,8 @@ __all__ = [
     "DisconnectAccount",
     "RefreshSubscriptions",
     "RefreshArchive",
+    "DismissArchive",
+    "DeleteArchiveFile",
     "OpenRecordingPath",
     "OpenNotificationBrowser",
     "OpenNotificationSettings",
@@ -134,6 +138,19 @@ class OpenRecordingPath:
 
 
 @dataclass(frozen=True, slots=True)
+class DismissArchive:
+    """확인한 항목을 보관함에서만 제외해 달라. 실제 파일은 건드리지 않는다."""
+
+    recordings: tuple[CompletedRecording, ...] = ()
+    missing_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteArchiveFile:
+    recording: CompletedRecording
+
+
+@dataclass(frozen=True, slots=True)
 class OpenNotificationBrowser:
     """앱 전용 YouTube 브라우저를 열어 로그인한다. API 계정 연결과 별개다."""
 
@@ -168,6 +185,8 @@ GuiCommand = (
     | DisconnectAccount
     | RefreshSubscriptions
     | RefreshArchive
+    | DismissArchive
+    | DeleteArchiveFile
     | OpenRecordingPath
     | OpenNotificationBrowser
     | OpenNotificationSettings

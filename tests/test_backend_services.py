@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 from datetime import datetime, timezone
 
 from backend_fakes import FakeAuth, FakeRecorder, FakeYouTube
+from PySide6.QtCore import QTimer
+from yt_rec.backend import archive as archive_backend
 from yt_rec.backend.archive import ArchiveStore
 from yt_rec.backend.controller import WatchController
 from yt_rec.backend.selection import MemorySeenStore, MemorySelectionStore
@@ -16,6 +19,8 @@ from yt_rec.recording.options import RecordingOptions, load_settings, save_setti
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
 from yt_rec.state.models import CompletedRecording, CompletionStatus, LogEntry, Severity, WatchedChannel
+
+from test_archive import save_record
 
 
 def controller(options, emit):
@@ -34,6 +39,135 @@ def test_loaded_diagnostic_notes_and_save_errors_are_redacted():
     assert archive.completed[0].note == "refresh_token=[REDACTED]"
     error = sanitize_event(ev.SettingsSaveFailed("token=private"))
     assert error.message == "token=[REDACTED]"
+    assert sanitize_event(ev.ArchiveDismissFinished(error="token=private")).error == "token=[REDACTED]"
+
+
+def test_archive_delete_uses_worker_queue_while_gui_responds(state, tmp_path, qapp, monkeypatch):
+    save_record(tmp_path, "vid")
+    media = tmp_path / "vid.mp4"
+    media.write_bytes(b"temporary media")
+    store = ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    selected, = store.load()
+    source = BackendSource(controller(RecordingOptions(output_dir=tmp_path), lambda _: None),
+                           background=True, poll_interval_ms=0, archive_store=store)
+    entered, release = threading.Event(), threading.Event()
+    worker_ids = []
+    def move():
+        worker_ids.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        media.rename(tmp_path / "test-trash.mp4")
+        return True
+    monkeypatch.setattr(archive_backend, "QFile", lambda path: SimpleNamespace(
+        moveToTrash=move, errorString=lambda: "fake error"))
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    results = []
+    state.archive_delete_finished.connect(results.append)
+    source.start()
+    try:
+        assert state.delete_archive_file(selected)
+        assert entered.wait(2)
+        ticks = []
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        qapp.processEvents()
+        assert ticks and media.exists() and not results
+        assert worker_ids == [source._worker.ident]
+        assert worker_ids[0] != threading.get_ident()
+        release.set()
+        deadline = time.monotonic() + 3
+        while not results and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+        assert results == [ev.ArchiveDeleteFinished(True, True)]
+        assert not state.archive and not state.completed
+    finally:
+        release.set()
+        source.stop()
+        state.detach(source)
+
+
+def test_archive_dismiss_rechecks_missing_active_and_unfinished_records(state, tmp_path):
+    paths = [save_record(tmp_path, name) for name in ("missing", "restored", "active", "unfinished")]
+    store = ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    control = controller(RecordingOptions(output_dir=tmp_path), lambda _: None)
+    source = BackendSource(control, poll_interval_ms=0, archive_store=store)
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    source.handle_command(cmd.RefreshArchive())
+    confirmed = state.archive
+    assert len(confirmed) == 4 and all(item.file_missing for item in confirmed)
+    (tmp_path / "restored.mp4").write_bytes(b"restored after confirmation")
+    control._recorder.recording.add("active")
+    save_record(tmp_path, "unfinished", status="recording")
+    protected = {path: path.read_bytes() for path in paths}
+    results = []
+    state.archive_dismiss_finished.connect(results.append)
+    assert state.dismiss_archive(confirmed, missing_only=True)
+    assert results[-1] == ev.ArchiveDismissFinished(removed_count=1)
+    assert {item.recording_id for item in state.archive} == {"active", "restored"}
+    assert all(path.read_bytes() == before for path, before in protected.items())
+    assert (tmp_path / "restored.mp4").read_bytes() == b"restored after confirmation"
+    source.handle_command(cmd.RefreshArchive())
+    assert {item.recording_id for item in state.archive} == {"active", "restored"}
+    assert {item.recording_id for item in ArchiveStore(store.path).load()} == {"active", "restored"}
+
+
+def test_archive_dismiss_does_not_hide_new_generation_or_active_manual_selection(state, tmp_path):
+    save_record(tmp_path, "vid")
+    store = ArchiveStore(tmp_path / "roots.json")
+    store.remember(tmp_path)
+    control = controller(RecordingOptions(output_dir=tmp_path), lambda _: None)
+    source = BackendSource(control, poll_interval_ms=0, archive_store=store)
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    state.refresh_archive()
+    old = state.archive
+    save_record(tmp_path, "vid", finished_at=3000)
+    state.dismiss_archive(old)
+    assert len(state.archive) == 1
+    control._recorder.recording.add("vid")
+    state.dismiss_archive(state.archive)
+    assert len(state.archive) == 1
+    assert not store.dismissed_path.exists()
+
+
+def test_archive_dismiss_failure_does_not_change_ui_and_session_failure_stays_hidden(state, tmp_path, monkeypatch):
+    store = ArchiveStore(tmp_path / "roots.json")
+    source = BackendSource(controller(RecordingOptions(output_dir=tmp_path), lambda _: None),
+                           poll_interval_ms=0, archive_store=store)
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    failure = CompletedRecording(recording_id="vid", title="startup failed",
+                                 status=CompletionStatus.FAILED, finished_at=datetime.now(timezone.utc))
+    source.publish(ev.RecordingFinished(failure))
+    results = []
+    state.archive_dismiss_finished.connect(results.append)
+    with monkeypatch.context() as patch:
+        def cannot_save(_items):
+            raise PermissionError("token=private")
+        patch.setattr(store, "dismiss", cannot_save)
+        state.dismiss_archive(state.archive)
+    assert results[-1].removed_count == 0 and "[REDACTED]" in results[-1].error
+    assert state.archive == (failure,)
+    state.dismiss_archive(state.archive)
+    assert results[-1] == ev.ArchiveDismissFinished(removed_count=1)
+    assert not state.archive
+    state.refresh_archive()
+    assert not state.archive
+
+
+def test_archive_dismiss_without_persistent_store_reports_failure(state, tmp_path):
+    source = BackendSource(controller(RecordingOptions(output_dir=tmp_path), lambda _: None), poll_interval_ms=0)
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    results = []
+    state.archive_dismiss_finished.connect(results.append)
+    state.dismiss_archive(())
+    assert results[-1].error
+    assert results[-1].removed_count == 0
 
 
 def test_channel_error_does_not_expose_authorization_in_state(state):

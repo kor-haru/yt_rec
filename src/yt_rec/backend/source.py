@@ -18,7 +18,7 @@ from yt_rec.state import events as ev
 from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, NotificationHistoryEntry, Severity
 from yt_rec.state.store import EventSource, MAX_COMPLETED
 
-from .archive import ArchiveStore, load_archive, open_archive_path
+from .archive import ArchiveStore, archive_key, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
 from .notifications import LiveNotification, NotificationRecorder, NotificationResult
 from .notification_history import MAX_HISTORY, NotificationHistoryStore, ReceivedNotification
@@ -86,6 +86,10 @@ class BackendSource(EventSource):
                 self._refresh_archive()
             elif isinstance(command, cmd.DeleteNotificationHistory):
                 self._delete_notification_history(command.entry_id)
+            elif isinstance(command, cmd.DismissArchive):
+                self._dismiss_archive(command)
+            elif isinstance(command, cmd.DeleteArchiveFile):
+                self._delete_archive_file(command)
             elif isinstance(command, cmd.OpenRecordingPath):
                 try:
                     open_archive_path(command.path, reveal=command.reveal)
@@ -250,26 +254,68 @@ class BackendSource(EventSource):
         else:
             self.event_ready.emit(sanitize_event(event))
 
+    def _archive_items(self) -> tuple[CompletedRecording, ...]:
+        if self._archive_store is not None:
+            recordings = self._archive_store.load()
+        else:
+            options = self._controller._options
+            recordings = load_archive(options.output_dir, work_root=options.work_root)
+        # 준비 실패는 기존 state.json을 보호하려고 디스크에 쓰지 않는다.
+        # 디스크 원본을 바꾸지 않고 이 세션의 최근 실패만 함께 보여 준다.
+        items = {(item.recording_id, item.output_path): item for item in recordings}
+        with self._results_lock:
+            failures = tuple(self._unsaved_results.values())
+        stamp = lambda item: item.finished_at.timestamp() if item.finished_at else 0
+        for item in failures:
+            key = (item.recording_id, item.output_path)
+            if key not in items or stamp(item) >= stamp(items[key]):
+                items[key] = item
+        result = tuple(sorted(items.values(), key=stamp, reverse=True))
+        return self._archive_store.visible(result) if self._archive_store is not None else result
+
     def _refresh_archive(self) -> None:
         try:
-            if self._archive_store is not None:
-                recordings = self._archive_store.load()
-            else:
-                options = self._controller._options
-                recordings = load_archive(options.output_dir, work_root=options.work_root)
-            # 준비 실패는 기존 state.json을 보호하려고 디스크에 쓰지 않는다.
-            # 디스크 원본을 바꾸지 않고 이 세션의 최근 실패만 함께 보여 준다.
-            items = {(item.recording_id, item.output_path): item for item in recordings}
-            with self._results_lock:
-                failures = tuple(self._unsaved_results.values())
-            stamp = lambda item: item.finished_at.timestamp() if item.finished_at else 0
-            for item in failures:
-                key = (item.recording_id, item.output_path)
-                if key not in items or stamp(item) >= stamp(items[key]):
-                    items[key] = item
-            self.publish(ev.CompletedChanged(tuple(sorted(items.values(), key=stamp, reverse=True))))
+            self.publish(ev.CompletedChanged(self._archive_items()))
+            if self._archive_store is not None and self._archive_store.dismiss_error:
+                self._warning(self._archive_store.dismiss_error)
         except (OSError, ValueError) as exc:
             self._warning(f"보관함을 불러오지 못했습니다: {exc}")
+
+    def _dismiss_archive(self, command: cmd.DismissArchive) -> None:
+        try:
+            if self._archive_store is None:
+                raise ValueError("보관함 제외목록을 사용할 수 없습니다. 로그를 확인하세요.")
+            items = self._archive_items()
+            requested = {archive_key(item) for item in command.recordings}
+            # 확인창을 띄운 뒤 파일이 복원되거나 같은 영상의 재녹화가 시작될 수 있다.
+            selected = tuple(item for item in items
+                             if archive_key(item) in requested
+                             and not self._controller._recorder.is_recording(item.recording_id)
+                             and (not command.missing_only or item.file_missing))
+            self._archive_store.dismiss(selected)
+            self.publish(ev.CompletedChanged(self._archive_store.visible(items)))
+            self.publish(ev.ArchiveDismissFinished(removed_count=len(selected)))
+        except (OSError, ValueError) as exc:
+            self.publish(ev.ArchiveDismissFinished(error=f"이력을 제거하지 못했습니다: {exc}"))
+
+    def _delete_archive_file(self, command: cmd.DeleteArchiveFile) -> None:
+        trashed = False
+        try:
+            if self._archive_store is None:
+                raise ValueError("저장된 보관함을 사용할 수 없습니다. 로그를 확인하세요.")
+            if self._controller._recorder.is_recording(command.recording.recording_id):
+                raise ValueError("진행 중이거나 병합 중인 녹화는 삭제할 수 없습니다")
+            self._archive_store.trash(command.recording)
+            trashed = True
+            self._archive_store.dismiss((command.recording,))
+        except (OSError, ValueError) as exc:
+            message = (f"파일은 휴지통으로 이동했지만 이력 저장에 실패했습니다. '이력에서 제거'로 다시 시도하세요: {exc}"
+                       if trashed else f"파일을 삭제하지 못했습니다: {exc}")
+            result = ev.ArchiveDeleteFinished(file_trashed=trashed, error=message)
+        else:
+            result = ev.ArchiveDeleteFinished(file_trashed=True, history_removed=True)
+        self._refresh_archive()
+        self.publish(result)
 
     def start(self) -> None:
         if self._background and self._worker is None:
