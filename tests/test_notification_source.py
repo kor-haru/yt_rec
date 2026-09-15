@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread
 from backend_fakes import FakeAuth, FakeYouTube
 from yt_rec.backend import source as production
 from yt_rec.backend.archive import ArchiveStore
-from yt_rec.backend.notifications import LiveNotification
+from yt_rec.backend.notifications import LiveNotification, YouTubeSignal
 from yt_rec.backend.recorder import EngineRecorder
 from yt_rec.backend.selection import FileSeenStore, FileSelectionStore
 from yt_rec.backend.tokens import MemoryTokenStore
@@ -70,6 +70,7 @@ def production_backend(tmp_path, monkeypatch, qapp):
             self.network_threads = []
             self.lives_by_id = {v: LiveBroadcast(v, "UC1", "test only") for v in (VIDEO, OTHER, THIRD)}
             self.block = None
+            self.block_scan = False
             self.entered = threading.Event()
             self.release = threading.Event()
 
@@ -91,6 +92,14 @@ def production_backend(tmp_path, monkeypatch, qapp):
                 self.entered.set()
                 assert self.release.wait(5)
             return self.lives_by_id.get(video_id)
+
+        def find_lives(self, channel_ids):
+            self._network()
+            lives = super().find_lives(channel_ids)
+            if self.block_scan:
+                self.entered.set()
+                assert self.release.wait(5)
+            return lives
 
     class Engine:
         def __init__(self, options, on_event=None):
@@ -172,6 +181,11 @@ def wired(production_backend, qapp):
 def notice(video_id=VIDEO):
     # Explicit test double for a future authenticated adapter, not delivery proof.
     return LiveNotification(video_id, time.time(), synthetic=False)
+
+
+def signal(at=10.0):
+    # Contract double only; not proof of authenticated upstream push delivery.
+    return YouTubeSignal(at, synthetic=False)
 
 
 def diagnostic(events, status):
@@ -422,3 +436,265 @@ def test_slow_notification_lookup_does_not_block_active_engine_progress_or_compl
         api.release.set()
     until(qapp, lambda: OTHER in engines)
     assert api.get_calls == [VIDEO, OTHER]
+
+
+def test_signal_boundary_rejects_synthetic_untrusted_wrong_types_and_non_event_mode(wired, qapp):
+    source, api, engines, _, _, _ = wired
+    assert not source.receive_signal(YouTubeSignal(10), trusted=True)
+    assert not source.receive_signal(YouTubeSignal(10, synthetic=0), trusted=True)
+    assert not source.receive_signal(signal())
+    assert not source.receive_signal(signal(), trusted=1)
+    assert not source.receive_signal({"received_at": 10, "synthetic": False}, trusted=True)
+    assert not source.receive_signal(notice(), trusted=True)
+    source._controller.event_only = False
+    try:
+        assert not source.receive_signal(signal(), trusted=True)
+    finally:
+        source._controller.event_only = True
+    flush(source, qapp)
+    assert api.find_calls == api.get_calls == [] and not engines
+
+
+def test_signal_requires_a_running_backend_worker(production_backend, qapp):
+    source, api, engines, _, _, _ = production_backend()
+    assert not source.receive_signal(signal(), trusted=True)
+    source._worker = threading.Thread(target=lambda: None)
+    source._worker.start()
+    source._worker.join()
+    assert not source.receive_signal(signal(), trusted=True)
+    assert api.find_calls == api.get_calls == [] and not engines
+
+
+def test_one_signal_scans_once_then_existing_recorder_checks_live_and_deduplicates(wired, qapp):
+    source, api, engines, _, seen, events = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    assert source.receive_signal(signal(), trusted=True)
+    until(qapp, lambda: VIDEO in engines)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)] and api.get_calls == [VIDEO]
+    assert "수신=10.0" in diagnostic(events, "handed")[0].message
+    source.receive_signal(signal(20), trusted=True)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)] * 2 and api.get_calls == [VIDEO]
+    assert len(diagnostic(events, "handed")) == 1
+    engines[VIDEO].actions.put(("finish", True))
+    until(qapp, lambda: seen.is_done(VIDEO))
+    source.receive_signal(signal(30), trusted=True)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)] * 3 and api.get_calls == [VIDEO]
+    assert len(diagnostic(events, "handed")) == 1
+    assert source._poll_timer is None
+    assert all(thread is not qapp.thread() for thread in api.network_threads)
+
+
+@pytest.mark.parametrize("state", ["empty_selection", "unselected", "upcoming", "ended", "already_recording"])
+def test_signal_preserves_selection_live_and_in_progress_guards(wired, qapp, monkeypatch, state):
+    source, api, engines, selected, _, _ = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    if state == "empty_selection":
+        selected.save([])
+    elif state == "unselected":
+        # Even a malformed discovery response cannot send another channel to recording.
+        monkeypatch.setattr(api, "find_lives", lambda ids: [LiveBroadcast(VIDEO, "UC2", "other")])
+    elif state in ("upcoming", "ended"):
+        api.lives_by_id[VIDEO] = None  # get_live rejects either state; covered at the API boundary too.
+    else:
+        monkeypatch.setattr(source._controller._recorder, "is_recording", lambda _: True)
+    source.receive_signal(signal(), trusted=True)
+    flush(source, qapp)
+    assert not engines
+    assert len(api.get_calls) == (1 if state in ("upcoming", "ended") else 0)
+    if state == "empty_selection":
+        assert api.find_calls == []
+
+
+def test_signal_scan_uses_existing_slot_queue_and_explicit_release(wired, qapp):
+    source, api, engines, _, _, _ = wired
+    api.lives = [api.lives_by_id[VIDEO], api.lives_by_id[OTHER]]
+    source.receive_signal(signal(), trusted=True)
+    until(qapp, lambda: VIDEO in engines and source._notifications.pending_video_ids == (OTHER,))
+    assert api.find_calls == [("UC1",)] and api.get_calls == [VIDEO, OTHER]
+    source.receive_signal(signal(20), trusted=True)
+    flush(source, qapp)
+    assert api.get_calls == [VIDEO, OTHER]
+    engines[VIDEO].actions.put(("finish", True))
+    until(qapp, lambda: OTHER in engines)
+    assert api.find_calls == [("UC1",)] * 2
+    assert api.get_calls == [VIDEO, OTHER, OTHER]
+
+
+def test_signal_burst_while_queued_coalesces_to_one_scan(wired, qapp):
+    source, api, engines, _, _, events = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    entered, release = threading.Event(), threading.Event()
+
+    def block_worker():
+        entered.set()
+        assert release.wait(5)
+
+    source._run(block_worker)
+    try:
+        assert entered.wait(5)
+        for at in range(100):
+            assert source.receive_signal(signal(at), trusted=True)
+        assert source._queue.qsize() == 1
+        assert source._pending_signal.received_at == 99
+    finally:
+        release.set()
+    until(qapp, lambda: VIDEO in engines)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)] and api.get_calls == [VIDEO]
+    assert "수신=99" in diagnostic(events, "handed")[0].message
+
+
+def test_shutdown_discards_a_queued_signal_before_any_query(wired, qapp):
+    source, api, engines, _, _, _ = wired
+    entered, release = threading.Event(), threading.Event()
+
+    def block_worker():
+        entered.set()
+        assert release.wait(5)
+
+    source._run(block_worker)
+    try:
+        assert entered.wait(5)
+        assert source.receive_signal(signal(), trusted=True)
+        source.begin_shutdown()
+    finally:
+        release.set()
+    source.stop()
+    assert api.find_calls == api.get_calls == [] and not engines
+    assert source._pending_signal is None and not source._signal_scheduled
+
+
+def test_signal_burst_during_scan_preserves_last_arrival_and_yields_to_commands(wired, qapp):
+    source, api, engines, _, _, events = wired
+    api.block_scan = True
+    source.receive_signal(signal(), trusted=True)
+    until(qapp, api.entered.is_set)
+    try:
+        # The in-flight response is empty; only the trailing scan can see this live.
+        api.lives = [api.lives_by_id[VIDEO]]
+        for at in range(100):
+            assert source.receive_signal(signal(at), trusted=True)
+        assert source._queue.qsize() == 0
+        assert source._pending_signal.received_at == 99
+        source._run(lambda: api.find_calls.append(("command",)))
+    finally:
+        api.release.set()
+    until(qapp, lambda: VIDEO in engines)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",), ("command",), ("UC1",)]
+    assert api.get_calls == [VIDEO]
+    assert "수신=99" in diagnostic(events, "handed")[0].message
+    flush(source, qapp)
+    assert len(api.find_calls) == 3  # No timer/cooldown retry after the pending signal drains.
+
+
+@pytest.mark.parametrize("during", ["scan", "video_check"])
+def test_signal_rechecks_selection_after_network_io(wired, qapp, during):
+    source, api, engines, selected, _, _ = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    api.block_scan = during == "scan"
+    api.block = VIDEO if during == "video_check" else None
+    source.receive_signal(signal(), trusted=True)
+    until(qapp, api.entered.is_set)
+    try:
+        selected.save(["UC2"])
+    finally:
+        api.release.set()
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)]
+    assert len(api.get_calls) == (during == "video_check")
+    assert not engines
+
+
+def test_disconnected_signal_is_bounded_and_only_explicit_reconnect_resumes_it(wired, qapp):
+    source, api, engines, _, _, _ = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    source.handle_command(cmd.DisconnectAccount())
+    flush(source, qapp)
+    for at in range(100):
+        assert source.receive_signal(signal(at), trusted=True)
+    flush(source, qapp)
+    for _ in range(5):
+        source.tick()
+    flush(source, qapp)
+    assert api.find_calls == api.get_calls == [] and not engines
+    assert source._pending_signal.received_at == 99
+    assert not source._signal_scheduled
+    source.handle_command(cmd.ConnectAccount(session_only=True))
+    until(qapp, lambda: VIDEO in engines)
+    flush(source, qapp)
+    assert api.find_calls == [("UC1",)] and api.get_calls == [VIDEO]
+    assert source._pending_signal is None
+
+
+@pytest.mark.parametrize("during", ["scan", "video_check"])
+def test_connection_loss_during_signal_work_never_starts_until_reconnect(wired, qapp, during):
+    source, api, engines, _, _, _ = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    api.block_scan = during == "scan"
+    api.block = VIDEO if during == "video_check" else None
+    source.receive_signal(signal(), trusted=True)
+    until(qapp, api.entered.is_set)
+    try:
+        source._controller._connected = False
+        source._controller._youtube = None
+    finally:
+        api.release.set()
+    flush(source, qapp)
+    assert not engines and api.find_calls == [("UC1",)]
+    assert len(api.get_calls) == (during == "video_check")
+    source.handle_command(cmd.ConnectAccount(session_only=True))
+    until(qapp, lambda: VIDEO in engines)
+    flush(source, qapp)
+    assert len(api.find_calls) == (2 if during == "scan" else 1)
+    assert len(api.get_calls) == (2 if during == "video_check" else 1)
+
+
+def test_failed_signal_scan_has_no_hidden_retry_and_does_not_log_upstream_content(wired, qapp, monkeypatch):
+    source, api, engines, _, _, events = wired
+    calls = []
+
+    def failed(ids):
+        calls.append(tuple(ids))
+        raise RuntimeError("raw-push-body secret-key secret-token")
+
+    original = api.find_lives
+    monkeypatch.setattr(api, "find_lives", failed)
+    source.receive_signal(signal(), trusted=True)
+    flush(source, qapp)
+    for _ in range(5):
+        source.tick()
+    flush(source, qapp)
+    assert calls == [("UC1",)] and not engines and not api.get_calls
+    messages = " ".join(e.entry.message for e in events if isinstance(e, ev.LogAppended))
+    assert "자동 재시도하지 않습니다" in messages
+    assert all(secret not in messages for secret in ("raw-push-body", "secret-key", "secret-token"))
+    monkeypatch.setattr(api, "find_lives", original)
+    api.lives = [api.lives_by_id[VIDEO]]
+    source.receive_signal(signal(20), trusted=True)
+    until(qapp, lambda: VIDEO in engines)
+    assert api.find_calls == [("UC1",)] and api.get_calls == [VIDEO]
+
+
+@pytest.mark.parametrize("during", ["scan", "video_check"])
+def test_shutdown_drops_current_and_pending_signal_without_starting_recording(wired, qapp, during):
+    source, api, engines, _, seen, _ = wired
+    api.lives = [api.lives_by_id[VIDEO]]
+    api.block_scan = during == "scan"
+    api.block = VIDEO if during == "video_check" else None
+    source.receive_signal(signal(), trusted=True)
+    until(qapp, api.entered.is_set)
+    try:
+        assert source.receive_signal(signal(20), trusted=True)
+        source.begin_shutdown()
+    finally:
+        api.release.set()
+    source.stop()
+    assert not source.receive_signal(signal(30), trusted=True)
+    assert not engines and not seen._started
+    assert source._pending_signal is None and not source._signal_scheduled
+    assert api.find_calls == [("UC1",)]
+    assert len(api.get_calls) == (during == "video_check")
