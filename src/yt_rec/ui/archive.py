@@ -313,7 +313,8 @@ class ArchiveDialog(QDialog):
         box.setTextFormat(Qt.TextFormat.PlainText)
         box.setText(f"‘{item.title}’ 파일을 휴지통으로 옮길까요?")
         box.setInformativeText(f"{item.output_path}\n\n휴지통 이동 후 이력에서 제거합니다.\n"
-                               "휴지통 이동 실패 시 앱은 영구 삭제로 재시도하지 않습니다.")
+                               "휴지통 이동 실패 시 앱은 영구 삭제로 재시도하지 않습니다.\n"
+                               "네트워크·NAS 경로는 휴지통이 없으면 삭제하지 않습니다.")
         remove = box.addButton("휴지통으로 이동", QMessageBox.ButtonRole.AcceptRole)
         cancel = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(cancel)

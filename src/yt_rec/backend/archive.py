@@ -26,12 +26,37 @@ def _number(value: object) -> float:
         return 0.0
 
 
-def _plain_path(path: Path) -> os.stat_result:
-    for part in (*reversed(path.parents), path):
+def _plain_path(path: Path, *, within: Path | None = None) -> os.stat_result:
+    path = path.absolute()
+    parts = (*reversed(path.parents), path)
+    if within is not None:
+        within = within.absolute()
+        parts = tuple(part for part in parts if part == within or part.is_relative_to(within))
+        if not parts:
+            raise ValueError("등록된 출력 폴더 안의 경로만 처리합니다")
+    info = None
+    for part in parts:
         info = part.lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise ValueError("링크·정션 경로는 처리하지 않습니다")
+    if info is None:
+        raise ValueError("등록된 출력 폴더 안의 경로만 처리합니다")
     return info
+
+
+def _remote_volume(path: Path) -> bool:
+    """Windows 네트워크/NAS 볼륨. 휴지통이 없는 경로에서 영구 삭제로 넘어가지 않기 위해 거절한다."""
+    raw = os.fspath(path)
+    if raw.startswith(("\\\\", "//")):
+        return True
+    if sys.platform != "win32":
+        return False
+    drive, _rest = os.path.splitdrive(raw)
+    if len(drive) != 2 or drive[1] != ":":
+        return False
+    import ctypes
+    # DRIVE_REMOTE = 4. GetDriveTypeW wants a trailing backslash on the root.
+    return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4
 
 
 def _confirmed_missing(path: Path, output_dir: Path) -> bool:
@@ -40,7 +65,7 @@ def _confirmed_missing(path: Path, output_dir: Path) -> bool:
     parent = path.parent
     while parent.is_relative_to(output_dir):
         try:
-            _plain_path(parent)
+            _plain_path(parent, within=output_dir)
             os.listdir(parent)
             return True
         except FileNotFoundError:
@@ -252,15 +277,24 @@ class ArchiveStore:
             raise ValueError("녹화·이력·파일 상태가 바뀌었습니다. 새로고침 후 다시 선택하세요.")
         target = Path(selected.output_path)
         state_path = Path(selected.deletion_token[0])
+        matched = next((root for root in self._roots
+                        if state_path.parent.parent == Path(root["work_root"]).absolute()
+                        and target.parent == Path(root["output_dir"]).absolute()), None)
         if (not target.is_absolute() or ".." in target.parts or ":" in target.name
                 or target.suffix.lower() not in {".mp4", ".mkv", ".webm", ".m4a", ".mka", ".m4v", ".ts", ".aac"}
-                or not any(state_path.parent.parent == Path(root["work_root"]).absolute()
-                           and target.parent == Path(root["output_dir"]).absolute() for root in self._roots)
+                or matched is None
                 or any(target.is_relative_to(Path(root["work_root"]).absolute()) for root in self._roots)
                 or sum(item.output_path == selected.output_path for item in items) != 1):
             raise ValueError("등록된 출력 폴더의 최종 미디어 파일 한 개만 삭제할 수 있습니다")
-        state_info = _plain_path(state_path)
-        info = _plain_path(target)
+        if _remote_volume(target):
+            raise ValueError(
+                "네트워크·NAS 경로에는 휴지통이 없어 삭제하지 않습니다. "
+                "파일 관리자에서 지운 뒤 이력에서 제거하세요."
+            )
+        output_dir = Path(matched["output_dir"]).absolute()
+        work_root = Path(matched["work_root"]).absolute()
+        state_info = _plain_path(state_path, within=work_root)
+        info = _plain_path(target, within=output_dir)
         if not stat.S_ISREG(state_info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ValueError("일반 파일만 삭제할 수 있습니다. 디렉터리·하드링크는 제외합니다")
         if _deletion_token(state_path, state_path.read_bytes(), info) != selected.deletion_token:
