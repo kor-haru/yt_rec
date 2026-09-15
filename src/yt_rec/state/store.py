@@ -168,9 +168,13 @@ class AppState(QObject):
     notification_history_changed = Signal(object)
 
     archive_changed = Signal(object)
-    archive_dismiss_finished = Signal(object)
-    archive_delete_finished = Signal(object)
     """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
+
+    archive_dismiss_finished = Signal(object)
+    """payload: ArchiveDismissFinished"""
+
+    archive_delete_finished = Signal(object)
+    """payload: ArchiveDeleteFinished"""
 
     snapshot_changed = Signal(object)
     """payload: :class:`~yt_rec.state.models.AppSnapshot` — 무엇이든 바뀌면 방출.

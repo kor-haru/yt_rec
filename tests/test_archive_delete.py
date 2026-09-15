@@ -264,6 +264,41 @@ def test_link_flags_rejected_without_symlink_privilege(tmp_path, monkeypatch, ki
         store.trash(selected)
 
 
+def test_trash_rejects_network_volume_without_calling_trash(tmp_path, monkeypatch):
+    store, media, _ = archive(tmp_path)
+    selected, = store.load()
+    calls = []
+    monkeypatch.setattr(backend, "_remote_volume", lambda path: path == media)
+    monkeypatch.setattr(TrashFile, "moveToTrash", lambda file: calls.append(file.fileName()) or True)
+    with pytest.raises(ValueError, match="네트워크·NAS"):
+        store.trash(selected)
+    assert not calls and media.read_bytes() == b"test media"
+    assert not store.dismissed_path.exists()
+
+
+@pytest.mark.parametrize("raw", [r"\\192.168.173.222\slot1\__a\vid.mp4", "//nirvanas/slot1/vid.mp4"])
+def test_unc_paths_count_as_remote_volumes(raw):
+    assert backend._remote_volume(Path(raw))
+
+
+def test_ancestor_reparse_above_output_dir_does_not_block_trash(tmp_path, monkeypatch):
+    store, media, _ = archive(tmp_path)
+    selected, = store.load()
+    original = Path.lstat
+    outside = media.parent.parent
+    def lstat(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if Path(path) == outside:
+            return SimpleNamespace(st_mode=info.st_mode,
+                                   st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        return info
+    monkeypatch.setattr(Path, "lstat", lstat)
+    trash = tmp_path / "test-trash.mp4"
+    monkeypatch.setattr(TrashFile, "moveToTrash", lambda file: Path(file.fileName()).rename(trash) or True)
+    store.trash(selected)
+    assert not media.exists() and trash.read_bytes() == b"test media"
+
+
 def test_confirmation_cancel_default_and_selected_command(state, tmp_path, monkeypatch):
     store, media, _ = archive(tmp_path)
     item, = store.load()
@@ -277,6 +312,7 @@ def test_confirmation_cancel_default_and_selected_command(state, tmp_path, monke
         assert item.title in box.text()
         assert item.output_path in box.informativeText()
         assert "휴지통" in box.text() and "영구 삭제로 재시도하지 않습니다" in box.informativeText()
+        assert "네트워크·NAS" in box.informativeText()
         assert box.textFormat() is Qt.TextFormat.PlainText
         assert box.defaultButton().text() == box.escapeButton().text() == "취소"
         box.defaultButton().click()
