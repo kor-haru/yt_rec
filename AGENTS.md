@@ -19,3 +19,22 @@
 - PR을 검토하면 의견을 **PR 코멘트(또는 리뷰)** 로 남긴다.
 - 같은 검토 의견을 **연결된 이슈에도 코멘트**로 남긴다. PR만 남기고 이슈를 비우지 않는다.
 - 이슈가 안 붙어 있으면 그 상태로 머지하지 않는다. 이슈를 연결한 뒤에 양쪽 코멘트를 남긴다.
+
+## NAS 변환 현황
+
+slot1 등 NAS 영상 변환은 이 저장소 밖 `C:\Users\haru\nas-convert` 에서 돌며 채팅 세션과 무관하다. Grok 셸에서 ffmpeg나 `convert_slot1_a.py`를 직접 실행하지 않는다. 시작·재시작은 예약 작업 `yt-rec-nas-convert-a-wd` 또는 `start_hidden.ps1 -Folder <경로>`다.
+
+현황판은 **지금 실행 중인 변환 폴더**를 따라간다. 변환 경로를 바꿔도 명령을 다시 외울 필요 없다. 켜 둔 현황판은 다음 갱신부터 새 폴더의 건수·경로를 보여 준다.
+
+```
+C:\Users\haru\nas-convert\progress.cmd 5
+python C:\Users\haru\nas-convert\progress.py 5
+```
+
+특정 폴더만 고정할 때만 경로를 붙인다.
+
+```
+C:\Users\haru\nas-convert\progress.cmd 5 Z:\___FC2
+```
+
+첫 줄 `대상`이 실제 작업 폴더다. `20982`개·실패 167처럼 slot1 전체 잔여 숫자가 보이면 예전 목록이다. 현황판을 끄고 위 명령으로 다시 연다. 호스트·공유 상세는 git에 올리지 않는 `AGENTS.md.local`에 있다.
