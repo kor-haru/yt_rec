@@ -30,6 +30,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .backend import create_backend_source
 from .desktop import set_app_id
+from .instance import InstanceLock
 from .logs import redact
 from .recording.options import load_settings
 from .state import commands as cmd, events as ev
@@ -423,12 +424,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.smoke_test is not None:
         from .smoke import run_smoke
         return run_smoke(args.smoke_test)
-    context = build_application(argv)
+    set_app_id()
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setOrganizationName(ORGANIZATION)
+    app.setApplicationName(APPLICATION)
+    lock = InstanceLock(app)
+    if not lock.acquire():
+        return 0
+    context = build_application(argv, app=app)
     desktop = DesktopSession(context)
+    lock.activate_requested.connect(desktop.show_window)
     desktop.show_initial()
     try:
         return context.app.exec()
     finally:
+        lock.close()
         if context.notifications is not None:
             context.notifications.stop()
             # External app.quit() can bypass the normal async shutdown. Destroy
