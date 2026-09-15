@@ -210,6 +210,8 @@ class CompletedRecording:
     status: CompletionStatus = CompletionStatus.COMPLETED
     output_path: str | None = None
     note: str = ""
+    file_missing: bool = False
+    """파일 없음과 부모 폴더 접근을 모두 확인했을 때만 참. 접근 오류는 제외."""
 
 
 @dataclass(frozen=True, slots=True)

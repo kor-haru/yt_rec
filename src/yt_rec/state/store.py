@@ -168,6 +168,7 @@ class AppState(QObject):
     notification_history_changed = Signal(object)
 
     archive_changed = Signal(object)
+    archive_dismiss_finished = Signal(object)
     """payload: ``tuple[CompletedRecording, ...]`` — 전체 보관함"""
 
     snapshot_changed = Signal(object)
@@ -503,7 +504,7 @@ class AppState(QObject):
         usable_while_attached = (
             isinstance(command, (
                 cmd.ConnectAccount, cmd.StopRecording, cmd.UpdateSettings,
-                cmd.RefreshArchive, cmd.OpenRecordingPath,
+                cmd.RefreshArchive, cmd.OpenRecordingPath, cmd.DismissArchive,
                 cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
                 cmd.InspectNotificationRegistration, cmd.OpenSystemNotificationSettings,
                 cmd.DeleteNotificationHistory,
@@ -557,6 +558,10 @@ class AppState(QObject):
     def open_recording_path(self, path: str, *, reveal: bool = False) -> bool:
         """완료 파일 재생 또는 파일 위치 열기를 요청한다."""
         return self.send_command(cmd.OpenRecordingPath(path, reveal=reveal))
+
+    def dismiss_archive(self, recordings: Iterable[CompletedRecording], *, missing_only: bool = False) -> bool:
+        """확인한 완료 항목의 이력만 제외하도록 요청한다. 파일 삭제가 아니다."""
+        return self.send_command(cmd.DismissArchive(tuple(recordings), missing_only=missing_only))
 
     def open_notification_browser(self) -> bool:
         return self.send_command(cmd.OpenNotificationBrowser())
@@ -698,6 +703,9 @@ class AppState(QObject):
         self._notification_history_error = event.error
         self._dirty.add("notification_history")
 
+    def _on_archive_dismiss_finished(self, event: ev.ArchiveDismissFinished) -> None:
+        self.archive_dismiss_finished.emit(event)
+
     _HANDLERS = {
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
@@ -706,6 +714,7 @@ class AppState(QObject):
         ev.RecordingProgress: _on_recording_progress,
         ev.RecordingFinished: _on_recording_finished,
         ev.CompletedChanged: _on_completed,
+        ev.ArchiveDismissFinished: _on_archive_dismiss_finished,
         ev.LogAppended: _on_log,
         ev.QuotaChanged: _on_quota,
         ev.AccountChanged: _on_account,

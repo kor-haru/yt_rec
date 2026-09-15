@@ -81,6 +81,8 @@ def sanitize_event(event: object) -> object:
         return replace(event, message=redact(event.message))
     if isinstance(event, ev.NotificationStatusChanged):
         return replace(event, status=replace(event.status, detail=redact(event.status.detail)))
+    if isinstance(event, ev.ArchiveDismissFinished):
+        return replace(event, error=redact(event.error))
     if isinstance(event, ev.ChannelsChanged):
         return replace(event, channels=tuple(
             replace(channel, last_check_result=redact(channel.last_check_result))

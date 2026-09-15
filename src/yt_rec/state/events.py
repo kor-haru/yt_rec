@@ -54,6 +54,7 @@ __all__ = [
     "RecordingProgress",
     "RecordingFinished",
     "CompletedChanged",
+    "ArchiveDismissFinished",
     "LogAppended",
     "QuotaChanged",
     "AccountChanged",
@@ -138,6 +139,14 @@ class CompletedChanged:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveDismissFinished:
+    """보관함 제외목록의 저장 결과. 실패했다면 화면 목록을 지우지 않는다."""
+
+    removed_count: int = 0
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class LogAppended:
     """로그 한 줄이 쌓였다. ``ERROR`` 수준이면 오류 카운터가 함께 올라간다."""
 
@@ -196,6 +205,7 @@ BackendEvent = (
     | RecordingProgress
     | RecordingFinished
     | CompletedChanged
+    | ArchiveDismissFinished
     | LogAppended
     | QuotaChanged
     | AccountChanged
