@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     QFile,
     QIODevice,
     QObject,
+    QStandardPaths,
     QTimer,
     QUrl,
     Signal,
@@ -38,7 +39,6 @@ from PySide6.QtWidgets import QMessageBox
 
 from .notifications import LiveNotification
 from .notification_history import ReceivedNotification
-from ..webengine_boot import profile_root
 
 YOUTUBE = "https://www.youtube.com"
 NOTIFICATION_SETTINGS_URL = YOUTUBE + "/account_notifications"
@@ -51,7 +51,10 @@ _MAX_RESPONSE = 65_536
 
 def default_profile_directory() -> Path:
     """Product-owned profile, never a caller-supplied Chrome/cookie directory."""
-    return profile_root()
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+    if not base:
+        raise RuntimeError("알림 브라우저 저장 위치를 찾을 수 없습니다")
+    return Path(base) / "yt-rec" / "youtube-push"
 
 
 def _is_youtube_url(value: str) -> bool:
