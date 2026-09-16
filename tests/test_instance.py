@@ -154,6 +154,38 @@ def test_lock_io_failure_is_not_reported_as_an_existing_instance(qapp, tmp_path,
     lock._ask_primary_to_raise.assert_not_called()
 
 
+def test_dead_lock_holder_becomes_primary(qapp, tmp_path) -> None:
+    lock = InstanceLock(lock_path=tmp_path / "stale.lock", socket_name=_name())
+    lock._lock = SimpleNamespace(
+        tryLock=Mock(side_effect=[False, True]),
+        error=lambda: QLockFile.LockError.LockFailedError,
+        removeStaleLockFile=Mock(),
+        isLocked=lambda: True,
+        unlock=Mock(),
+    )
+    lock._ask_primary_to_raise = Mock(return_value=False)
+    lock._holder_alive = Mock(return_value=False)
+    lock._listen = Mock()
+    assert lock.acquire() is True
+    lock._lock.removeStaleLockFile.assert_called_once()
+    lock._listen.assert_called_once()
+
+
+def test_live_holder_without_socket_does_not_start_second_gui(qapp, tmp_path) -> None:
+    lock = InstanceLock(lock_path=tmp_path / "live.lock", socket_name=_name())
+    lock._lock = SimpleNamespace(
+        tryLock=Mock(return_value=False),
+        error=lambda: QLockFile.LockError.LockFailedError,
+        removeStaleLockFile=Mock(),
+    )
+    lock._ask_primary_to_raise = Mock(return_value=False)
+    lock._holder_alive = Mock(return_value=True)
+    lock._listen = Mock()
+    assert lock.acquire() is False
+    lock._lock.removeStaleLockFile.assert_not_called()
+    lock._listen.assert_not_called()
+
+
 def test_smoke_bypasses_instance_lock(monkeypatch, tmp_path):
     from yt_rec import smoke as smoke_module
 
