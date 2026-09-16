@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -45,12 +46,19 @@ class InstanceLock(QObject):
     def acquire(self) -> bool:
         """이 프로세스가 주 인스턴스이면 True. 아니면 기존 창을 열고 False."""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._lock.tryLock(100):
+            self._listen()
+            return True
+        if self._lock.error() != QLockFile.LockError.LockFailedError:
+            raise RuntimeError(
+                "인스턴스 잠금 파일을 만들지 못했습니다. 앱 데이터 폴더 권한과 디스크 여유 공간을 확인하세요."
+            )
+        if self._ask_primary_to_raise():
+            return False
+        if self._holder_alive():
+            return False
+        self._lock.removeStaleLockFile()
         if not self._lock.tryLock(100):
-            if self._lock.error() != QLockFile.LockError.LockFailedError:
-                raise RuntimeError(
-                    "인스턴스 잠금 파일을 만들지 못했습니다. 앱 데이터 폴더 권한과 디스크 여유 공간을 확인하세요."
-                )
-            self._ask_primary_to_raise()
             return False
         self._listen()
         return True
@@ -88,17 +96,33 @@ class InstanceLock(QObject):
         if _RAISE in payload or payload.strip() == b"raise":
             self.activate_requested.emit()
 
-    def _ask_primary_to_raise(self) -> None:
+    def _ask_primary_to_raise(self) -> bool:
         self._allow_primary_foreground()
         sock = QLocalSocket(self)
         sock.connectToServer(self._socket_name)
         if not sock.waitForConnected(500):
-            return
+            return False
         sock.write(_RAISE)
-        sock.waitForBytesWritten(500)
+        ok = sock.waitForBytesWritten(500)
         sock.disconnectFromServer()
         if sock.state() != QLocalSocket.LocalSocketState.UnconnectedState:
             sock.waitForDisconnected(500)
+        return bool(ok)
+
+    def _holder_alive(self) -> bool:
+        pid = 0
+        try:
+            info = self._lock.getLockInfo()
+        except Exception:
+            return True
+        if isinstance(info, tuple) and info:
+            try:
+                pid = int(info[0])
+            except (TypeError, ValueError):
+                pid = 0
+        if pid <= 0:
+            return True
+        return _pid_alive(pid)
 
     def _allow_primary_foreground(self) -> None:
         if sys.platform != "win32":
@@ -120,3 +144,20 @@ class InstanceLock(QObject):
             ctypes.windll.user32.AllowSetForegroundWindow(pid)
         except OSError:
             return
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
