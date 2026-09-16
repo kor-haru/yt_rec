@@ -66,15 +66,29 @@ def test_app_import_and_stub_preserve_profile(tmp_path: Path, start_stub, flags)
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 from PySide6.QtCore import QStandardPaths
 QStandardPaths.writableLocation = lambda _: sys.argv[1]
 before = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS')
 from yt_rec import app
 if sys.argv[2] == 'True':
-    context = SimpleNamespace(app=SimpleNamespace(exec=lambda: 0), notifications=None, source=None)
-    app.build_application = lambda argv: context
-    app.DesktopSession = lambda _: SimpleNamespace(show_initial=lambda: None)
+    application = SimpleNamespace(
+        exec=lambda: 0, setOrganizationName=Mock(), setApplicationName=Mock(),
+    )
+    lock = SimpleNamespace(
+        acquire=lambda: True, close=Mock(), activate_requested=SimpleNamespace(connect=Mock()),
+    )
+    app.QApplication = SimpleNamespace(instance=lambda: application)
+    app.InstanceLock = Mock(return_value=lock)
+    app.set_app_id = lambda: None
+    context = SimpleNamespace(app=application, notifications=None, source=None)
+    app.build_application = lambda argv, *, app: context
+    desktop = SimpleNamespace(show_initial=lambda: None, show_window=lambda: None)
+    app.DesktopSession = lambda _: desktop
     assert app.main(['--stub', 'empty']) == 0
+    app.InstanceLock.assert_called_once_with(application)
+    lock.activate_requested.connect.assert_called_once_with(desktop.show_window)
+    lock.close.assert_called_once_with()
 assert os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS') == before
 """, str(tmp_path), str(start_stub)],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30,
