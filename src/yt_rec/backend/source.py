@@ -20,7 +20,7 @@ from yt_rec.state.store import EventSource, MAX_COMPLETED
 
 from .archive import ArchiveStore, archive_key, load_archive, open_archive_path
 from .controller import WATCH_INTERVAL_SECONDS, WatchController
-from .notifications import LiveNotification, NotificationRecorder, NotificationResult
+from .notifications import LiveNotification, NotificationRecorder, NotificationResult, YouTubeSignal
 from .notification_history import MAX_HISTORY, NotificationHistoryStore, ReceivedNotification
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
@@ -62,6 +62,9 @@ class BackendSource(EventSource):
         self._worker: threading.Thread | None = None
         self._poll_pending = False
         self._poll_flag = threading.Lock()
+        self._signal_lock = threading.Lock()
+        self._pending_signal: YouTubeSignal | None = None
+        self._signal_scheduled = False
         self._stopping = False
         self.log_store = log_store
         self._archive_store = archive_store
@@ -173,6 +176,72 @@ class BackendSource(EventSource):
         self._run(receive)
         return True
 
+    def receive_signal(self, signal: YouTubeSignal, *, trusted: bool = False) -> bool:
+        """Accept a real push arrival for one selected-channel scan on the worker.
+
+        ``trusted`` is the upstream adapter's assertion, NOT authentication.
+        True means accepted/coalesced, not recorded. Only the latest pending
+        arrival is kept; an arrival during a scan gets a subsequent scan.
+        """
+        if (self._stopping or self._worker is None or not self._worker.is_alive()
+                or self._controller.event_only is not True or self._notifications is None or trusted is not True
+                or not isinstance(signal, YouTubeSignal) or signal.synthetic is not False):
+            return False
+        with self._signal_lock:
+            if self._stopping:
+                return False
+            self._pending_signal = signal
+        self._schedule_signal()
+        return True
+
+    def _schedule_signal(self) -> None:
+        with self._signal_lock:
+            if self._stopping or self._signal_scheduled or self._pending_signal is None:
+                return
+            self._signal_scheduled = True
+            self._queue.put(self._scan_signal)
+
+    def _scan_signal(self) -> None:
+        with self._signal_lock:
+            signal, self._pending_signal = self._pending_signal, None
+        deferred = False
+        try:
+            if self._stopping or signal is None:
+                return
+            selected = self._controller._selection.load()
+            if not selected:
+                return
+            api = self._controller._youtube if self._controller._connected else None
+            if api is None:
+                deferred = True
+                return
+            lives = api.find_lives(selected)
+            if not self._controller._connected or self._controller._youtube is not api:
+                deferred = True
+                return
+            for live in lives:
+                if self._stopping:
+                    return
+                if (live.channel_id not in selected
+                        or live.channel_id not in self._controller._selection.load()):
+                    continue
+                notice = LiveNotification(live.video_id, signal.received_at, synthetic=False)
+                self._notification_update(NotificationResult(notice, "received"))
+                self._notifications.receive(notice)
+        except Exception:
+            deferred = not self._controller._connected
+            # Never include raw upstream payloads or exception text in signal logs.
+            self._warning("YouTube 신호에 따른 방송 확인을 완료하지 못했습니다. 자동 재시도하지 않습니다.")
+        finally:
+            with self._signal_lock:
+                if deferred and not self._stopping and self._pending_signal is None:
+                    self._pending_signal = signal
+                self._signal_scheduled = False
+            # A disconnected arrival waits for the existing explicit reconnect event.
+            # Requeue at the FIFO tail so new signals cannot starve commands.
+            if self._controller._connected and self._controller._youtube is not None:
+                self._schedule_signal()
+
     def _notification_update(self, result: NotificationResult) -> None:
         self.publish(ev.LogAppended(LogEntry(
             at=datetime.now(timezone.utc),
@@ -226,6 +295,7 @@ class BackendSource(EventSource):
         if (self._notifications is not None and isinstance(event, ev.ConnectionChanged)
                 and event.state is ConnectionState.CONNECTED):
             self._run(self._notifications.resume)
+            self._schedule_signal()
         if isinstance(event, ev.SettingsChanged):
             if self.log_store is not None:
                 try:
@@ -334,9 +404,12 @@ class BackendSource(EventSource):
 
     def begin_shutdown(self) -> None:
         """GUI 스레드에서 새 작업을 차단하고 종료를 요청한다. 기다리지 않는다."""
-        if self._stopping:
-            return
-        self._stopping = True
+        with self._signal_lock:
+            if self._stopping:
+                return
+            self._stopping = True
+            self._pending_signal = None
+            self._signal_scheduled = False
         if self._poll_timer is not None:
             self._poll_timer.stop()
         recorder = getattr(self._controller, "_recorder", None)

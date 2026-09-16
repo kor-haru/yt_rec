@@ -3,10 +3,11 @@ from __future__ import annotations
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError, fields
 
 import pytest
 
-from yt_rec.backend.notifications import LiveNotification, NotificationRecorder
+from yt_rec.backend.notifications import LiveNotification, NotificationRecorder, YouTubeSignal
 from yt_rec.backend.selection import FileSeenStore, MemorySeenStore, MemorySelectionStore
 from yt_rec.backend.youtube import LiveBroadcast, YouTubeApi
 from yt_rec.backend.recorder import EngineRecorder
@@ -220,6 +221,39 @@ def test_explicit_reconnect_drains_without_query_while_disconnected():
     handler.resume()
     assert api.calls == [VIDEO]
     assert len(recorder.calls) == 1
+
+
+def test_connection_is_rechecked_after_metadata_request():
+    handler, api, recorder, _, _ = setup_handler()
+    original = api.get_live
+
+    def disconnected(video_id):
+        handler._youtube = lambda: None
+        return original(video_id)
+
+    api.get_live = disconnected
+    assert handler.receive(notice()).status == "queued"
+    assert recorder.calls == [] and handler.pending_video_ids == (VIDEO,)
+    handler.resume()
+    assert api.calls == [VIDEO]
+    api.get_live = original
+    handler._youtube = lambda: api
+    handler.resume()
+    assert api.calls == [VIDEO, VIDEO] and len(recorder.calls) == 1
+
+
+def test_signal_is_immutable_synthetic_by_default_and_has_no_payload():
+    signal = YouTubeSignal(10.0)
+    assert signal.synthetic is True
+    assert {field.name for field in fields(signal)} == {"received_at", "synthetic"}
+    with pytest.raises(FrozenInstanceError):
+        signal.received_at = 20.0
+
+
+@pytest.mark.parametrize("stamp", [-1, float("inf"), float("nan"), "10", None, True])
+def test_signal_rejects_invalid_received_time(stamp):
+    with pytest.raises(ValueError, match="수신 시각"):
+        YouTubeSignal(stamp)
 
 
 def test_observer_failure_is_visible_redacted_and_does_not_undo_recording(caplog):
