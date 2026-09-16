@@ -217,14 +217,18 @@ def _session(qapp, state, window_settings, monkeypatch, available, source=None, 
     return window, session, tray_type.return_value
 
 
-def test_tray_close_hides_and_explicit_exit_confirms(qapp, state, window_settings, monkeypatch):
-    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True)
+def test_window_close_exits_even_with_tray(qapp, state, window_settings, monkeypatch):
+    window, session, tray = _session(qapp, state, window_settings, monkeypatch, True)
     session.show_initial()
     assert not window.isVisible()
     session.show_window()
     window.close()
-    assert not window.isVisible() and not session.stopped
+    assert session.stopped
+    tray.hide.assert_called()
+    qapp.quit.assert_called()
     state.apply(RecordingStarted(Recording("id", "Live")))
+    window.exiting = False
+    session.stopped = False
     monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.No)
     window.request_exit()
     assert not window.exiting
@@ -339,23 +343,21 @@ def test_saved_minimize_setting_applies_immediately_not_on_failure(
     window.close()
 
 
-@pytest.mark.parametrize("settings_event", [False, True])
-def test_disabled_minimize_option_never_reopens_a_close_to_tray_window(
-    qapp, state, window_settings, monkeypatch, tmp_path, settings_event,
+def test_minimize_to_tray_does_not_exit_but_close_does(
+    qapp, state, window_settings, monkeypatch, tmp_path,
 ):
-    options = RecordingOptions(output_dir=tmp_path)
-    window, session, _tray = _session(qapp, state, window_settings, monkeypatch, True, options=options)
-    session.show_initial()
+    options = RecordingOptions(output_dir=tmp_path, minimize_to_tray=True)
+    window, session, tray = _session(
+        qapp, state, window_settings, monkeypatch, True, options=options,
+    )
+    session.show_window()
     window.showMinimized()
-    if settings_event:
-        qapp.processEvents()
-    window.close()
-    assert window.isHidden()
-    if settings_event:
-        state.apply(SettingsChanged(options.with_(notifications_enabled=False)))
     qapp.processEvents()
     assert window.isHidden() and not session.stopped
-    session.show_window()
+    window.close()
+    assert session.stopped
+    tray.hide.assert_called()
+    qapp.quit.assert_called()
     window.desktop_managed = False
     window.close()
 
