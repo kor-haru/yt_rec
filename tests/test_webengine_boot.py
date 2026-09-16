@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtCore import QStandardPaths
 
 from yt_rec.backend.push_receiver import default_profile_directory
+from yt_rec.webengine_boot import reset_gcm_store_once
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
@@ -71,6 +72,11 @@ from PySide6.QtCore import QStandardPaths
 QStandardPaths.writableLocation = lambda _: sys.argv[1]
 before = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS')
 from yt_rec import app
+root = __import__('pathlib').Path(sys.argv[1]) / 'yt-rec' / 'youtube-push'
+after = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS') or ''
+assert f'--user-data-dir={root}' in after
+if before:
+    assert before in after
 if sys.argv[2] == 'True':
     application = SimpleNamespace(
         exec=lambda: 0, setOrganizationName=Mock(), setApplicationName=Mock(),
@@ -89,10 +95,39 @@ if sys.argv[2] == 'True':
     app.InstanceLock.assert_called_once_with(application)
     lock.activate_requested.connect.assert_called_once_with(desktop.show_window)
     lock.close.assert_called_once_with()
-assert os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS') == before
 """, str(tmp_path), str(start_stub)],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30,
     )
     assert {str(path.relative_to(profile)).replace('\\', '/'): path.read_bytes()
             for path in profile.rglob("*") if path.is_file()} == contents
     assert result.returncode == 0, result.stderr
+
+
+def test_gcm_store_reset_writes_marker_only_after_success(tmp_path: Path) -> None:
+    gcm = tmp_path / "storage" / "GCM Store"
+    gcm.mkdir(parents=True)
+    (gcm / "CURRENT").write_bytes(b"stale")
+    cookies = tmp_path / "storage" / "Cookies"
+    cookies.write_bytes(b"keep")
+    assert reset_gcm_store_once(tmp_path) is True
+    assert not gcm.exists()
+    assert cookies.read_bytes() == b"keep"
+    assert (tmp_path / ".gcm-os-crypt-reset-1").is_file()
+    gcm.mkdir()
+    (gcm / "CURRENT").write_bytes(b"new")
+    assert reset_gcm_store_once(tmp_path) is False
+    assert (gcm / "CURRENT").read_bytes() == b"new"
+
+
+def test_gcm_store_reset_does_not_mark_when_delete_fails(tmp_path: Path, monkeypatch) -> None:
+    gcm = tmp_path / "storage" / "GCM Store"
+    gcm.mkdir(parents=True)
+    (gcm / "CURRENT").write_bytes(b"stale")
+
+    def boom(path):
+        raise OSError("SYNTHETIC delete failure")
+
+    monkeypatch.setattr("yt_rec.webengine_boot.shutil.rmtree", boom)
+    assert reset_gcm_store_once(tmp_path) is False
+    assert not (tmp_path / ".gcm-os-crypt-reset-1").exists()
+    assert (gcm / "CURRENT").read_bytes() == b"stale"

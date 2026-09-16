@@ -26,7 +26,11 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QVBoxLayout,
 )
 
-from PySide6.QtWebEngineWidgets import QWebEngineView
+from .webengine_boot import configure_webengine_process
+
+configure_webengine_process()
+
+from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 from .backend import create_backend_source
 from .desktop import set_app_id
@@ -431,6 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     lock = InstanceLock(app)
     if not lock.acquire():
         return 0
+    if args.stub is None:
+        from .webengine_boot import maybe_reset_gcm_store
+        maybe_reset_gcm_store()
     context = None
     desktop = None
     try:
