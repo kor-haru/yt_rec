@@ -557,13 +557,7 @@ class MainWindow(QMainWindow):
         self.save_window_state()
         if self.desktop_managed:
             event.ignore()
-            if self.exiting:
-                return
-            if self.tray_available:
-                for dialog in self._child_windows.values():
-                    dialog.hide()
-                self.hide()
-            else:
+            if not self.exiting:
                 self.request_exit()
             return
         self._countdown_repaint_timer.stop()
