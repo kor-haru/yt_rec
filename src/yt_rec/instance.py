@@ -46,6 +46,10 @@ class InstanceLock(QObject):
         """이 프로세스가 주 인스턴스이면 True. 아니면 기존 창을 열고 False."""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         if not self._lock.tryLock(100):
+            if self._lock.error() != QLockFile.LockError.LockFailedError:
+                raise RuntimeError(
+                    "인스턴스 잠금 파일을 만들지 못했습니다. 앱 데이터 폴더 권한과 디스크 여유 공간을 확인하세요."
+                )
             self._ask_primary_to_raise()
             return False
         self._listen()

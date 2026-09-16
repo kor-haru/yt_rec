@@ -431,22 +431,31 @@ def main(argv: list[str] | None = None) -> int:
     lock = InstanceLock(app)
     if not lock.acquire():
         return 0
-    context = build_application(argv, app=app)
-    desktop = DesktopSession(context)
-    lock.activate_requested.connect(desktop.show_window)
-    desktop.show_initial()
+    context = None
+    desktop = None
     try:
+        context = build_application(argv, app=app)
+        desktop = DesktopSession(context)
+        lock.activate_requested.connect(desktop.show_window)
+        desktop.show_initial()
         return context.app.exec()
     finally:
-        lock.close()
-        if context.notifications is not None:
-            context.notifications.stop()
-            # External app.quit() can bypass the normal async shutdown. Destroy
-            # views/pages before profiles while the Qt application still exists.
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        if context.source is not None and not desktop.stopped:
-            context.source.stop()
+        try:
+            if context is not None:
+                try:
+                    if context.notifications is not None:
+                        try:
+                            context.notifications.stop()
+                        finally:
+                            # Keep the lock through deferred page/profile deletion,
+                            # even when receiver cleanup reports an error.
+                            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                finally:
+                    if context.source is not None and (desktop is None or not desktop.stopped):
+                        context.source.stop()
+        finally:
+            lock.close()
 
 
 if __name__ == "__main__":  # pragma: no cover
