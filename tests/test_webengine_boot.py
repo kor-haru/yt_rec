@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import QStandardPaths
 
 from yt_rec.backend.push_receiver import default_profile_directory
-from yt_rec.webengine_boot import reset_gcm_store_once
+from yt_rec.webengine_boot import configure_webengine_process, chromium_user_data_dir, reset_gcm_store_once
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
@@ -73,8 +73,10 @@ QStandardPaths.writableLocation = lambda _: sys.argv[1]
 before = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS')
 from yt_rec import app
 root = __import__('pathlib').Path(sys.argv[1]) / 'yt-rec' / 'youtube-push'
+data = root / 'storage'
 after = os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS') or ''
-assert f'--user-data-dir={root}' in after
+assert f'--user-data-dir={data}' in after
+assert 'OsCryptAsync' in after
 if before:
     assert before in after
 if sys.argv[2] == 'True':
@@ -112,7 +114,7 @@ def test_gcm_store_reset_writes_marker_only_after_success(tmp_path: Path) -> Non
     assert reset_gcm_store_once(tmp_path) is True
     assert not gcm.exists()
     assert cookies.read_bytes() == b"keep"
-    assert (tmp_path / ".gcm-os-crypt-reset-1").is_file()
+    assert (tmp_path / ".gcm-os-crypt-reset-2").is_file()
     gcm.mkdir()
     (gcm / "CURRENT").write_bytes(b"new")
     assert reset_gcm_store_once(tmp_path) is False
@@ -129,5 +131,27 @@ def test_gcm_store_reset_does_not_mark_when_delete_fails(tmp_path: Path, monkeyp
 
     monkeypatch.setattr("yt_rec.webengine_boot.shutil.rmtree", boom)
     assert reset_gcm_store_once(tmp_path) is False
-    assert not (tmp_path / ".gcm-os-crypt-reset-1").exists()
+    assert not (tmp_path / ".gcm-os-crypt-reset-2").exists()
     assert (gcm / "CURRENT").read_bytes() == b"stale"
+
+
+def test_configure_points_user_data_at_storage_and_disables_oscrypt_async(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "yt_rec.webengine_boot.QStandardPaths.writableLocation",
+        lambda _: str(tmp_path),
+    )
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+    configure_webengine_process()
+    flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    data = chromium_user_data_dir()
+    assert data == tmp_path / "yt-rec" / "youtube-push" / "storage"
+    assert f"--user-data-dir={data}" in flags
+    assert "--disable-features=OsCryptAsync" in flags
+    monkeypatch.setenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-features=Foo")
+    configure_webengine_process()
+    flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--disable-gpu" in flags
+    assert "Foo" in flags
+    assert "OsCryptAsync" in flags
+    assert flags.count("--user-data-dir=") == 1
+    assert flags.count("OsCryptAsync") == 1

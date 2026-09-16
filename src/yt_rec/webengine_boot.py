@@ -1,14 +1,15 @@
 """Chromium flags for the YouTube push profile. Import before QtWebEngine.
 
-``Local State`` (OSCrypt) must live in the same tree as ``storage/GCM Store``.
-The directory is Qt ``GenericDataLocation`` / yt-rec / youtube-push — the same
-path ``default_profile_directory`` uses. Do not substitute LOCALAPPDATA or
-XDG_DATA_HOME; those miss the macOS profile.
+GCM tokens live in ``storage/GCM Store`` and are encrypted with OSCrypt.
+Qt stores cookies and GCM under ``…/youtube-push/storage``, but Chromium
+looks for ``Local State`` in ``--user-data-dir``. Those must be the same
+folder. Chromium 140's OsCryptAsync/app-bound path expects Chrome's
+elevation service; QtWebEngineProcess is not chrome.exe, so DPAPI returns
+``0x57`` and GCM cannot restore the token.
 
-GCM Store is reset only from the real GUI ``main()`` on Windows, and only
-once. A failed delete does not write the marker. Stub/smoke/import leave
-cookies and GCM bytes alone. ``DEPRECATED_ENDPOINT`` is Google's retired GCM
-URL and is not disabled here.
+Disable OsCryptAsync so sync DPAPI can mint a key. Reset the GCM Store
+once after that flag is in place. Cookies stay. ``DEPRECATED_ENDPOINT``
+is Google's retired GCM URL and is not disabled here.
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
 
-_GCM_RESET_MARKER = ".gcm-os-crypt-reset-1"
+_GCM_RESET_MARKER = ".gcm-os-crypt-reset-2"
+_OSCRYPT_FEATURE = "OsCryptAsync"
 
 
 def profile_root() -> Path:
@@ -30,20 +32,26 @@ def profile_root() -> Path:
     return Path(base) / "yt-rec" / "youtube-push"
 
 
+def chromium_user_data_dir() -> Path:
+    return profile_root() / "storage"
+
+
 def reset_gcm_store_once(root: Path) -> bool:
     """Remove an unreadable GCM Store once. Cookies stay. Marker only after success."""
     marker = root / _GCM_RESET_MARKER
     if marker.exists():
         return False
-    gcm = root / "storage" / "GCM Store"
-    if gcm.is_dir():
+    targets = [root / "storage" / "GCM Store", root / "GCM Store"]
+    for gcm in targets:
+        if not gcm.is_dir():
+            continue
         try:
             shutil.rmtree(gcm)
         except OSError:
             return False
     try:
         root.mkdir(parents=True, exist_ok=True)
-        marker.write_text("gcm store reset after os_crypt decrypt failure\n", encoding="utf-8")
+        marker.write_text("gcm store reset after os_crypt 0x57\n", encoding="utf-8")
     except OSError:
         return False
     return True
@@ -55,11 +63,25 @@ def maybe_reset_gcm_store() -> None:
     reset_gcm_store_once(profile_root())
 
 
+def _with_user_data_and_oscrypt(current: str, user_data: Path) -> str:
+    tokens = current.split() if current else []
+    if not any(token.startswith("--user-data-dir=") for token in tokens):
+        tokens.append(f"--user-data-dir={user_data}")
+    index = next((i for i, token in enumerate(tokens) if token.startswith("--disable-features=")), None)
+    if index is None:
+        tokens.append(f"--disable-features={_OSCRYPT_FEATURE}")
+        return " ".join(tokens)
+    names = [name for name in tokens[index].split("=", 1)[1].split(",") if name]
+    if _OSCRYPT_FEATURE not in names:
+        names.append(_OSCRYPT_FEATURE)
+        tokens[index] = "--disable-features=" + ",".join(names)
+    return " ".join(tokens)
+
+
 def configure_webengine_process() -> None:
     root = profile_root()
+    data = chromium_user_data_dir()
     root.mkdir(parents=True, exist_ok=True)
-    flag = f"--user-data-dir={root}"
+    data.mkdir(parents=True, exist_ok=True)
     current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
-    if "--user-data-dir=" in current:
-        return
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{current} {flag}".strip() if current else flag
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _with_user_data_and_oscrypt(current, data)
