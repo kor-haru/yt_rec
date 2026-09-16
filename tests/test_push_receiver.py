@@ -85,9 +85,50 @@ class Notice(QObject):
         self.closed.emit()
 
 
+def test_create_push_profile_binds_storage_before_named_profile(qapp, tmp_path, monkeypatch):
+    order: list[tuple] = []
+
+    class Builder:
+        def setPersistentStoragePath(self, path):
+            order.append(("storage", path))
+
+        def setCachePath(self, path):
+            order.append(("cache", path))
+
+        def setPersistentCookiesPolicy(self, policy):
+            order.append(("cookies", policy))
+
+        def setPersistentPermissionsPolicy(self, policy):
+            order.append(("permissions", policy))
+
+        def createProfile(self, name, parent):
+            order.append(("create", name))
+            return FakeProfile(name, parent)
+
+    monkeypatch.setattr(module, "QWebEngineProfileBuilder", Builder)
+    parent = QObject()
+    root = tmp_path / "recv"
+    profile = module._create_push_profile(root, parent)
+    assert [step[0] for step in order] == ["storage", "cache", "cookies", "permissions", "create"]
+    assert order[0][1] == str(root / "storage")
+    assert order[1][1] == str(root / "cache")
+    assert order[-1] == ("create", "yt-rec-youtube-push")
+    assert profile.push_enabled is True
+    assert Path(profile.paths["downloads"]) == root / "downloads"
+
+
+def _fake_create_profile(directory: Path, parent):
+    profile = FakeProfile("yt-rec-youtube-push", parent)
+    profile.setPersistentStoragePath(str(directory / "storage"))
+    profile.setCachePath(str(directory / "cache"))
+    profile.setDownloadPath(str(directory / "downloads"))
+    profile.setPushServiceEnabled(True)
+    return profile
+
+
 @pytest.fixture
 def receiver(qapp, tmp_path, monkeypatch):
-    monkeypatch.setattr(module, "QWebEngineProfile", FakeProfile)
+    monkeypatch.setattr(module, "_create_push_profile", _fake_create_profile)
     monkeypatch.setattr(module, "_Page", FakePage)
     monkeypatch.setattr(module, "default_profile_directory", lambda: tmp_path / "receiver")
     result = module.YouTubePushReceiver()

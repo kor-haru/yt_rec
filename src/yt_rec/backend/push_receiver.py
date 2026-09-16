@@ -32,6 +32,7 @@ from PySide6.QtWebEngineCore import (
     QWebEnginePage,
     QWebEnginePermission,
     QWebEngineProfile,
+    QWebEngineProfileBuilder,
     QWebEngineScript,
 )
 from PySide6.QtWidgets import QMessageBox
@@ -52,6 +53,25 @@ _MAX_RESPONSE = 65_536
 def default_profile_directory() -> Path:
     """Product-owned profile, never a caller-supplied Chrome/cookie directory."""
     return profile_root()
+
+
+def _create_push_profile(directory: Path, parent: QObject) -> QWebEngineProfile:
+    """Build the named profile with storage already bound.
+
+    Constructing ``QWebEngineProfile(name)`` then calling
+    ``setPersistentStoragePath`` lets Qt load the default location first.
+    Profile teardown can then drop push identifiers. Set paths on the builder
+    before ``createProfile``.
+    """
+    builder = QWebEngineProfileBuilder()
+    builder.setPersistentStoragePath(str(directory / "storage"))
+    builder.setCachePath(str(directory / "cache"))
+    builder.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+    builder.setPersistentPermissionsPolicy(QWebEngineProfile.PersistentPermissionsPolicy.StoreOnDisk)
+    profile = builder.createProfile("yt-rec-youtube-push", parent)
+    profile.setDownloadPath(str(directory / "downloads"))
+    profile.setPushServiceEnabled(True)
+    return profile
 
 
 def _is_youtube_url(value: str) -> bool:
@@ -215,11 +235,7 @@ class YouTubePushReceiver(QObject):
         self._pending: dict[str, _Pending] = {}
         self._last_status: tuple[str, str] | None = None
         directory = default_profile_directory()
-        self.profile = QWebEngineProfile("yt-rec-youtube-push", self)
-        self.profile.setPersistentStoragePath(str(directory / "storage"))
-        self.profile.setCachePath(str(directory / "cache"))
-        self.profile.setDownloadPath(str(directory / "downloads"))
-        self.profile.setPushServiceEnabled(True)
+        self.profile = _create_push_profile(directory, self)
         self.profile.downloadRequested.connect(lambda item: item.cancel())
         self.page = _Page(self.profile, self)
         self._channel = QWebChannel(self.page)
