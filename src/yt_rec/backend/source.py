@@ -24,6 +24,7 @@ from .notifications import LiveNotification, NotificationRecorder, NotificationR
 from .notification_history import MAX_HISTORY, NotificationHistoryStore, ReceivedNotification
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
+from .schedule import FileScheduleStore, ScheduleStore, ScheduleWaker
 from .selection import FileSeenStore, FileSelectionStore
 from .tokens import default_token_store
 from .youtube import YouTubeApi, session_from_credentials
@@ -50,6 +51,7 @@ class BackendSource(EventSource):
         log_store: LogStore | None = None,
         archive_store: ArchiveStore | None = None,
         notification_history_store: NotificationHistoryStore | None = None,
+        schedule_store: ScheduleStore | None = None,
     ) -> None:
         super().__init__()
         if controller.event_only and not background:
@@ -77,7 +79,19 @@ class BackendSource(EventSource):
             selection=controller._selection, recorder=controller._recorder,
             seen=controller._seen, on_update=self._notification_update,
             can_start=lambda: not self._stopping,
+            schedules=schedule_store,
+            record_premieres=lambda: controller._options.record_premieres,
+            on_schedule=self._wake_schedules,
         ) if controller.event_only else None
+        # 예약 라이브 전용 대기자. 예약이 없으면 자고, 예정 시각에만 깨어난다.
+        self._schedule_waker = ScheduleWaker(
+            due_at=self._notifications.next_schedule_at,
+            on_due=self._notifications.check_schedules,
+        ) if self._notifications is not None else None
+
+    def _wake_schedules(self) -> None:
+        if self._schedule_waker is not None:
+            self._schedule_waker.wake()
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
@@ -325,6 +339,9 @@ class BackendSource(EventSource):
             self._worker.start()
         self._run(self._load_notification_history)
         self._run(self._controller.start)
+        if self._schedule_waker is not None:
+            # 복원된 예약 중 예정 시각이 이미 지난 것은 첫 확인에서 바로 처리된다.
+            self._schedule_waker.start()
         if self._poll_interval_ms > 0 and not self._controller.event_only:
             timer = QTimer(self)
             timer.setInterval(self._poll_interval_ms)
@@ -339,6 +356,8 @@ class BackendSource(EventSource):
         self._stopping = True
         if self._poll_timer is not None:
             self._poll_timer.stop()
+        if self._schedule_waker is not None:
+            self._schedule_waker.request_stop()
         recorder = getattr(self._controller, "_recorder", None)
         if recorder is not None:
             shutdown = getattr(recorder, "begin_shutdown", None) or getattr(recorder, "stop_all", None)
@@ -364,6 +383,8 @@ class BackendSource(EventSource):
                 raise RuntimeError("GUI 스레드에서 begin_shutdown()을 먼저 호출하세요")
             self.begin_shutdown()
         recorder = getattr(self._controller, "_recorder", None)
+        if self._schedule_waker is not None:
+            self._schedule_waker.stop()
         if self._background:
             worker = self._worker
             if worker is not None and worker is not threading.current_thread():
@@ -500,6 +521,7 @@ def create_backend_source(
         # 짧은 타이머는 일정을 확인할 뿐 API는 controller가 실제 간격대로 호출한다.
         poll_interval_ms=1000 if effective_interval > 0 else 0,
         notification_history_store=NotificationHistoryStore(default_settings_path().with_name("notification-history.json")),
+        schedule_store=FileScheduleStore(default_settings_path().with_name("upcoming_lives.json")),
     )
     try:
         source._archive_store = ArchiveStore()

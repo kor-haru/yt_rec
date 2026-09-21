@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from yt_rec.recording.ownership import validate_video_id
@@ -18,6 +19,7 @@ __all__ = [
     "YouTubeError",
     "ChannelRef",
     "LiveBroadcast",
+    "VideoState",
     "YouTubeApi",
     "session_from_credentials",
     "recommended_poll_interval",
@@ -70,6 +72,72 @@ class LiveBroadcast:
     channel_id: str
     title: str
     channel_name: str = ""
+
+
+#: 방송 전 프리미어와 예약 라이브를 가르는 유일한 신호가 길이다. 예약 라이브는
+#: 아직 찍히지 않았으니 ``P0D`` 이고, 프리미어는 이미 만들어 둔 파일이라 실제
+#: 길이가 붙는다. API 에 프리미어 전용 필드는 없다 — 이 값은 추정이다.
+_ZERO_DURATIONS = frozenset({"", "P0D", "PT0S", "P0DT0H0M0S"})
+
+
+@dataclass(frozen=True)
+class VideoState:
+    """videos.list 한 번이 알려 주는 영상의 실제 상태.
+
+    ``status`` 는 ``live`` / ``upcoming`` / ``none`` / ``ended`` / ``unknown``
+    중 하나다. :meth:`YouTubeApi.get_live` 는 이 넷을 ``None`` 하나로 뭉갠다.
+    같은 응답에 이미 들어 있던 값을 읽을 뿐이라 quota 추가 비용이 없다(#82).
+    """
+
+    video_id: str
+    status: str
+    #: 채널 정보를 알 수 있을 때의 영상 메타데이터. ``live`` 가 아니어도 채운다.
+    broadcast: LiveBroadcast | None = None
+    #: ``upcoming`` 일 때 YouTube 가 알려 준 예정 시작 시각(epoch 초).
+    scheduled_start: float | None = None
+    #: 프리미어로 보이는가. 전용 필드가 없어 길이로 추정한 값이다.
+    premiere: bool = False
+
+
+def _epoch(value: object) -> float | None:
+    """RFC3339 시각 문자열을 epoch 초로. 해석할 수 없으면 ``None``."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text[-1] in "Zz":
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
+
+
+def _video_state_from_item(video_id: str, item: dict[str, Any]) -> VideoState:
+    snippet = item.get("snippet") or {}
+    details = item.get("liveStreamingDetails") or {}
+    content = str(snippet.get("liveBroadcastContent") or "")
+    channel_id = str(snippet.get("channelId") or "")
+    broadcast = LiveBroadcast(
+        video_id=video_id,
+        channel_id=channel_id,
+        title=str(snippet.get("title") or video_id),
+        channel_name=str(snippet.get("channelTitle") or ""),
+    ) if channel_id else None
+    if details.get("actualEndTime"):
+        return VideoState(video_id, "ended", broadcast)
+    if content == "live" and details.get("actualStartTime") and broadcast is not None:
+        return VideoState(video_id, "live", broadcast)
+    scheduled = _epoch(details.get("scheduledStartTime"))
+    if content == "upcoming" and scheduled is not None and broadcast is not None:
+        duration = str((item.get("contentDetails") or {}).get("duration") or "").upper()
+        return VideoState(video_id, "upcoming", broadcast, scheduled, duration not in _ZERO_DURATIONS)
+    if content == "none":
+        return VideoState(video_id, "none", broadcast)
+    # 예정 시각 없는 upcoming, 시작 시각 없는 live, 없는 영상은 모두 판단 불가다.
+    return VideoState(video_id, "unknown", broadcast)
 
 
 class HttpSession(Protocol):
@@ -161,23 +229,26 @@ class YouTubeApi:
 
     def get_live(self, video_id: str) -> LiveBroadcast | None:
         """Check only the notified video with one videos.list request; no scan."""
+        state = self._video_state(video_id, "snippet,liveStreamingDetails")
+        return state.broadcast if state.status == "live" else None
+
+    def get_video_state(self, video_id: str) -> VideoState:
+        """알림받은 영상 하나의 상태를 videos.list 한 번으로 확정한다.
+
+        :meth:`get_live` 와 요청 수도 quota(1 단위)도 같다. ``contentDetails``
+        를 함께 읽는 것은 part 추가일 뿐 비용이 붙지 않으며, 프리미어 추정에만
+        쓴다. 예약 라이브면 ``scheduled_start`` 에 예정 시작 시각이 들어온다.
+        """
+        return self._video_state(video_id, "snippet,liveStreamingDetails,contentDetails")
+
+    def _video_state(self, video_id: str, parts: str) -> VideoState:
         validate_video_id(video_id)
-        payload = self._get("videos", {"part": "snippet,liveStreamingDetails", "id": video_id})
+        payload = self._get("videos", {"part": parts, "id": video_id})
         for item in payload.get("items") or []:
             if item.get("id") != video_id:
                 continue
-            snippet = item.get("snippet") or {}
-            live = item.get("liveStreamingDetails") or {}
-            if (snippet.get("liveBroadcastContent") != "live"
-                    or not snippet.get("channelId")
-                    or not live.get("actualStartTime") or live.get("actualEndTime")):
-                return None
-            return LiveBroadcast(
-                video_id=video_id, channel_id=str(snippet["channelId"]),
-                title=str(snippet.get("title") or video_id),
-                channel_name=str(snippet.get("channelTitle") or ""),
-            )
-        return None
+            return _video_state_from_item(video_id, item)
+        return VideoState(video_id, "unknown")
 
     def find_lives(self, channel_ids: Sequence[str]) -> list[LiveBroadcast]:
         """선택된 채널의 *현재 송출 중* 라이브만 돌려준다.

@@ -84,8 +84,10 @@ class SettingsDialog(QDialog):
         self.start_hidden_check = QCheckBox("시작할 때 창을 숨기고 트레이로 실행", self)
         self.minimize_to_tray_check = QCheckBox("최소화하면 트레이로 보내기", self)
         self.notifications_check = QCheckBox("녹화 및 오류 알림 표시", self)
+        self.premiere_check = QCheckBox("예약된 프리미어도 녹화 (기본: 끔)", self)
         for checkbox in (self.autostart_check, self.start_hidden_check,
-                         self.minimize_to_tray_check, self.notifications_check):
+                         self.minimize_to_tray_check, self.notifications_check,
+                         self.premiere_check):
             form.addRow(checkbox)
         self.retention_spin = QSpinBox(self)
         self.retention_spin.setRange(1, 365)
@@ -138,6 +140,7 @@ class SettingsDialog(QDialog):
         self.start_hidden_check.setChecked(options.start_hidden)
         self.minimize_to_tray_check.setChecked(options.minimize_to_tray)
         self.notifications_check.setChecked(options.notifications_enabled)
+        self.premiere_check.setChecked(options.record_premieres)
         self.retention_spin.setValue(options.log_retention_days)
         self._validate()
 
@@ -175,6 +178,7 @@ class SettingsDialog(QDialog):
             start_hidden=self.start_hidden_check.isChecked(),
             minimize_to_tray=self.minimize_to_tray_check.isChecked(),
             notifications_enabled=self.notifications_check.isChecked(),
+            record_premieres=self.premiere_check.isChecked(),
             log_retention_days=self.retention_spin.value(),
         )
         if not sent:
