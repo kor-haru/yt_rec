@@ -210,7 +210,7 @@ def _session(qapp, state, window_settings, monkeypatch, available, source=None, 
     tray_type.ActivationReason = QSystemTrayIcon.ActivationReason
     tray_type.isSystemTrayAvailable.return_value = available
     monkeypatch.setattr("yt_rec.app.QSystemTrayIcon", tray_type)
-    monkeypatch.setattr("yt_rec.app.load_settings", lambda: options or SimpleNamespace(start_hidden=True, notifications_enabled=True))
+    monkeypatch.setattr("yt_rec.app.load_settings", lambda: options or SimpleNamespace(start_hidden=True, notifications_enabled=True, notification_receiver="chrome"))
     monkeypatch.setattr(qapp, "quit", MagicMock())
     window = MainWindow(state, settings=window_settings)
     session = DesktopSession(AppContext(qapp, state, window, source))

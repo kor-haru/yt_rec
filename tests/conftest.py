@@ -187,6 +187,8 @@ def fake_push_receiver(monkeypatch):
     module = types.ModuleType("yt_rec.backend.push_receiver")
     module.YouTubePushReceiver = Receiver
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    # 설정이 어느 수신기를 고르든 이 대역을 쓴다. 실제 Chrome 을 띄우지 않는다.
+    monkeypatch.setattr("yt_rec.app.notification_receiver_class", lambda name: Receiver)
     monkeypatch.setattr("yt_rec.app.QWebEngineView", View)
     return Receiver
 
