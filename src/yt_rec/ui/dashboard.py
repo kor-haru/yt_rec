@@ -222,6 +222,7 @@ class Dashboard(QWidget):
 
     manage_channels_requested = Signal()
     open_archive_requested = Signal()
+    clear_completed_requested = Signal()
     stop_requested = Signal(str)
 
     def __init__(self, state: AppState, parent: QWidget | None = None) -> None:
@@ -246,6 +247,16 @@ class Dashboard(QWidget):
         self.open_archive_button = QPushButton("보관함 열기", self)
         self.open_archive_button.clicked.connect(self.open_archive_requested)
         self.completed_section.add_action_widget(self.open_archive_button)
+
+        # 이력만 지운다. 파일 삭제(`보관함 열기` → `파일 삭제`)와 섞이지 않도록
+        # 문구를 분리해 둔다. 비울 이력이 없으면 눌리지 않는다.
+        self.clear_completed_button = QPushButton("이력 비우기", self)
+        self.clear_completed_button.setToolTip(
+            "완료 이력을 모두 지웁니다. 저장된 영상 파일은 삭제하지 않습니다"
+        )
+        self.clear_completed_button.setEnabled(False)
+        self.clear_completed_button.clicked.connect(self.clear_completed_requested)
+        self.completed_section.add_action_widget(self.clear_completed_button)
 
         self.recording_empty = self._empty_label(EMPTY_RECORDING)
         self.channels_empty = self._empty_label(EMPTY_CHANNELS)
@@ -343,6 +354,7 @@ class Dashboard(QWidget):
             registry=self._completed_rows,
         )
         self.completed_empty.setVisible(not items)
+        self.clear_completed_button.setEnabled(bool(items))
 
     def _on_watch(self, watch: WatchStatus) -> None:
         """채널 섹션의 빈 상태 문구를 고른다. 문구를 정하는 곳은 여기 하나다.

@@ -5,7 +5,7 @@
 1. 상단 바 — 앱 이름, 감시 상태 배지, 설정·로그·계정 진입 버튼
 2. `녹화 중` 섹션
 3. `감시 중 채널` 섹션 (`채널 관리` 버튼)
-4. `최근 완료` 섹션 (`보관함 열기` 버튼)
+4. `최근 완료` 섹션 (`보관함 열기`·`이력 비우기` 버튼)
 5. 하단 상태 표시줄 — 다음 확인까지 남은 시간, API quota, 누적 오류 수
 
 창은 :class:`~yt_rec.state.store.AppState` 의 시그널만 구독한다. 백엔드를
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..state.events import ArchiveDismissFinished
 from ..state.models import ConnectionState, NotificationStatus, QuotaStatus, StopReason, WatchState, WatchStatus
 from ..state.store import AppState
 from .dashboard import Dashboard
@@ -141,6 +142,8 @@ class MainWindow(QMainWindow):
         self.desktop_managed = False
         self.tray_available = False
         self.exiting = False
+        # 보관함 창도 같은 신호를 듣는다. 이 창이 보낸 비우기의 결과만 알린다.
+        self._clear_completed_pending = False
         # 최소 크기는 처음 보일 때 한 번 더 잡는다. 상태 표시줄의 크기 조절
         # 손잡이가 show() 시점에야 폭을 보고하므로(실측 439px → 462px), 생성
         # 시점의 값만 믿으면 상태 표시줄이 창보다 넓어져 손잡이가 잘린다.
@@ -210,10 +213,12 @@ class MainWindow(QMainWindow):
 
         self.dashboard.manage_channels_requested.connect(self.open_channels)
         self.dashboard.open_archive_requested.connect(self.open_archive)
+        self.dashboard.clear_completed_requested.connect(self._confirm_clear_completed)
         self.dashboard.stop_requested.connect(self._confirm_stop)
 
         state.connection_changed.connect(self._on_connection)
         state.command_rejected.connect(self._on_command_rejected)
+        state.archive_dismiss_finished.connect(self._on_archive_dismiss_finished)
         state.watch_changed.connect(self._on_watch)
         state.errors_changed.connect(self._on_errors)
         state.quota_changed.connect(self._on_quota)
@@ -499,11 +504,54 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self._state.stop_recording(recording_id, reason="사용자가 중지했습니다")
 
-    def _on_command_rejected(self, _command: object, reason: str) -> None:
+    def _confirm_clear_completed(self) -> None:
+        """보이는 완료 이력을 한 번에 비운다. 영상 파일은 건드리지 않는다.
+
+        `최근 완료` 는 보관함의 앞부분만 보여 주므로, 보이는 이력 전체를 보낸다.
+        일부만 지우면 비운 자리를 다음 이력이 곧바로 메워 비워지지 않는다.
+        파일 삭제는 보관함의 `파일 삭제` 하나뿐이다 — 여기서는 요청하지 않는다.
+        """
+        items = self._state.archive
+        if not items:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("완료 이력 비우기")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(f"완료 이력 {len(items)}건을 모두 비울까요?")
+        box.setInformativeText(
+            "저장된 영상 파일은 삭제하지 않습니다. 목록에서만 사라집니다.\n"
+            "최근 완료와 보관함에서 함께 사라지며, 새로고침하거나 앱을 다시 열어도 나타나지 않습니다.\n"
+            "진행 중인 녹화의 이력은 끝난 뒤에 남습니다."
+        )
+        clear = box.addButton("이력 비우기", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton("취소", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        if box.clickedButton() is not clear:
+            return
+        self._clear_completed_pending = True
+        # 보내지 못하면 command_rejected 가 사유를 알린다. 화면은 스스로 지우지 않는다.
+        if not self._state.dismiss_archive(items):
+            self._clear_completed_pending = False
+
+    def _on_archive_dismiss_finished(self, result: ArchiveDismissFinished) -> None:
+        if not self._clear_completed_pending:
+            return  # 보관함 창이 보낸 정리 결과. 그 창이 자기 자리에 알린다.
+        self._clear_completed_pending = False
+        self._notify(result.error or (
+            f"완료 이력 {result.removed_count}건을 비웠습니다. 저장된 영상 파일은 그대로입니다."
+        ))
+
+    def _notify(self, message: str) -> None:
         # 모달 상자는 테스트와 조작을 막는다. 상태 표시줄에만 알린다.
         bar = self.statusBar()
         if bar is not None:
-            bar.showMessage(reason, 8000)
+            bar.showMessage(message, 8000)
+
+    def _on_command_rejected(self, _command: object, reason: str) -> None:
+        self._notify(reason)
 
     @property
     def child_windows(self) -> dict[str, QDialog]:
