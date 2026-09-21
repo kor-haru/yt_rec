@@ -11,6 +11,10 @@ QtWebEngine 의 Chromium 은 Google 이 폐기한 구형 GCM 등록 엔드포인
 돌면서 ``showNotification`` 을 감싼다. 그래서 탭이 하나도 떠 있지 않아도, 워커가
 푸시 때문에 깨어나는 순간의 페이로드를 그대로 받는다.
 
+브라우저는 헤드리스로 띄운다 (#86). 푸시 통로(MCS)와 서비스 워커는 창 없이도
+그대로 살아 있으므로 수신에는 창이 필요 없다. 창은 사용자가 직접 로그인하거나
+알림 설정을 바꿀 때만 뜬다.
+
 받은 값은 기존 :class:`~.notifications.LiveNotification` /
 :class:`~.notification_history.ReceivedNotification` 경로로 그대로 들어간다.
 녹화 엔진은 이 모듈을 알지 못한다.
@@ -248,6 +252,9 @@ class ChromePushReceiver(QObject):
         self._last_status: tuple[str, str] | None = None
         self._process: QProcess | None = None
         self._owns_process = False
+        # 우리가 창을 띄워 둔 동안만 참이다. 이어받은 브라우저는 모드를 알 수 없으니
+        # 거짓으로 둔다 — 창이 필요하면 닫고 다시 띄우는 쪽이 언제나 맞다.
+        self._visible = False
         self._socket: QWebSocket | None = None
         self._cdp: CdpProtocol | None = None
         self._network = QNetworkAccessManager(self)
@@ -283,7 +290,8 @@ class ChromePushReceiver(QObject):
         self._started = True
         self._bring_up()
 
-    def _bring_up(self) -> None:
+    def _bring_up(self, visible_url: str = "") -> None:
+        """수신기를 세운다. ``visible_url`` 이 있으면 그 주소를 보이는 창으로 연다."""
         if self._closed:
             return
         executable = self._find_executable()
@@ -298,15 +306,17 @@ class ChromePushReceiver(QObject):
             self._status("error", "수신 브라우저 프로필 폴더를 만들지 못했습니다. 로그를 확인하세요.")
             return
         port = _read_port(profile / PORT_FILE)
-        if port:
+        if port and not visible_url:
             # 앱만 다시 뜬 경우다. 이미 로그인된 브라우저를 두 번 띄우지 않는다.
+            # 그 브라우저가 어느 모드인지는 알 수 없고, 알 필요도 없다.
             self._status("connecting", "이미 실행 중인 수신 브라우저에 연결하는 중입니다.")
             self._port = port
             self._resolve(on_failure=lambda: self._spawn(executable, profile))
             return
-        self._spawn(executable, profile)
+        self._spawn(executable, profile, visible_url)
 
-    def _spawn(self, executable: Path, profile: Path) -> None:
+    def _spawn(self, executable: Path, profile: Path, visible_url: str = "") -> None:
+        """Chrome 을 띄운다. 기본은 헤드리스이고, ``visible_url`` 이 있을 때만 창이 뜬다."""
         if self._closed:
             return
         self._status("connecting", "수신 브라우저(Chrome)를 시작하는 중입니다.")
@@ -315,21 +325,27 @@ class ChromePushReceiver(QObject):
             (profile / PORT_FILE).write_text(str(self._port), encoding="ascii")
         except OSError:
             pass  # 포트 파일은 재사용용 편의일 뿐이라 없어도 동작한다.
-        process = QProcess(self)
-        process.setProgram(str(executable))
-        process.setArguments([
+        arguments = [
             f"--user-data-dir={profile}",
             f"--remote-debugging-port={self._port}",
             # 디버깅 통로는 루프백에 묶이고, Origin 헤더도 이 주소만 허용한다.
             f"--remote-allow-origins=http://127.0.0.1:{self._port}",
             "--no-first-run",
             "--no-default-browser-check",
-            YOUTUBE,
-        ])
+        ]
+        if not visible_url:
+            # 수신은 백그라운드 동작이다. 헤드리스에서도 푸시 통로(MCS)와 서비스
+            # 워커는 그대로 붙으므로 창을 띄울 이유가 없다 (#86).
+            arguments.append("--headless=new")
+        arguments.append(visible_url or YOUTUBE)
+        process = QProcess(self)
+        process.setProgram(str(executable))
+        process.setArguments(arguments)
         process.finished.connect(self._process_finished)
         process.errorOccurred.connect(self._process_error)
         self._process = process
         self._owns_process = True
+        self._visible = bool(visible_url)
         self._attempts = 0
         process.start()
         QTimer.singleShot(_CONNECT_RETRY_MS, self._retry_resolve)
@@ -670,6 +686,7 @@ class ChromePushReceiver(QObject):
 
     def _teardown(self) -> None:
         self._heartbeat.stop()
+        self._visible = False  # 다음 기동은 언제나 헤드리스다. 보이는 모드는 눌어붙지 않는다.
         self._cdp = None
         self._worker_sessions.clear()
         self._page_session = self._page_target = ""
@@ -713,16 +730,28 @@ class ChromePushReceiver(QObject):
         self._open(NOTIFICATION_SETTINGS_URL)
 
     def _open(self, url: str) -> None:
-        """Chrome 창에 탭을 열고 앞으로 부른다. 앱 안에 웹뷰를 띄우지 않는다."""
+        """Chrome 창에 탭을 열고 앞으로 부른다. 앱 안에 웹뷰를 띄우지 않는다.
+
+        사용자가 직접 로그인하거나 알림 설정을 바꾸는 경로다. 평소에는 헤드리스라
+        ``Target.createTarget`` 이 보이지 않는 탭만 만들어 아무 일도 안 한 것처럼
+        보인다. Chrome 은 같은 ``--user-data-dir`` 에 두 번째 프로세스를 붙이지
+        않으므로, 돌고 있는 브라우저를 닫고 같은 프로필을 보이는 모드로 다시 띄운다
+        — 프로필이 같아 로그인과 푸시 등록은 그대로 남는다. 사용자가 그 창을 닫으면
+        기존 재시작 경로가 돌면서 다시 헤드리스로 올라온다.
+        """
         if self._closed:
             return
-        if self._cdp is None:
-            if self._started:
-                self._bring_up()
-            else:
-                self.start()
+        if self._visible and self._cdp is not None:
+            # 이미 창이 떠 있다. 닫았다 다시 띄우면 입력하던 로그인이 날아간다.
+            self._cdp.call("Target.createTarget", {"url": url}, on_reply=self._opened)
             return
-        self._cdp.call("Target.createTarget", {"url": url}, on_reply=self._opened)
+        self._started = True
+        if self._cdp is not None and self._socket is not None:
+            # 이어받은 브라우저도 닫는다. 창을 띄우려면 프로필이 비어 있어야 한다.
+            self._cdp.call("Browser.close")
+            self._socket.flush()
+        self._teardown()
+        self._bring_up(url)
 
     def _opened(self, message: dict) -> None:
         result = message.get("result")
