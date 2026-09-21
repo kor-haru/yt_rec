@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from yt_rec.backend import chrome_push as module
 from yt_rec.backend.notification_history import ReceivedNotification
@@ -24,6 +24,7 @@ WORKER_SESSION = "SW-SESSION"
 PAGE_TARGET = "PAGE-TARGET"
 PAGE_SESSION = "PAGE-SESSION"
 SERVICE_WORKER_URL = "https://www.youtube.com/sw.js"
+READY = {"permission": "granted", "worker": True, "active": True, "subscription": True}
 
 
 class FakeProcess(QObject):
@@ -76,6 +77,36 @@ def receiver(qapp, tmp_path, chrome, monkeypatch):
     )
     yield result
     result.close()
+
+
+class FakeTimers:
+    """``module.QTimer`` 자리에 놓을 대역. 예약을 붙잡아 두고 직접 돌린다.
+
+    재시도를 실시간으로 기다리지 않는다. 타이머 객체 자체는 진짜 것을 쓴다.
+    """
+
+    def __init__(self):
+        self.pending: list[tuple[int, object]] = []
+
+    def __call__(self, parent=None):
+        return QTimer(parent)
+
+    def singleShot(self, delay, callback):
+        self.pending.append((delay, callback))
+
+    def fire(self) -> int:
+        """예약된 것을 한 번씩 돌리고 그 개수를 준다."""
+        pending, self.pending = self.pending, []
+        for _delay, callback in pending:
+            callback()
+        return len(pending)
+
+
+@pytest.fixture
+def timers(monkeypatch):
+    fake = FakeTimers()
+    monkeypatch.setattr(module, "QTimer", fake)
+    return fake
 
 
 class FakeSocket(QObject):
@@ -144,6 +175,13 @@ def reply(receiver, call_id: int, value: object) -> None:
     receiver._cdp.feed(json.dumps({
         "id": call_id, "result": {"result": {"type": "string", "value": json.dumps(value)}},
     }))
+
+
+def failed(receiver, call_id: int) -> None:
+    """네비게이션이 커밋되면서 실행 컨텍스트와 함께 날아간 확인."""
+    receiver._cdp.feed(json.dumps({"id": call_id, "result": {
+        "result": {"type": "object"}, "exceptionDetails": {"text": "Execution context was destroyed."},
+    }}))
 
 
 def last_id(sent: list[str], method: str) -> int:
@@ -426,9 +464,9 @@ def test_raw_push_body_records_one_video_and_drops_anything_else(receiver):
     ({"permission": "granted", "worker": False, "active": False, "subscription": False}, "worker_missing"),
     ({"permission": "granted", "worker": True, "active": False, "subscription": False}, "worker_inactive"),
     ({"permission": "granted", "worker": True, "active": True, "subscription": False}, "unsubscribed"),
-    ({"permission": "granted", "worker": True, "active": True, "subscription": True}, "ready"),
+    (READY, "ready"),
+    # 모양이 틀린 답은 답이 아니다. 읽지 못한 것(재확인 대상)과 달리 바로 확정한다.
     ({"permission": "granted", "worker": True, "active": True, "subscription": "yes"}, "error"),
-    ({"failed": True}, "error"),
 ])
 def test_registration_status_is_truthful(receiver, value, expected):
     sent = open_session(receiver)
@@ -437,10 +475,91 @@ def test_registration_status_is_truthful(receiver, value, expected):
     assert receiver.status[0] == expected
 
 
-def test_registration_without_a_youtube_tab_asks_for_login(receiver):
+# -- 뜨는 중인 페이지 (#88) ---------------------------------------------------
+
+
+def test_a_check_that_fails_while_the_page_loads_is_retried_instead_of_latched(receiver, timers):
+    """갓 띄운 브라우저의 탭은 URL 만 youtube 일 뿐 문서가 아직 커밋되지 않았다.
+
+    실측 회귀: 새로 띄운 브라우저는 2번 중 2번, 붙자마자 보낸 확인이 실패해
+    ``error`` 로 눌어붙었다. 사용자가 직접 누르기 전까지 풀리지 않았다.
+    """
+    sent = open_session(receiver)
+    attach_page(receiver)
+    reply(receiver, last_id(sent, "Runtime.evaluate"), {"failed": True})
+    assert receiver.status[0] == "checking"
+    assert timers.fire() == 1
+    reply(receiver, last_id(sent, "Runtime.evaluate"), READY)
+    assert receiver.status[0] == "ready"
+    # 답을 받았으면 끝이다. 다시 묻지 않는다.
+    assert timers.fire() == 0
+
+
+def test_a_check_that_keeps_failing_latches_the_error_and_then_stops(receiver, timers):
+    """시간으로 갈린다. 계속 실패하면 정말 문제가 있는 것이다."""
+    sent = open_session(receiver)
+    attach_page(receiver)
+    for _ in range(module._RECHECK_ATTEMPTS):
+        failed(receiver, last_id(sent, "Runtime.evaluate"))
+        assert receiver.status[0] == "checking"
+        assert timers.fire() == 1
+    failed(receiver, last_id(sent, "Runtime.evaluate"))
+    assert receiver.status == ("error", "수신 브라우저의 알림 상태를 확인하지 못했습니다. 알림 상태 확인으로 다시 확인하세요")
+    # 상주 폴링이 아니다. 횟수를 다 쓰면 더 묻지 않는다.
+    assert timers.fire() == 0
+
+
+def test_a_user_initiated_check_after_a_latched_error_gets_a_fresh_budget(receiver, timers):
+    """바닥난 횟수가 사용자의 '알림 상태 확인'까지 삼키면 안 된다."""
+    sent = open_session(receiver)
+    attach_page(receiver)
+    for _ in range(module._RECHECK_ATTEMPTS + 1):
+        failed(receiver, last_id(sent, "Runtime.evaluate"))
+        timers.fire()
+    assert receiver.status[0] == "error"
+    receiver.inspect_registration()
+    failed(receiver, last_id(sent, "Runtime.evaluate"))
+    assert timers.fire() == 1
+    reply(receiver, last_id(sent, "Runtime.evaluate"), READY)
+    assert receiver.status[0] == "ready"
+
+
+@pytest.mark.parametrize("value,expected", [
+    ({"permission": "denied", "worker": True, "active": True, "subscription": True}, "permission_required"),
+    ({"permission": "granted", "worker": True, "active": True, "subscription": False}, "unsubscribed"),
+])
+def test_a_conclusive_answer_is_never_retried(receiver, timers, value, expected):
+    """``ready`` 가 아니어도 답은 답이다. 사용자가 할 일이지 경쟁이 아니다."""
+    sent = open_session(receiver)
+    attach_page(receiver)
+    reply(receiver, last_id(sent, "Runtime.evaluate"), value)
+    assert receiver.status[0] == expected
+    assert timers.fire() == 0
+
+
+def test_an_answer_drops_a_retry_that_is_already_queued(receiver, timers):
+    """늦게 온 답이 먼저다. 예약된 재확인은 낡은 것이 된다."""
+    sent = open_session(receiver)
+    attach_page(receiver)
+    first = last_id(sent, "Runtime.evaluate")
+    receiver.inspect_registration()  # 확인 두 개가 함께 떠 있다
+    failed(receiver, last_id(sent, "Runtime.evaluate"))
+    sent.clear()
+    reply(receiver, first, READY)
+    assert receiver.status[0] == "ready"
+    timers.fire()
+    assert "Runtime.evaluate" not in methods(sent)
+
+
+def test_a_tab_that_never_attaches_asks_for_login_only_after_retrying(receiver, timers):
+    """탭이 아직 안 붙은 것과 정말 탭이 없는 것은 시간으로만 갈린다."""
     open_session(receiver)
     receiver.inspect_registration()
-    assert receiver.status[0] == "login_required"
+    assert receiver.status[0] == "checking"
+    for _ in range(module._RECHECK_ATTEMPTS):
+        assert timers.fire() == 1
+    assert receiver.status == ("login_required", "수신 브라우저에 YouTube 탭이 없습니다. 'YouTube 로그인'으로 창을 여세요")
+    assert timers.fire() == 0
 
 
 # -- 살아 있는지 --------------------------------------------------------------
