@@ -166,6 +166,21 @@ def test_launch_uses_the_dedicated_profile_and_a_loopback_only_debug_port(receiv
     assert module.YOUTUBE in process.arguments
 
 
+def test_a_clean_close_forgets_the_port_so_the_next_run_cannot_adopt_a_stranger(receiver, tmp_path):
+    """이어받기는 크래시로 남은 고아 브라우저 전용이다.
+
+    정상 종료 뒤에도 포트가 남아 있으면 다음 실행이 그 포트로 먼저 붙으러 간다.
+    그사이 다른 프로세스가 같은 임시 포트를 잡고 우리 오리진까지 허용해 두었다면
+    전용 프로필이 아닌 브라우저를 붙잡게 된다.
+    """
+    receiver.start()
+    port_file = tmp_path / "profile" / module.PORT_FILE
+    assert module._read_port(port_file)
+    receiver.close()
+    assert not port_file.exists()
+    assert module._read_port(port_file) == 0
+
+
 def test_profile_is_never_the_personal_chrome_profile():
     path = module.chrome_profile_directory()
     assert path.name == "chrome-push" and path.parent.name == "yt-rec"

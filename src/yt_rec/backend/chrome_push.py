@@ -746,4 +746,18 @@ class ChromePushReceiver(QObject):
             self._cdp.call("Browser.close")
             self._socket.flush()
         self._teardown()
+        self._forget_port()
         self._status("stopped", "알림 수신 종료")
+
+    def _forget_port(self) -> None:
+        """정상 종료 뒤에는 포트 파일을 남기지 않는다.
+
+        남겨 두면 다음 실행이 그 포트로 먼저 붙으러 간다. 방금 브라우저를 닫았으니
+        보통은 연결이 실패해 새로 띄우지만, 그사이 다른 프로세스가 같은 임시 포트를
+        잡고 우리 오리진까지 허용해 두었다면 우리 프로필이 아닌 브라우저를 붙잡는다.
+        이어받기는 크래시로 남은 고아 브라우저를 되찾는 경로로만 남긴다.
+        """
+        try:
+            (self._profile_directory() / PORT_FILE).unlink(missing_ok=True)
+        except (OSError, RuntimeError):
+            pass  # 편의용 파일이다. 못 지워도 다음 실행은 연결 실패 후 새로 띄운다.
