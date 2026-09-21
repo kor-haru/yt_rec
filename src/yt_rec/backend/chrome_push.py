@@ -62,6 +62,9 @@ _CONNECT_ATTEMPTS = 20
 _CONNECT_RETRY_MS = 500
 _HEARTBEAT_MS = 30_000
 _ORPHAN_ATTACH_MS = 250
+# 갓 띄운 Chrome 이 youtube.com 을 다 띄우는 데 걸리는 시간을 덮는다 (#88).
+_RECHECK_DELAY_MS = 800
+_RECHECK_ATTEMPTS = 6
 _RESTART_DELAY_MS = (5_000, 10_000, 20_000, 40_000, 60_000)
 _SERVICE_WORKER_SCOPE = YOUTUBE + "/"
 
@@ -141,8 +144,8 @@ _HOOK = """
 })()
 """
 
-#: 권한·서비스 워커·푸시 구독을 한 번 확인한다. 타이머가 아니라 사용자 조작이나
-#: 세션 시작에서만 부른다. 영상/채널 상태는 묻지 않는다.
+#: 권한·서비스 워커·푸시 구독을 확인한다. 사용자 조작이나 세션 시작에서 부르고,
+#: 실패했을 때만 제한된 횟수로 다시 본다. 영상/채널 상태는 묻지 않는다.
 _REGISTRATION = """
 (async () => {
   const out = {permission: Notification.permission, worker: false, active: false, subscription: false};
@@ -261,6 +264,7 @@ class ChromePushReceiver(QObject):
         self._port = 0
         self._attempts = 0
         self._restarts = 0
+        self._rechecks = 0
         self._awaiting_pong = False
         self._worker_sessions: dict[str, str] = {}  # targetId -> sessionId
         self._page_session = ""
@@ -607,13 +611,22 @@ class ChromePushReceiver(QObject):
 
     @Slot()
     def inspect_registration(self) -> None:
-        """권한·워커·구독을 한 번 확인한다. 타이머가 부르지 않는다."""
+        """권한·워커·구독을 확인한다. 주기 타이머가 부르지 않는다.
+
+        사용자가 직접 누른 확인이므로 앞선 실패로 바닥난 재시도 횟수를 되돌린다.
+        그러지 않으면 한 번 확정된 실패 뒤의 수동 확인이 그대로 묻힌다.
+        """
+        self._rechecks = 0
+        self._check()
+
+    def _check(self) -> None:
         if self._closed or self._cdp is None:
             if not self._closed and self._started:
                 self._bring_up()
             return
         if not self._page_session:
-            self._status("login_required", "수신 브라우저에 YouTube 탭이 없습니다. 'YouTube 로그인'으로 창을 여세요")
+            # 탭이 아직 안 붙었을 뿐인 것과 정말 탭이 없는 것은 시간으로만 갈린다.
+            self._check_failed("login_required", "수신 브라우저에 YouTube 탭이 없습니다. 'YouTube 로그인'으로 창을 여세요")
             return
         # 워커를 한 번 깨워 후킹까지 실제로 되는지 확인한다. 반복 타이머가 아니다.
         self._cdp.call("ServiceWorker.startWorker", {"scopeURL": _SERVICE_WORKER_SCOPE},
@@ -624,13 +637,36 @@ class ChromePushReceiver(QObject):
             session=self._page_session, on_reply=self._registration,
         )
 
+    def _check_failed(self, code: str, detail: str) -> None:
+        """실패를 바로 확정하지 않고 짧은 간격으로 몇 번 더 본다 (#88).
+
+        갓 띄운 브라우저의 탭은 URL 만 youtube 일 뿐 문서가 아직 커밋되지 않아,
+        곧바로 보낸 확인이 네비게이션과 함께 날아간다. 페이지가 뜨는 중이라
+        실패한 것과 정말 문제가 있는 것을 시간으로 가른다. 횟수를 다 쓰면 원래
+        문구 그대로 확정한다 — 상주 폴링이 아니라 실패 뒤 제한된 횟수뿐이다.
+        """
+        if self._rechecks >= _RECHECK_ATTEMPTS:
+            self._status(code, detail)
+            return
+        self._rechecks += 1
+        attempt = self._rechecks
+        QTimer.singleShot(_RECHECK_DELAY_MS, lambda: self._recheck(attempt))
+
+    def _recheck(self, attempt: int) -> None:
+        # 그사이 답을 받았거나 사용자가 다시 눌렀으면 이 예약은 낡은 것이다.
+        if self._closed or self._cdp is None or self._rechecks != attempt:
+            return
+        self._check()
+
     def _registration(self, message: dict) -> None:
         if self._closed:
             return
         value = CdpProtocol.value(message)
         if not isinstance(value, dict) or value.get("failed") is True:
-            self._status("error", "수신 브라우저의 알림 상태를 확인하지 못했습니다. 알림 상태 확인으로 다시 확인하세요")
+            self._check_failed("error", "수신 브라우저의 알림 상태를 확인하지 못했습니다. 알림 상태 확인으로 다시 확인하세요")
             return
+        # 답을 받았다. 확정적인 결과이므로 예약된 재시도를 모두 무효로 만든다.
+        self._rechecks = 0
         permission = value.get("permission")
         if (permission not in ("default", "denied", "granted")
                 or any(type(value.get(key)) is not bool for key in ("worker", "active", "subscription"))):
