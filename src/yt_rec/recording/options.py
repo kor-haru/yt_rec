@@ -14,6 +14,8 @@ import tempfile
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from .naming import DEFAULT_FILENAME_TEMPLATE, migrate_filename_template
+
 __all__ = [
     "NOTIFICATION_RECEIVERS",
     "QUALITY_PRESETS",
@@ -127,8 +129,8 @@ class RecordingOptions:
     #: 패킷 단위 검증(역행 타임스탬프·프레임 간격) 수행 여부. 긴 파일에서는 느리다.
     verify_deep: bool = True
 
-    #: 최종 파일 이름 템플릿. ``{date}`` ``{title}`` ``{channel}`` ``{video_id}`` 사용 가능.
-    filename_template: str = "{date}_{title}"
+    #: 최종 파일 이름 배치. 대괄호가 토큰이다(:data:`~.naming.FILENAME_TOKENS`).
+    filename_template: str = DEFAULT_FILENAME_TEMPLATE
 
     #: 파일명에 넣을 제목의 최대 글자 수.
     max_title_chars: int = 120
@@ -173,6 +175,11 @@ class RecordingOptions:
         if self.work_root is not None:
             object.__setattr__(self, "work_root", Path(self.work_root))
         object.__setattr__(self, "extra_ytdlp_args", tuple(self.extra_ytdlp_args))
+        # 옛 문법으로 저장된 설정도 그대로 읽는다(#92). 모르는 토큰은 여기서 막지
+        # 않는다 — 설정 화면이 막고, 새어 들어오면 기본 배치로 떨어진다.
+        object.__setattr__(
+            self, "filename_template", migrate_filename_template(self.filename_template)
+        )
 
     # -- 파생값 ---------------------------------------------------------------
 

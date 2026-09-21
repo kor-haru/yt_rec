@@ -15,6 +15,7 @@ from yt_rec.backend.tokens import MemoryTokenStore
 from yt_rec.recording.options import RecordingOptions, load_settings, save_settings, validate_output_dir
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
+from yt_rec.state.models import CompletedRecording
 from yt_rec.state.store import EventSource
 from yt_rec.ui.settings import SettingsDialog
 
@@ -150,6 +151,65 @@ def test_dialog_cancel_validation_browse_and_ack(tmp_path, state, monkeypatch):
     reopened = SettingsDialog(state)
     assert reopened.minimize_to_tray_check.isChecked()
     reopened.reject()
+
+
+def open_dialog(state, tmp_path, options=None):
+    """백엔드가 붙어 설정이 도착한 상태의 모달."""
+    state.attach(EventSource())
+    state.apply(ev.SettingsChanged(options or RecordingOptions(output_dir=tmp_path)))
+    return SettingsDialog(state)
+
+
+def test_파일명_규칙을_토큰으로_배치한다(tmp_path, state):
+    """사용자가 `[영상고유url키]` 를 손으로 칠 일이 없어야 한다 (#92)."""
+    commands = []
+    state.command_requested.connect(commands.append)
+    dialog = open_dialog(state, tmp_path)
+    assert dialog.template_edit.text() == "[YYYY-MM-DD]_[영상제목]"
+
+    dialog.template_edit.setText("")
+    dialog.token_combo.setCurrentIndex(dialog.token_combo.findData("[채널명]"))
+    assert dialog.template_edit.text() == "[채널명]"
+    assert dialog.token_combo.currentIndex() == 0  # 다시 고를 수 있게 되돌아온다
+
+    dialog.template_edit.setText("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])")
+    assert dialog.preview_label.text() == "260921_침착맨_오늘도 한다_(EYEAaG3cxME).mp4"
+    dialog._save()
+    assert commands[-1].values["filename_template"] == "[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])"
+
+
+def test_모르는_토큰은_어느_것인지_알려_주고_저장을_막는다(tmp_path, state):
+    commands = []
+    state.command_requested.connect(commands.append)
+    dialog = open_dialog(state, tmp_path)
+
+    dialog.template_edit.setText("[YYMMDD]_[없는거]")
+    assert not dialog.save_button.isEnabled()
+    assert "[없는거]" in dialog.error_label.text()
+    assert dialog.preview_label.text() == "—"
+    dialog._save()
+    assert commands == []
+
+    dialog.template_edit.setText("   ")
+    assert not dialog.save_button.isEnabled()
+
+    dialog.template_edit.setText("[YYMMDD]_[영상제목]")
+    assert dialog.save_button.isEnabled()
+    assert dialog.error_label.text() == ""
+
+
+def test_미리보기는_최근_완료된_녹화로_그린다(tmp_path, state):
+    kst = timezone(timedelta(hours=9))
+    dialog = open_dialog(state, tmp_path)
+    state.apply(ev.CompletedChanged((
+        CompletedRecording(
+            recording_id="zoYkEERlM0w", title="어제 방송", channel_name="행백TV",
+            finished_at=datetime(2026, 8, 11, 20, 0, tzinfo=kst),
+        ),
+    )))
+
+    dialog.template_edit.setText("[YYMMDD] [채널명] [영상제목] ([영상고유url키])")
+    assert dialog.preview_label.text() == "260811 행백TV 어제 방송 (zoYkEERlM0w).mp4"
 
 
 def test_recording_limit_and_new_options_only_affect_next_recording(tmp_path):

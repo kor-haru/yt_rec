@@ -103,6 +103,42 @@ def test_채널을_이름에_넣을_수_있다():
     assert metadata.basename("{date}_{channel}_{title}", tz=KST) == "2026-08-11_채널_제목"
 
 
+def test_배치를_사용자_템플릿으로_정한다():
+    """대괄호가 토큰이고, 대괄호 자체는 이름에 남지 않는다(#92)."""
+    metadata = make_metadata(title="오늘도 한다", channel="침착맨", video_id="EYEAaG3cxME")
+
+    name = metadata.basename(
+        "[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])", tz=KST, quality="1080p"
+    )
+
+    assert name == "260811_침착맨_오늘도 한다_(EYEAaG3cxME)"
+
+
+def test_화질과_채널ID_는_받은_값으로_채운다():
+    metadata = make_metadata(title="제목", channel_id="UCabc")
+    assert metadata.basename("[채널ID]_[화질]_[영상제목]", tz=KST, quality="720p") == "UCabc_720p_제목"
+
+
+def test_화질을_못_읽으면_그_자리를_비운다():
+    """검증이 해상도를 못 읽어도 `제목__` 같은 흔적이 남으면 안 된다."""
+    metadata = make_metadata(title="제목")
+    assert metadata.basename("[YYMMDD]_[영상제목]_[화질]", tz=KST) == "260811_제목"
+
+
+def test_심야_방송의_시각_토큰도_로컬_기준이다():
+    """UTC 를 쓰면 날짜가 하루, 시각이 아홉 시간 어긋난다(#14)."""
+    epoch = int(datetime(2026, 8, 12, 1, 30, tzinfo=KST).timestamp())
+    metadata = make_metadata(release_timestamp=epoch, title="심야 방송")
+
+    assert metadata.basename("[YYMMDD]_[HHMM]_[영상제목]", tz=KST) == "260812_0130_심야 방송"
+
+
+def test_모르는_토큰이_닿으면_기본_배치로_떨어진다():
+    """녹화가 다 끝난 시점이다. 여기서 예외를 던지면 파일을 잃는다."""
+    metadata = make_metadata(title="제목")
+    assert metadata.basename("[YYMMDD]_[없는거]", tz=KST) == "2026-08-11_제목"
+
+
 def test_아주_긴_제목은_잘린다():
     metadata = make_metadata(title="가" * 400)
     name = metadata.basename(max_title_chars=50, tz=KST)

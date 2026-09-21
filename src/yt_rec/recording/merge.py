@@ -190,6 +190,8 @@ class StreamInfo:
     start_time: float | None = None
     #: :attr:`duration` 을 컨테이너 필드가 아니라 태그에서 읽었는가.
     duration_from_tag: bool = False
+    #: 영상 스트림의 세로 해상도. 파일명의 ``[화질]`` 이 이것으로 정해진다(#92).
+    height: int | None = None
 
     @property
     def content_duration(self) -> float | None:
@@ -235,6 +237,18 @@ class MediaVerification:
         if not self.playable:
             return "검증 실패"
         return "정상" if self.complete else "부분 복구"
+
+    @property
+    def quality_label(self) -> str:
+        """실제로 받은 화질(``1080p``). 못 읽었으면 빈 문자열.
+
+        설정한 화질 상한이 아니라 결과 파일에서 읽은 값이다. 방송이 상한보다 낮은
+        화질로만 송출되면 둘이 다르다.
+        """
+        for stream in self.streams:
+            if stream.codec_type == "video" and stream.height:
+                return f"{stream.height}p"
+        return ""
 
     def to_dict(self) -> dict:
         return {
@@ -345,7 +359,7 @@ def probe_streams(
             "error",
             "-show_entries",
             "format=duration:stream=index,codec_type,codec_name,duration,start_time,"
-            "nb_frames,avg_frame_rate,r_frame_rate:stream_tags=DURATION",
+            "height,nb_frames,avg_frame_rate,r_frame_rate:stream_tags=DURATION",
             "-of",
             "json",
             str(path),
@@ -367,6 +381,7 @@ def probe_streams(
     streams: list[StreamInfo] = []
     for raw in data.get("streams") or []:
         nb_frames = raw.get("nb_frames")
+        height = raw.get("height")
         stream_duration = _float_or_none(raw.get("duration"))
         from_tag = False
         if stream_duration is None:
@@ -383,6 +398,7 @@ def probe_streams(
                 or _rational(raw.get("r_frame_rate")),
                 start_time=_float_or_none(raw.get("start_time")),
                 duration_from_tag=from_tag,
+                height=int(height) if str(height).isdigit() else None,
             )
         )
     return duration, streams

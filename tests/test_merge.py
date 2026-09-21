@@ -14,6 +14,7 @@ import pytest
 
 from yt_rec.recording.errors import ToolFailure, ToolTimeout
 from yt_rec.recording.merge import (
+    MediaVerification,
     check_demux,
     find_intermediates,
     merge_streams,
@@ -124,6 +125,25 @@ def test_정상_병합은_모든_지표를_통과한다(intermediates, toolchain
     assert result.playable and result.complete
     assert result.issues == ()
     assert result.status_text == "정상"
+
+
+def test_영상_높이를_함께_읽어_화질_표시를_만든다(intermediates, toolchain, tmp_path):
+    """파일명의 `[화질]` 재료(#92). 검증이 이미 훑는 ffprobe 에서 같이 받는다."""
+    work_dir, video_id = intermediates
+    dest = tmp_path / "merged.mp4"
+    merge_streams(find_intermediates(work_dir, video_id), dest, toolchain)
+
+    result = verify_media(dest, toolchain)
+
+    heights = {s.codec_type: s.height for s in result.streams}
+    assert heights == {"video": 240, "audio": None}  # 합성 클립은 320x240
+    assert result.quality_label == "240p"
+
+
+def test_해상도를_못_읽으면_화질_표시가_비어_있다(tmp_path):
+    """규칙 2 가 받아 이름에 흔적을 남기지 않는다."""
+    result = MediaVerification(path=tmp_path / "x.mp4", playable=True, complete=True)
+    assert result.quality_label == ""
 
 
 def test_프레임_수는_재생_길이_곱하기_프레임률이다(intermediates, toolchain, tmp_path):
