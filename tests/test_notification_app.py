@@ -291,7 +291,10 @@ def test_native_profile_is_destroyed_after_page_on_application_shutdown(producti
     monkeypatch.setattr(push_receiver, "default_profile_directory", lambda: tmp_path / "push-profile")
     monkeypatch.setattr(push_receiver.YouTubePushReceiver, "start", lambda _: None)
     monkeypatch.setattr(push_receiver.YouTubePushReceiver, "open_browser", lambda _: None)
-    monkeypatch.setattr(application, "load_settings", lambda: source._controller._recorder.options)
+    # 이 검사는 내장 QtWebEngine 수신기의 수명주기를 본다. 기본값(Chrome)이 아니라
+    # 그 경로를 명시적으로 고른다 (#79 에서도 내장 경로는 지우지 않는다).
+    options = source._controller._recorder.options.with_(notification_receiver="qtwebengine")
+    monkeypatch.setattr(application, "load_settings", lambda: options)
     monkeypatch.setattr(application.QSystemTrayIcon, "isSystemTrayAvailable", lambda: False)
     context = application.build_application(["--emit-interval-ms", "0"], settings=window_settings)
     receiver = context.notifications.receiver

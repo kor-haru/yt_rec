@@ -64,6 +64,22 @@ class AppContext:
     notifications: NotificationSession | None = None
 
 
+def notification_receiver_class(name: str) -> type:
+    """설정이 고른 수신기 클래스.
+
+    ``chrome`` 은 전용 프로필 Chrome 을 CDP 로 붙잡는 실동작 경로다(#79).
+    ``qtwebengine`` 은 내장 Chromium 경로로, Google 이 GCM 등록 엔드포인트를
+    되살릴 경우를 위해 남겨 둔다(#62). 어느 쪽이든 같은 신호 계약을 갖는다.
+    """
+    if name == "qtwebengine":
+        from .backend.push_receiver import YouTubePushReceiver
+
+        return YouTubePushReceiver
+    from .backend.chrome_push import ChromePushReceiver
+
+    return ChromePushReceiver
+
+
 class NotificationSession(QObject):
     """Glue the native receiver to the existing queued backend and GUI state.
 
@@ -85,9 +101,7 @@ class NotificationSession(QObject):
             return
         self._status("connecting", "YouTube 알림 수신기를 시작하는 중입니다.")
         try:
-            from .backend.push_receiver import YouTubePushReceiver
-
-            self.receiver = YouTubePushReceiver(self)
+            self.receiver = notification_receiver_class(load_settings().notification_receiver)(self)
             self.receiver.notification_received.connect(self._notification)
             self.receiver.notification_arrived.connect(self._notification_arrived)
             self.receiver.status_changed.connect(self._status)
@@ -150,6 +164,14 @@ class NotificationSession(QObject):
         if self.receiver is None:
             self.start()
         if self.receiver is None:
+            return
+        # Chrome 수신기는 별도 프로세스라 앱 안에 붙일 페이지가 없다. 그때는
+        # 수신기가 자기 창을 앞으로 부른다.
+        if getattr(self.receiver, "page", None) is None:
+            if isinstance(command, cmd.OpenNotificationSettings):
+                self.receiver.open_settings()
+            else:
+                self.receiver.open_browser()
             return
         if self.browser is None:
             self.browser = QDialog(self.window)

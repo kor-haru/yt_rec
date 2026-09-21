@@ -19,7 +19,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..recording.options import QUALITY_PRESETS, RecordingOptions, output_free_bytes, validate_output_dir
+from ..recording.options import (
+    NOTIFICATION_RECEIVERS,
+    QUALITY_PRESETS,
+    RecordingOptions,
+    output_free_bytes,
+    validate_output_dir,
+)
 from ..state.store import AppState
 from .formatting import format_bytes
 
@@ -64,6 +70,16 @@ class SettingsDialog(QDialog):
         poll_note = QLabel("방송 알림을 받으면 해당 영상만 확인합니다. 주기적으로 방송을 조회하지 않습니다.", self)
         poll_note.setWordWrap(True)
         form.addRow(poll_note)
+        self.receiver_combo = QComboBox(self)
+        self.receiver_combo.setObjectName("notificationReceiver")
+        for value, label in NOTIFICATION_RECEIVERS.items():
+            self.receiver_combo.addItem(label, value)
+        form.addRow("알림 수신기", self.receiver_combo)
+        receiver_note = QLabel(
+            "Chrome 수신기는 yt-rec 전용 프로필로 Chrome을 띄웁니다. 개인 프로필은 쓰지 않습니다. "
+            "수신기를 바꾸면 앱을 다시 실행해야 적용됩니다.", self)
+        receiver_note.setWordWrap(True)
+        form.addRow(receiver_note)
         self.autostart_check = QCheckBox("컴퓨터 로그인 시 자동 시작", self)
         self.start_hidden_check = QCheckBox("시작할 때 창을 숨기고 트레이로 실행", self)
         self.minimize_to_tray_check = QCheckBox("최소화하면 트레이로 보내기", self)
@@ -115,6 +131,9 @@ class SettingsDialog(QDialog):
             index = self.quality_combo.count() - 1
         self.quality_combo.setCurrentIndex(index)
         self.max_recordings_spin.setValue(options.max_recordings)
+        receiver_index = self.receiver_combo.findData(options.notification_receiver)
+        if receiver_index >= 0:
+            self.receiver_combo.setCurrentIndex(receiver_index)
         self.autostart_check.setChecked(options.autostart)
         self.start_hidden_check.setChecked(options.start_hidden)
         self.minimize_to_tray_check.setChecked(options.minimize_to_tray)
@@ -151,6 +170,7 @@ class SettingsDialog(QDialog):
             output_dir=self.output_edit.text(),
             max_height=self.quality_combo.currentData(),
             max_recordings=self.max_recordings_spin.value(),
+            notification_receiver=self.receiver_combo.currentData(),
             autostart=self.autostart_check.isChecked(),
             start_hidden=self.start_hidden_check.isChecked(),
             minimize_to_tray=self.minimize_to_tray_check.isChecked(),

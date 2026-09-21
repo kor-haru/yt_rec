@@ -407,6 +407,9 @@ class MainWindow(QMainWindow):
                     "worker_missing": ("수신 등록 없음", "warn"),
                     "worker_inactive": ("수신기 준비 중", "warn"),
                     "unsubscribed": ("푸시 등록 없음", "warn"),
+                    # Chrome 수신기(#79): 브라우저 자체가 없거나 죽은 경우.
+                    "chrome_missing": ("수신 브라우저 없음", "error"),
+                    "chrome_down": ("수신 브라우저 꺼짐", "error"),
                 }.get(code, ("수신 상태 미확인", "warn"))
             detail = self._state.notification.detail
         else:

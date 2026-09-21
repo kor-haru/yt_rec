@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 __all__ = [
+    "NOTIFICATION_RECEIVERS",
     "QUALITY_PRESETS",
     "RecordingOptions",
     "default_settings_path",
@@ -23,6 +24,16 @@ __all__ = [
     "validate_output_dir",
     "output_free_bytes",
 ]
+
+#: 알림 수신기 선택지. 값 -> GUI 표시 문구.
+#:
+#: Google 이 Chromium 의 구형 GCM 등록 엔드포인트를 폐기해 내장 브라우저는 푸시
+#: 구독을 새로 만들지 못한다(#62). 그래서 기본값은 실제 Chrome 이다. 외부 요인이
+#: 풀리면 되돌릴 수 있도록 내장 경로를 지우지 않고 선택지로 남긴다(#79).
+NOTIFICATION_RECEIVERS: dict[str, str] = {
+    "chrome": "Chrome (전용 프로필) — 권장",
+    "qtwebengine": "내장 브라우저 (현재 푸시 등록 불가)",
+}
 
 #: GUI 콤보박스용 화질 상한 프리셋. ``None`` 은 상한 없음.
 QUALITY_PRESETS: dict[str, int | None] = {
@@ -62,6 +73,9 @@ class RecordingOptions:
     minimize_to_tray: bool = False
     log_retention_days: int = 14
     notifications_enabled: bool = True
+
+    #: 어느 수신기로 YouTube 푸시를 받을지. :data:`NOTIFICATION_RECEIVERS` 의 키.
+    notification_receiver: str = "chrome"
 
     #: 최종 컨테이너. ``mp4`` 또는 ``mkv``.
     container: str = "mp4"
@@ -145,6 +159,8 @@ class RecordingOptions:
             raise ValueError("merge_timeout_seconds 는 양수여야 한다")
         if self.verify_timeout_seconds <= 0:
             raise ValueError("verify_timeout_seconds 는 양수여야 한다")
+        if self.notification_receiver not in NOTIFICATION_RECEIVERS:
+            raise ValueError("notification_receiver: chrome 또는 qtwebengine 만 가능합니다")
         if self.container not in ("mp4", "mkv"):
             raise ValueError(f"지원하지 않는 컨테이너: {self.container}")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
