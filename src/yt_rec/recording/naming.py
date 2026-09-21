@@ -193,29 +193,54 @@ def render_filename(
     if unknown:
         raise ValueError("모르는 토큰: " + ", ".join(f"[{name}]" for name in unknown))
 
-    def substitute(match: re.Match[str]) -> str:
-        name = match.group(1)
-        limit = max_title_chars if name == _TITLE_TOKEN else _VALUE_CHARS
+    # 템플릿 글자와 채워 넣은 값을 따로 들고 간다. 접기가 값까지 건드리면 안 된다.
+    pieces: list[tuple[bool, str]] = []
+    for index, piece in enumerate(_TOKEN.split(template)):
+        if index % 2 == 0:
+            pieces.append((True, piece))
+            continue
+        limit = max_title_chars if piece == _TITLE_TOKEN else _VALUE_CHARS
         # 채워 넣은 값만 안전화한다. 사용자가 적은 구분자는 건드리지 않는다.
-        return sanitize_filename_component(
-            FILENAME_TOKENS[name](fields), max_chars=limit, fallback=""
+        value = sanitize_filename_component(
+            FILENAME_TOKENS[piece](fields), max_chars=limit, fallback=""
         )
+        if value:
+            pieces.append((False, value))
+    return _collapse_separators(pieces)
 
-    return _collapse_separators(_TOKEN.sub(substitute, template))
 
-
-def _collapse_separators(text: str) -> str:
-    """빈 토큰이 남긴 흔적을 지운다.
+def _collapse_separators(pieces: list[tuple[bool, str]]) -> str:
+    """빈 토큰이 남긴 흔적을 지운다. **템플릿 글자에서만** 지운다.
 
     채널명이나 화질을 못 받으면 그 자리가 빈 문자열이 되어 ``260921__제목_()`` 이
-    나온다. 치환이 끝난 뒤 통째로 접는다 — 어느 구분자가 어느 토큰 것인지 따지지
-    않는다. 연속한 구분자는 맨 앞 것만 남기고, 속이 빈 괄호 짝은 지운다.
+    나온다. 빈 값을 빼고 나면 그 양쪽 구분자가 맞닿으므로, 맞닿은 템플릿 조각을
+    이어 붙인 뒤 거기서만 접는다.
+
+    치환이 끝난 문자열을 통째로 접으면 안 된다. 제목에 든 구분자까지 먹는다 —
+    ``[MV] 아이유 - 밤편지`` 가 ``[MV] 아이유 밤편지`` 가 된다. 유튜브 제목에
+    ``-`` 는 흔하고, 제목은 파일명에서 가장 중요한 조각이다.
     """
-    while True:
-        shorter = _SEPARATOR_RUN.sub(lambda m: m.group(0)[0], _EMPTY_PAIR.sub("", text))
-        if shorter == text:
-            return text.strip(_SEPARATORS)
-        text = shorter
+    merged: list[tuple[bool, str]] = []
+    for literal, text in pieces:
+        if literal and merged and merged[-1][0]:
+            merged[-1] = (True, merged[-1][1] + text)
+        else:
+            merged.append((literal, text))
+
+    out: list[str] = []
+    for position, (literal, text) in enumerate(merged):
+        if literal:
+            while True:
+                shorter = _SEPARATOR_RUN.sub(lambda m: m.group(0)[0], _EMPTY_PAIR.sub("", text))
+                if shorter == text:
+                    break
+                text = shorter
+            if position == 0:
+                text = text.lstrip(_SEPARATORS)
+            if position == len(merged) - 1:
+                text = text.rstrip(_SEPARATORS)
+        out.append(text)
+    return "".join(out)
 
 
 def reserve_unique_path(directory: Path, basename: str, extension: str) -> Path:

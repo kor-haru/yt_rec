@@ -205,6 +205,26 @@ def test_앞뒤_구분자는_턴다():
     assert render_filename("[채널명]_[영상제목]_[화질]", fields) == "오늘도 한다"
 
 
+def test_제목_안의_구분자는_접히지_않는다():
+    """접기는 템플릿 글자에만 건다. 값까지 접으면 제목이 망가진다.
+
+    치환이 끝난 문자열을 통째로 접던 판이 `[MV] 아이유 - 밤편지` 를
+    `[MV] 아이유 밤편지` 로 만들었다. 유튜브 제목에 `-` 는 흔하고, 제목은
+    파일명에서 가장 중요한 조각이다.
+    """
+    fields = replace(SAMPLE_NAME_FIELDS, title="[MV] 아이유 - 밤편지", channel="1theK")
+
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])", fields)
+        == "260921_1theK_[MV] 아이유 - 밤편지_(EYEAaG3cxME)"
+    )
+    # 값이 비어 접혀야 하는 자리와 같은 템플릿에서도 제목은 그대로다.
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]", replace(fields, channel=""))
+        == "260921_[MV] 아이유 - 밤편지"
+    )
+
+
 def test_제목의_금지_문자만_바뀌고_적어_준_구분자는_그대로다():
     """조각 단위로 안전화한다. 사용자가 적은 `_` 는 건드리지 않는다."""
     fields = replace(SAMPLE_NAME_FIELDS, title="Q&A / 내 집 마련")
