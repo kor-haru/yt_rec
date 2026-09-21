@@ -166,6 +166,61 @@ def test_launch_uses_the_dedicated_profile_and_a_loopback_only_debug_port(receiv
     assert module.YOUTUBE in process.arguments
 
 
+def test_the_receiver_browser_is_headless_so_the_app_never_shows_a_window(receiver):
+    """수신은 백그라운드 동작이다. 앱을 켰다고 YouTube 창이 뜨면 안 된다."""
+    receiver.start()
+    assert "--headless=new" in FakeProcess.instances[0].arguments
+
+
+@pytest.mark.parametrize("press,url", [
+    ("open_browser", module.YOUTUBE),
+    ("open_settings", module.NOTIFICATION_SETTINGS_URL),
+])
+def test_login_and_settings_show_a_real_window_on_the_same_profile(receiver, tmp_path, press, url):
+    """헤드리스에서 탭만 만들면 사용자 눈에는 아무 일도 안 일어난다.
+
+    같은 프로필을 보이는 모드로 다시 띄워야 로그인과 푸시 등록이 유지된 채로
+    사용자가 직접 조작할 수 있다.
+    """
+    receiver.start()
+    open_session(receiver)
+    getattr(receiver, press)()
+    assert len(FakeProcess.instances) == 2
+    process = FakeProcess.instances[1]
+    assert "--headless=new" not in process.arguments
+    assert url in process.arguments
+    assert f"--user-data-dir={tmp_path / 'profile'}" in process.arguments
+
+
+def test_a_second_press_while_the_window_is_open_only_adds_a_tab(receiver):
+    """창을 닫았다 다시 띄우면 입력하던 로그인이 날아간다."""
+    receiver.start()
+    open_session(receiver)
+    receiver.open_browser()
+    sent = open_session(receiver)  # 보이는 브라우저에 붙는다
+    sent.clear()
+    receiver.open_settings()
+    assert len(FakeProcess.instances) == 2
+    create = next(call for call in calls(sent) if call["method"] == "Target.createTarget")
+    assert create["params"] == {"url": module.NOTIFICATION_SETTINGS_URL}
+
+
+def test_a_restart_after_a_visible_window_goes_back_to_headless(receiver, monkeypatch):
+    """보이는 모드는 눌어붙지 않는다. 창을 닫으면 다시 백그라운드로 돌아간다."""
+    receiver.start()
+    open_session(receiver)
+    receiver.open_browser()
+    visible = FakeProcess.instances[-1]
+    assert "--headless=new" not in visible.arguments
+    # 남은 포트 파일이 가리키는 브라우저는 방금 닫혔으므로 이어받기는 실패한다.
+    monkeypatch.setattr(module.ChromePushReceiver, "_resolve",
+                        lambda self, *, on_failure: on_failure())
+    visible.finished.emit(0, None)  # 사용자가 창을 닫았다
+    receiver._restart()
+    assert len(FakeProcess.instances) == 3
+    assert "--headless=new" in FakeProcess.instances[-1].arguments
+
+
 def test_a_clean_close_forgets_the_port_so_the_next_run_cannot_adopt_a_stranger(receiver, tmp_path):
     """이어받기는 크래시로 남은 고아 브라우저 전용이다.
 
