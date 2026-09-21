@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -19,6 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..recording.naming import (
+    FILENAME_TOKENS,
+    SAMPLE_NAME_FIELDS,
+    NameFields,
+    render_filename,
+)
 from ..recording.options import (
     NOTIFICATION_RECEIVERS,
     QUALITY_PRESETS,
@@ -55,6 +63,21 @@ class SettingsDialog(QDialog):
         form.addRow("저장 위치", directory_row)
         self.space_label = QLabel(self)
         form.addRow("남은 용량", self.space_label)
+        self.template_edit = QLineEdit(self)
+        self.template_edit.setObjectName("filenameTemplate")
+        self.template_edit.setAccessibleName("파일명 규칙")
+        form.addRow("파일명 규칙", self.template_edit)
+        self.token_combo = QComboBox(self)
+        self.token_combo.setObjectName("filenameToken")
+        self.token_combo.addItem("토큰 넣기…", "")
+        for name, resolve in FILENAME_TOKENS.items():
+            self.token_combo.addItem(f"[{name}] — {resolve(SAMPLE_NAME_FIELDS)}", f"[{name}]")
+        self.token_combo.currentIndexChanged.connect(self._insert_token)
+        form.addRow("토큰 넣기", self.token_combo)
+        self.preview_label = QLabel(self)
+        self.preview_label.setObjectName("filenamePreview")
+        self.preview_label.setWordWrap(True)
+        form.addRow("미리보기", self.preview_label)
         self.quality_combo = QComboBox(self)
         self.quality_combo.setObjectName("maxHeight")
         for label, height in QUALITY_PRESETS.items():
@@ -112,6 +135,7 @@ class SettingsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
         self.output_edit.textChanged.connect(self._validate)
+        self.template_edit.textChanged.connect(self._validate)
         state.settings_changed.connect(self._settings_changed)
         state.settings_save_failed.connect(self._save_failed)
         self._restore(state.settings)
@@ -127,6 +151,7 @@ class SettingsDialog(QDialog):
             self.save_button.setEnabled(False)
             return
         self.output_edit.setText(str(options.output_dir))
+        self.template_edit.setText(options.filename_template)
         index = self.quality_combo.findData(options.max_height)
         if index < 0:
             self.quality_combo.addItem(f"{options.max_height}p", options.max_height)
@@ -144,6 +169,48 @@ class SettingsDialog(QDialog):
         self.retention_spin.setValue(options.log_retention_days)
         self._validate()
 
+    def _insert_token(self, index: int) -> None:
+        """고른 토큰을 커서 자리에 넣는다. 손으로 칠 일이 없어야 한다."""
+        token = self.token_combo.itemData(index)
+        if not token:
+            return
+        self.token_combo.setCurrentIndex(0)  # 다음에도 고를 수 있게 머리글로 되돌린다
+        self.template_edit.insert(token)
+        self.template_edit.setFocus()
+
+    def _preview_fields(self) -> NameFields:
+        """미리보기 재료. 최근 완료된 녹화가 있으면 그 값으로 보여 준다.
+
+        완료 이력에 없는 값(채널ID·화질)은 예시 그대로 둔다. 토큰이 통째로 사라진
+        미리보기는 규칙을 잘못 읽게 만든다.
+        """
+        recent = self._state.completed
+        if not recent:
+            return SAMPLE_NAME_FIELDS
+        done = recent[0]
+        return replace(
+            SAMPLE_NAME_FIELDS,
+            start=done.finished_at or SAMPLE_NAME_FIELDS.start,
+            title=done.title or SAMPLE_NAME_FIELDS.title,
+            channel=done.channel_name or SAMPLE_NAME_FIELDS.channel,
+            video_id=done.recording_id or SAMPLE_NAME_FIELDS.video_id,
+        )
+
+    def _refresh_preview(self) -> str:
+        """미리보기를 다시 그리고, 배치가 틀렸으면 그 사유를 돌려준다."""
+        template = self.template_edit.text()
+        if not template.strip():
+            self.preview_label.setText("—")
+            return "파일명 규칙: 토큰을 하나 이상 넣으세요"
+        try:
+            rendered = render_filename(template, self._preview_fields())
+        except ValueError as exc:
+            self.preview_label.setText("—")
+            return f"파일명 규칙: {exc}"
+        settings = self._state.settings
+        self.preview_label.setText(f"{rendered}.{settings.container if settings else 'mp4'}")
+        return ""
+
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "녹화 저장 폴더 선택", self.output_edit.text())
         if selected:
@@ -156,6 +223,11 @@ class SettingsDialog(QDialog):
         except (OSError, ValueError) as exc:
             self.space_label.setText("확인할 수 없음")
             self.error_label.setText(str(exc))
+            self.save_button.setEnabled(False)
+            return False
+        template_error = self._refresh_preview()
+        if template_error:
+            self.error_label.setText(template_error)
             self.save_button.setEnabled(False)
             return False
         self.error_label.clear()
@@ -171,6 +243,7 @@ class SettingsDialog(QDialog):
         self.error_label.setText("설정을 저장하는 중입니다…")
         sent = self._state.update_settings(
             output_dir=self.output_edit.text(),
+            filename_template=self.template_edit.text().strip(),
             max_height=self.quality_combo.currentData(),
             max_recordings=self.max_recordings_spin.value(),
             notification_receiver=self.receiver_combo.currentData(),

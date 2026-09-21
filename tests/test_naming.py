@@ -1,17 +1,24 @@
-"""파일명 결정 규칙 (#4: 금지 문자 치환, 덮어쓰기 금지)."""
+"""파일명 결정 규칙 (#4: 금지 문자 치환, 덮어쓰기 금지, #92: 대괄호 토큰)."""
 
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from yt_rec.recording.naming import (
+    DEFAULT_FILENAME_TEMPLATE,
+    FILENAME_TOKENS,
     FORBIDDEN_CHAR_MAP,
+    SAMPLE_NAME_FIELDS,
     local_date_from_epoch,
+    migrate_filename_template,
+    render_filename,
     reserve_unique_path,
     sanitize_filename_component,
+    unknown_filename_tokens,
 )
 
 WINDOWS_FORBIDDEN = '?:*"<>|/\\'
@@ -134,3 +141,122 @@ def test_예약된_경로는_비어_있고_교체할_수_있다(tmp_path):
 
 def test_확장자에_점이_없어도_된다(tmp_path):
     assert reserve_unique_path(tmp_path, "제목", "mkv").name == "제목.mkv"
+
+
+# -- 파일명 배치 --------------------------------------------------------------
+
+
+def test_적어_준_예시가_그대로_나온다():
+    """사용자가 적어 준 두 줄(#92). 한 글자도 달라지면 안 된다."""
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])", SAMPLE_NAME_FIELDS)
+        == "260921_침착맨_오늘도 한다_(EYEAaG3cxME)"
+    )
+    assert (
+        render_filename("[YYYY-MM-DD] [채널명] [영상제목]", SAMPLE_NAME_FIELDS)
+        == "2026-09-21 침착맨 오늘도 한다"
+    )
+
+
+def test_대괄호는_출력에_남지_않고_바깥_글자는_남는다():
+    assert render_filename("녹화-[영상제목]!", SAMPLE_NAME_FIELDS) == "녹화-오늘도 한다!"
+
+
+def test_모든_토큰이_예시대로_풀린다():
+    """이슈의 토큰 표 그대로. 이름을 줄이거나 바꾸면 여기서 걸린다."""
+    rendered = {
+        name: render_filename(f"[{name}]", SAMPLE_NAME_FIELDS) for name in FILENAME_TOKENS
+    }
+    assert rendered == {
+        "YYMMDD": "260921",
+        "YYYYMMDD": "20260921",
+        "YYYY-MM-DD": "2026-09-21",
+        "YYYY.MM.DD": "2026.09.21",
+        "HHMM": "1954",
+        "HH-MM": "19-54",
+        "채널명": "침착맨",
+        "영상제목": "오늘도 한다",
+        "영상고유url키": "EYEAaG3cxME",
+        "채널ID": "UCUj6rrhMTR9pipbAWBAMvUQ",
+        "화질": "1080p",
+    }
+
+
+def test_채널명이_없으면_구분자가_접힌다():
+    """빈 토큰이 `260921__제목` 같은 흔적을 남기면 안 된다."""
+    fields = replace(SAMPLE_NAME_FIELDS, channel="")
+
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])", fields)
+        == "260921_오늘도 한다_(EYEAaG3cxME)"
+    )
+    assert render_filename("[YYYY-MM-DD] [채널명] [영상제목]", fields) == "2026-09-21 오늘도 한다"
+
+
+def test_빈_토큰만_든_괄호_짝은_지운다():
+    fields = replace(SAMPLE_NAME_FIELDS, video_id="", quality="")
+    assert render_filename("[영상제목]_([영상고유url키])", fields) == "오늘도 한다"
+    assert render_filename("[영상제목] [[화질]]", fields) == "오늘도 한다"
+    assert render_filename("[영상제목]_([채널ID]-[화질])", replace(fields, channel_id="")) == "오늘도 한다"
+
+
+def test_앞뒤_구분자는_턴다():
+    fields = replace(SAMPLE_NAME_FIELDS, channel="", quality="")
+    assert render_filename("[채널명]_[영상제목]_[화질]", fields) == "오늘도 한다"
+
+
+def test_제목_안의_구분자는_접히지_않는다():
+    """접기는 템플릿 글자에만 건다. 값까지 접으면 제목이 망가진다.
+
+    치환이 끝난 문자열을 통째로 접던 판이 `[MV] 아이유 - 밤편지` 를
+    `[MV] 아이유 밤편지` 로 만들었다. 유튜브 제목에 `-` 는 흔하고, 제목은
+    파일명에서 가장 중요한 조각이다.
+    """
+    fields = replace(SAMPLE_NAME_FIELDS, title="[MV] 아이유 - 밤편지", channel="1theK")
+
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])", fields)
+        == "260921_1theK_[MV] 아이유 - 밤편지_(EYEAaG3cxME)"
+    )
+    # 값이 비어 접혀야 하는 자리와 같은 템플릿에서도 제목은 그대로다.
+    assert (
+        render_filename("[YYMMDD]_[채널명]_[영상제목]", replace(fields, channel=""))
+        == "260921_[MV] 아이유 - 밤편지"
+    )
+
+
+def test_제목의_금지_문자만_바뀌고_적어_준_구분자는_그대로다():
+    """조각 단위로 안전화한다. 사용자가 적은 `_` 는 건드리지 않는다."""
+    fields = replace(SAMPLE_NAME_FIELDS, title="Q&A / 내 집 마련")
+
+    assert render_filename("[채널명]_[영상제목]", fields) == "침착맨_Q&A ／ 내 집 마련"
+
+
+def test_제목_길이_상한은_제목에만_걸린다():
+    fields = replace(SAMPLE_NAME_FIELDS, title="가" * 300)
+    rendered = render_filename("[YYMMDD]_[영상제목]_[화질]", fields, max_title_chars=20)
+    assert rendered == "260921_" + "가" * 20 + "_1080p"
+
+
+def test_모르는_토큰은_사유와_함께_거부한다():
+    assert unknown_filename_tokens("[YYMMDD]_[없는거]_[영상제목]") == ["없는거"]
+    assert unknown_filename_tokens(DEFAULT_FILENAME_TEMPLATE) == []
+    with pytest.raises(ValueError, match=r"\[없는거\]"):
+        render_filename("[YYMMDD]_[없는거]", SAMPLE_NAME_FIELDS)
+
+
+def test_옛_문법은_대응하는_대괄호로_읽는다():
+    """설정 화면에 없던 필드라 저장된 값은 사실상 전부 기본값이다(#92)."""
+    assert migrate_filename_template("{date}_{title}") == DEFAULT_FILENAME_TEMPLATE
+    assert (
+        migrate_filename_template("{date}_{channel}_{title}_{video_id}")
+        == "[YYYY-MM-DD]_[채널명]_[영상제목]_[영상고유url키]"
+    )
+    assert migrate_filename_template(DEFAULT_FILENAME_TEMPLATE) == DEFAULT_FILENAME_TEMPLATE
+    assert render_filename("{date}_{title}", SAMPLE_NAME_FIELDS) == "2026-09-21_오늘도 한다"
+
+
+def test_시각_토큰도_넘겨받은_시작_시각을_쓴다():
+    """로컬로 옮긴 시각을 그대로 쓴다. 여기서 다시 시간대를 계산하지 않는다."""
+    fields = replace(SAMPLE_NAME_FIELDS, start=datetime(2026, 8, 12, 1, 30))
+    assert render_filename("[YYYYMMDD]_[HHMM]", fields) == "20260812_0130"

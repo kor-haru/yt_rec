@@ -91,6 +91,18 @@ def test_한글_경로가_그대로_보존된다(tmp_path):
     assert load_settings(path).output_dir == tmp_path / "내 녹화 폴더"
 
 
+def test_옛_파일명_문법은_대괄호로_바꿔_읽는다(tmp_path):
+    """화면에 없던 필드라 저장된 값은 사실상 전부 기본값이다(#92)."""
+    path = tmp_path / "settings.json"
+    save_settings(make(filename_template="{date}_{title}"), path)
+
+    assert load_settings(path).filename_template == "[YYYY-MM-DD]_[영상제목]"
+    assert make().filename_template == "[YYYY-MM-DD]_[영상제목]"
+    assert make(filename_template="{date}_{channel}_{title}_{video_id}").filename_template == (
+        "[YYYY-MM-DD]_[채널명]_[영상제목]_[영상고유url키]"
+    )
+
+
 # -- 방어 ---------------------------------------------------------------------
 
 

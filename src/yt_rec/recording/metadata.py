@@ -22,7 +22,13 @@ from pathlib import Path
 
 from .binaries import Toolchain
 from .errors import DenialCategory, MetadataUnavailableError, classify_error
-from .naming import local_date_from_epoch, sanitize_filename_component
+from .naming import (
+    DEFAULT_FILENAME_TEMPLATE,
+    NameFields,
+    local_date_from_epoch,
+    render_filename,
+    sanitize_filename_component,
+)
 
 __all__ = ["LiveMetadata", "fetch_metadata"]
 
@@ -80,34 +86,45 @@ class LiveMetadata:
         """파일명에 쓸 날짜. UTC 가 아니라 로컬 시간대 기준이다."""
         return local_date_from_epoch(self.start_epoch, tz)
 
+    def name_fields(
+        self, tz: tzinfo | None = None, *, quality: str = ""
+    ) -> NameFields:
+        """파일명 토큰을 채울 재료. 날짜·시각은 로컬 시간대 기준이다.
+
+        ``quality`` 는 보관된 값이 아니라 결과 파일을 훑어 얻는다. 방송 화질이
+        상한보다 낮으면 실제로 받은 것이 설정값과 다르다.
+        """
+        return NameFields(
+            start=self.start_datetime(tz),
+            title=self.display_title,
+            channel=self.channel or self.uploader or "",
+            video_id=self.video_id,
+            channel_id=self.channel_id or "",
+            quality=quality,
+        )
+
     def basename(
         self,
-        template: str = "{date}_{title}",
+        template: str = DEFAULT_FILENAME_TEMPLATE,
         *,
         max_title_chars: int = 120,
         tz: tzinfo | None = None,
+        quality: str = "",
     ) -> str:
         """보관된 값만으로 최종 파일 이름(확장자 제외)을 만든다."""
-        title = sanitize_filename_component(
-            self.display_title, max_chars=max_title_chars, fallback=self.video_id
-        )
-        channel = sanitize_filename_component(
-            self.channel or self.uploader or "", max_chars=64, fallback=""
-        )
-        fields = {
-            "date": self.local_start_date(tz).isoformat(),
-            "title": title,
-            "channel": channel,
-            "video_id": self.video_id,
-        }
+        fields = self.name_fields(tz, quality=quality)
         try:
-            rendered = template.format(**fields)
-        except (KeyError, IndexError, ValueError):
+            rendered = render_filename(
+                template, fields, max_title_chars=max_title_chars
+            )
+        except ValueError:
             # 설정에 잘못된 템플릿이 들어와도 녹화를 잃지 않는다.
-            rendered = "{date}_{title}".format(**fields)
+            rendered = render_filename(
+                DEFAULT_FILENAME_TEMPLATE, fields, max_title_chars=max_title_chars
+            )
         return sanitize_filename_component(
             rendered,
-            max_chars=max_title_chars + 64,  # 날짜·채널·구분자 몫을 더해 둔다
+            max_chars=max_title_chars + 120,  # 날짜·시각·채널·화질·구분자 몫
             fallback=self.video_id,
         )
 
