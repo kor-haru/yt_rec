@@ -17,7 +17,7 @@ from yt_rec.backend.notifications import LiveNotification
 from yt_rec.backend.recorder import EngineRecorder
 from yt_rec.backend.selection import FileSeenStore, FileSelectionStore
 from yt_rec.backend.tokens import MemoryTokenStore
-from yt_rec.backend.youtube import ChannelRef, LiveBroadcast
+from yt_rec.backend.youtube import ChannelRef, LiveBroadcast, VideoState
 from yt_rec.logs import LogStore
 from yt_rec.recording.events import (
     ProgressReported, RecordingFinished, RecordingResult, RecordingStatus,
@@ -91,6 +91,10 @@ def production_backend(tmp_path, monkeypatch, qapp):
                 self.entered.set()
                 assert self.release.wait(5)
             return self.lives_by_id.get(video_id)
+
+        def get_video_state(self, video_id):
+            live = self.get_live(video_id)
+            return VideoState(video_id, "live", live) if live else VideoState(video_id, "none")
 
     class Engine:
         def __init__(self, options, on_event=None):

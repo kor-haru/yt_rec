@@ -8,7 +8,7 @@ import pytest
 
 from yt_rec.backend.notifications import LiveNotification, NotificationRecorder
 from yt_rec.backend.selection import FileSeenStore, MemorySeenStore, MemorySelectionStore
-from yt_rec.backend.youtube import LiveBroadcast, YouTubeApi
+from yt_rec.backend.youtube import LiveBroadcast, VideoState, YouTubeApi
 from yt_rec.backend.recorder import EngineRecorder
 from yt_rec.recording.engine import RecordingEngine
 from yt_rec.recording.events import RecordingResult, RecordingStatus
@@ -26,6 +26,8 @@ class Api:
     def __init__(self):
         self.calls = []
         self.lives = {v: LiveBroadcast(v, "UC1", "live") for v in (VIDEO, OTHER, THIRD)}
+        #: video id -> (scheduledStartTime epoch, premiere 여부)
+        self.upcoming = {}
         self.error = None
 
     def get_live(self, video_id):
@@ -33,6 +35,18 @@ class Api:
         if self.error:
             raise self.error
         return self.lives.get(video_id)
+
+    def get_video_state(self, video_id):
+        live = self.get_live(video_id)
+        if live is not None:
+            return VideoState(video_id, "live", live)
+        if video_id in self.upcoming:
+            scheduled, premiere = self.upcoming[video_id]
+            return VideoState(
+                video_id, "upcoming", LiveBroadcast(video_id, "UC1", "예약 라이브"),
+                scheduled, premiere,
+            )
+        return VideoState(video_id, "none")
 
 
 class Recorder:

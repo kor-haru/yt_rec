@@ -74,6 +74,11 @@ class RecordingOptions:
     log_retention_days: int = 14
     notifications_enabled: bool = True
 
+    #: 예약된 프리미어도 녹화할지. 기본은 끔이다 — 프리미어는 이미 만들어 둔
+    #: 영상을 정해진 시각에 트는 것이라 끝난 뒤 받으면 되고, 이 앱은 라이브
+    #: 레코더다(#82). API 에 프리미어 전용 필드가 없어 판정은 추정값이다.
+    record_premieres: bool = False
+
     #: 어느 수신기로 YouTube 푸시를 받을지. :data:`NOTIFICATION_RECEIVERS` 의 키.
     notification_receiver: str = "chrome"
 
@@ -142,7 +147,8 @@ class RecordingOptions:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name}: {low}~{high} 사이의 정수를 입력하세요")
-        for name in ("autostart", "start_hidden", "minimize_to_tray", "notifications_enabled"):
+        for name in ("autostart", "start_hidden", "minimize_to_tray", "notifications_enabled",
+                     "record_premieres"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name}: 켜기 또는 끄기만 가능합니다")
         if self.max_height is not None and (
