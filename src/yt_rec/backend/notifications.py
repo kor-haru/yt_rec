@@ -37,6 +37,19 @@ class Recorder(Protocol):
 
 
 @dataclass(frozen=True)
+class YouTubeSignal:
+    """Verified push arrival only; no notification text or video identity."""
+
+    received_at: float
+    synthetic: bool = True
+
+    def __post_init__(self) -> None:
+        if (isinstance(self.received_at, bool) or not isinstance(self.received_at, (int, float))
+                or not math.isfinite(self.received_at) or self.received_at < 0):
+            raise ValueError("신호 수신 시각이 올바르지 않습니다")
+
+
+@dataclass(frozen=True)
 class LiveNotification:
     video_id: str
     received_at: float
@@ -131,6 +144,9 @@ class NotificationRecorder:
             with self._lock:
                 if not self._can_start():
                     return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
+                if self._youtube() is not api:
+                    self._pending[video_id] = notice
+                    return self._publish(replace(base, status="queued", reason="연결 복구를 기다립니다"))
                 if live is None or live.video_id != video_id:
                     return self._publish(replace(base, reason="현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)"))
                 # Re-read AFTER network I/O: selection may have changed while waiting.
