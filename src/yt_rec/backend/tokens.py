@@ -7,6 +7,7 @@ OS 분기는 :func:`default_token_store` 한 곳에만 있다.
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import sys
 from ctypes import wintypes
@@ -139,8 +140,15 @@ class LinuxSecretServiceStore:
         if action == "store":
             args.append("--label=yt-rec Google OAuth")
         args.extend(["service", self.service, "account", self.account])
+        options: dict = {}
+        if os.name == "nt":
+            # 이 저장소는 Linux 용이지만 직접 세우면 Windows 에서도 돈다. 콘솔 없는
+            # GUI 런처에서 토큰을 읽을 때마다 창이 뜨지 않게 막아 둔다(#96).
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         try:
-            proc = subprocess.run(args, input=blob, capture_output=True, text=True, timeout=30)
+            proc = subprocess.run(
+                args, input=blob, capture_output=True, text=True, timeout=30, **options
+            )
         except (OSError, subprocess.TimeoutExpired) as extra:
             raise TokenStoreError(
                 "Linux 보안 저장소에 연결하지 못했습니다. secret-tool(libsecret-tools)을 설치하고 "

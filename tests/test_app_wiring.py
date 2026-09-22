@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+from yt_rec import app as application
 from yt_rec.app import build_application
 from yt_rec.state.models import ConnectionState
 from yt_rec.state.store import EventSource
@@ -98,3 +100,26 @@ def test_stub_플래그는_스텁을_붙인다(qapp) -> None:
         assert isinstance(context.source, StubEventSource)
     finally:
         context.window.close()
+
+
+def test_기동_실패는_파일에_남는다(tmp_path, monkeypatch) -> None:
+    """콘솔 없는 GUI 런처에서는 로깅이 서기 전 예외가 갈 곳이 없다(#96)."""
+    target = tmp_path / "logs" / "startup-crash.log"
+    monkeypatch.setattr(application, "startup_failure_path", lambda: target)
+
+    def explode(argv=None):
+        raise RuntimeError("부팅 실패")
+
+    monkeypatch.setattr(application, "_run", explode)
+    with pytest.raises(RuntimeError):
+        application.main([])
+
+    recorded = target.read_text(encoding="utf-8")
+    assert "Traceback" in recorded
+    assert "RuntimeError" in recorded and "부팅 실패" in recorded
+
+
+def test_기동_실패_기록은_앱_로그_옆에_둔다() -> None:
+    from yt_rec.recording.options import default_settings_path
+
+    assert application.startup_failure_path().parent == default_settings_path().parent / "logs"

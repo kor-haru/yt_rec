@@ -15,6 +15,7 @@ import argparse
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +49,10 @@ from .ui.settings_store import APPLICATION, ORGANIZATION, WindowSettings
 # smoke entrypoints. Importing alone creates no profile or network work.
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
-__all__ = ["main", "build_application", "AppContext", "parse_args"]
+__all__ = [
+    "main", "build_application", "AppContext", "parse_args",
+    "record_startup_failure", "startup_failure_path",
+]
 
 STUB_MODES = (*PRESETS.keys(), "scenario", "flood")
 
@@ -443,7 +447,39 @@ def _start_stub(source: StubEventSource, mode: str) -> None:
         raise ValueError(f"알 수 없는 스텁 모드: {mode}")
 
 
+def startup_failure_path() -> Path:
+    """기동 실패를 남기는 파일. 앱 로그와 같은 폴더에 둔다."""
+    from .recording.options import default_settings_path
+
+    return default_settings_path().parent / "logs" / "startup-crash.log"
+
+
+def record_startup_failure(exc: BaseException) -> None:
+    """기동 중 터진 예외를 파일에 남긴다.
+
+    GUI 런처에는 콘솔이 없다. 로그 저장소가 서기 전에 죽으면 traceback 이
+    갈 곳이 없어 아무 흔적도 안 남는다(#96). 마지막 한 건만 덮어써서
+    자동 시작이 반복 실패해도 파일이 무한히 자라지 않게 한다.
+    """
+    try:
+        path = startup_failure_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat()
+        trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        path.write_text(f"{stamp}\n{redact(trace)}\n", encoding="utf-8")
+    except Exception:  # pragma: no cover - 기록 실패가 원래 예외를 가리면 안 된다
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _run(argv)
+    except Exception as exc:
+        record_startup_failure(exc)
+        raise
+
+
+def _run(argv: list[str] | None = None) -> int:
     from .recording.binaries import prepare_bundled_environment
     prepare_bundled_environment()
     args = parse_args(argv)

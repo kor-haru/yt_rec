@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -225,3 +226,23 @@ def test_이전_조회_결과가_남아_있어도_최신_줄을_읽는다(tmp_pa
     (tmp_path / "metadata.raw.json").write_text('{"id":"old","title":"옛날"}\n', encoding="utf-8")
     metadata = stub_ytdlp({"id": "new", "title": "지금"}, tmp_path, python_executable)
     assert metadata.title == "지금"
+
+
+def test_조회는_콘솔_창을_띄우지_않는다(tmp_path, monkeypatch):
+    """알림 하나마다 도는 조회다. GUI 런처에는 물려줄 콘솔이 없다(#96)."""
+    import yt_rec.recording.metadata as metadata_module
+
+    captured: dict = {}
+
+    def spy(argv, **kwargs):
+        captured.update(kwargs)
+        raise OSError("여기서 멈춘다")  # 실행 결과는 이 검사의 대상이 아니다
+
+    monkeypatch.setattr(metadata_module.subprocess, "run", spy)
+    with pytest.raises(MetadataUnavailableError):
+        fetch_metadata("VID", "http://example/", fake_toolchain(tmp_path / "ytdlp"), tmp_path)
+
+    if os.name == "nt":
+        assert captured["creationflags"] & subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in captured
