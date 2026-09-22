@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -414,7 +415,9 @@ def test_notification_payload_yields_one_video_and_one_history_entry(receiver):
                 "options": {"data": {"videoId": VIDEO, "other": {"videoId": OTHER_VIDEO}}}}),
     # 11 자가 아닌 것은 영상 ID 가 아니다.
     json.dumps({"kind": "notification", "title": "t", "options": {"data": {"videoId": "tooshort"}}}),
-    json.dumps({"kind": "notification", "title": "t", "options": {"data": {}}}),
+    # watch 주소인데 영상 ID 자리가 깨졌다. 후킹이 갈렸다는 뜻이므로 오류로 둔다.
+    json.dumps({"kind": "notification", "title": "t",
+                "options": {"data": {"url": module.YOUTUBE + "/watch?v=bad"}}}),
     pytest.param("x" * (module._MAX_PAYLOAD + 1), id="oversized"),
 ])
 def test_malformed_payloads_never_start_a_recording(receiver, payload):
@@ -425,6 +428,50 @@ def test_malformed_payloads_never_start_a_recording(receiver, payload):
     binding(receiver, payload)
     assert live == []
     assert receiver.status[0] == "error"
+
+
+def test_a_notification_without_a_video_is_ignored_instead_of_latching_an_error(receiver, caplog):
+    """커뮤니티 글·멤버십 알림에는 watch 주소가 없다. 수신기 고장이 아니다 (#94).
+
+    실측 회귀: 그런 알림 하나에 ``error`` 로 바뀐 뒤 다음 알림이 올 때까지 몇
+    시간을 그대로 있었다. 그동안 브라우저도 푸시 통로도 멀쩡했다.
+    """
+    open_session(receiver)
+    attach_worker(receiver)
+    live: list[object] = []
+    history: list[ReceivedNotification] = []
+    receiver.notification_received.connect(live.append)
+    receiver.notification_arrived.connect(history.append)
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        binding(receiver, json.dumps({"kind": "notification", "title": "채널이 글을 올렸습니다",
+                                      "options": {"body": "멤버십 전용 안내", "data": {"tag": "post"}}}))
+    assert live == []
+    # 무엇이 왔는지는 이력이 남긴다. 상태는 쉬는 자리로 돌아간다.
+    assert [(item.title, item.body) for item in history] == [("채널이 글을 올렸습니다", "멤버십 전용 안내")]
+    assert receiver.status == ("ready", module._RESTING)
+    assert "멤버십" not in caplog.text and "채널이 글을 올렸습니다" not in caplog.text
+    binding(receiver, json.dumps({"kind": "notification", "title": "t",
+                                  "options": {"data": {"videoId": VIDEO}}}))
+    assert [item.video_id for item in live] == [VIDEO]
+
+
+@pytest.mark.parametrize("data, reason", [
+    ({"videoId": VIDEO, "other": {"videoId": OTHER_VIDEO}}, "ambiguous"),
+    ({"url": module.YOUTUBE + "/watch?v=bad"}, "malformed"),
+])
+def test_an_undecidable_video_stays_an_error_and_records_which_kind(receiver, caplog, data, reason):
+    """영상이 여럿이거나 주소가 깨진 것은 정상적인 알림이 아니다. 사유만 남긴다."""
+    open_session(receiver)
+    attach_worker(receiver)
+    live: list[object] = []
+    receiver.notification_received.connect(live.append)
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        binding(receiver, json.dumps({"kind": "notification", "title": "제목",
+                                      "options": {"body": "본문", "data": data}}))
+    assert live == []
+    assert receiver.status == ("error", "알림에서 영상 하나를 식별하지 못해 녹화하지 않습니다")
+    assert reason in caplog.text
+    assert "제목" not in caplog.text and "본문" not in caplog.text
 
 
 def test_payload_from_an_unattached_session_is_ignored(receiver):

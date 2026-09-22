@@ -19,6 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtWebEngineCore import QWebEnginePermission, QWebEngineScript
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from yt_rec.backend import push_payload
 from yt_rec.backend import push_receiver as module
 
 QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
@@ -162,6 +163,21 @@ def test_native_request_is_required_and_is_consumed_once(receiver, capsys):
 ])
 def test_data_parser_never_guesses_a_video(data, expected):
     assert module._video_id_from_data(data) == expected
+
+
+@pytest.mark.parametrize("data, reason", [
+    ({}, push_payload.NoVideo.ABSENT),
+    ({"title": "a community post", "url": module.YOUTUBE + "/channel/abc"}, push_payload.NoVideo.ABSENT),
+    ({"videoId": VIDEO, "other": {"videoId": OTHER_VIDEO}}, push_payload.NoVideo.AMBIGUOUS),
+    ({"url": module.YOUTUBE + "/watch?v=bad"}, push_payload.NoVideo.MALFORMED),
+    ({"videoId": 12345678901}, push_payload.NoVideo.MALFORMED),
+    ({"videoId": VIDEO, "extra": [None] * 256}, push_payload.NoVideo.MALFORMED),
+])
+def test_the_reason_no_video_came_out_is_specific_enough_to_act_on(data, reason):
+    # No watch URL is a normal notification for a subscribed channel (#94);
+    # the other two mean the payload is not the shape we know.
+    assert push_payload._video_from_data(data) is reason
+    assert push_payload._video_id_from_data(data) is None
 
 
 def test_traversal_limits_reject_whole_payload_instead_of_partial_candidate():
