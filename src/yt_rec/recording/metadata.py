@@ -13,6 +13,7 @@ yt-dlp 는 프리즌 바이너리라 표준출력이 OEM 코드페이지로 나�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from collections.abc import Iterable
@@ -231,6 +232,11 @@ def fetch_metadata(
         url,
     ]
 
+    extra: dict = {}
+    if os.name == "nt":
+        # 알림 하나마다 도는 조회다. 콘솔 없는 GUI 런처에서 창이 번쩍이면 안 된다(#96).
+        extra["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+
     try:
         proc = subprocess.run(
             argv,
@@ -239,6 +245,7 @@ def fetch_metadata(
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
+            **extra,
         )
     except subprocess.TimeoutExpired as exc:
         raise MetadataUnavailableError(

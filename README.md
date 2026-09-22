@@ -535,7 +535,7 @@ PATH에 있는지 확인한다.
 
 ```text
 uv sync
-uv run yt-rec --help
+uv run yt-rec-console --help
 uv run yt-rec --stub populated
 ```
 
@@ -653,6 +653,10 @@ GUI 실행과 Google OAuth 준비는 위의 [사용법](#사용법)을 기준으
 `uv run python -m yt_rec`도 `uv run yt-rec`와 같은 진입점이다. 빈 화면은
 `uv run yt-rec --stub empty`, 초당 100건 진행 이벤트 부하는
 `uv run yt-rec --stub flood`로 확인한다.
+
+`uv run yt-rec`는 콘솔이 붙지 않는 GUI 런처다. 앱을 띄울 때마다 빈 터미널 창이
+따라붙지 않는다. 표준출력으로 결과를 내는 `--help`와 `--smoke-test`는 같은
+진입점의 콘솔 런처인 `uv run yt-rec-console`로 실행한다.
 
 ### 독립 실행 파일 만들기
 

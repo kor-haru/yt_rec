@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import os
+import subprocess
 import sys
 import uuid
 
@@ -288,3 +290,20 @@ def test_secret_tool이_없으면_설치_안내를_준다(monkeypatch) -> None:
     monkeypatch.setattr("yt_rec.backend.tokens.subprocess.run", run)
     with pytest.raises(TokenStoreError, match="libsecret-tools"):
         LinuxSecretServiceStore().load()
+
+
+def test_secret_tool_은_콘솔_창을_띄우지_않는다(monkeypatch) -> None:
+    """Linux 용이지만 직접 세우면 Windows 에서도 돈다. 콘솔 없는 런처를 지킨다(#96)."""
+    captured: dict = {}
+
+    def run(args, **kwargs):
+        captured.update(kwargs)
+        return _Proc(0, stdout='{"refresh_token":"private"}\n')
+
+    monkeypatch.setattr("yt_rec.backend.tokens.subprocess.run", run)
+    LinuxSecretServiceStore().load()
+
+    if os.name == "nt":
+        assert captured["creationflags"] & subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in captured

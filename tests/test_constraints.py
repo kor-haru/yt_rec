@@ -395,8 +395,26 @@ def test_화면은_백엔드와_녹화_엔진을_직접_부르지_않는다() ->
 def test_진입점이_존재한다() -> None:
     assert (SRC_ROOT / "app.py").exists()
     assert (SRC_ROOT / "__main__.py").exists()
+    # 평소 실행은 GUI 런처다. 콘솔 스크립트로 두면 실행할 때마다 빈 터미널이 붙는다(#96).
+    assert pyproject()["project"].get("gui-scripts", {}).get("yt-rec") == "yt_rec.app:main"
+    assert "yt-rec" not in pyproject()["project"].get("scripts", {})
+
+
+def test_콘솔_진입점이_같은_main_을_가리킨다() -> None:
+    """`--help` 와 `--smoke-test` 의 표준출력을 볼 수 있는 런처를 남겨 둔다(#96)."""
     scripts = pyproject()["project"].get("scripts", {})
-    assert scripts.get("yt-rec") == "yt_rec.app:main"
+    targets = [name for name, target in scripts.items() if target == "yt_rec.app:main"]
+    assert targets, f"콘솔 진입점이 없다: {scripts}"
+
+
+def test_콘솔_진입점은_도움말을_표준출력으로_낸다(capsys) -> None:
+    from yt_rec.app import parse_args
+
+    with pytest.raises(SystemExit) as caught:
+        parse_args(["--help"])
+    assert caught.value.code == 0
+    printed = capsys.readouterr().out
+    assert "--smoke-test" in printed and "--stub" in printed
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib 필요")
