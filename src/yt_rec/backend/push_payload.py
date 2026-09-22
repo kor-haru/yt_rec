@@ -9,6 +9,7 @@ This module imports no browser engine; it is pure data validation.
 from __future__ import annotations
 
 import re
+from enum import Enum
 from urllib.parse import parse_qs, urlsplit
 
 YOUTUBE = "https://www.youtube.com"
@@ -27,7 +28,20 @@ def _is_youtube_url(value: str) -> bool:
         return False
 
 
-def _video_id_from_data(data: object) -> str | None:
+class NoVideo(Enum):
+    """Why no single video came out, so callers can tell normal from broken.
+
+    A community post or a members-only notice carries no watch URL at all, and
+    that is an ordinary notification for a subscribed channel. The other two
+    mean the payload is not a shape we know, which is a receiver defect.
+    """
+
+    ABSENT = "absent"  # No watch URL and no video ID anywhere in the payload.
+    AMBIGUOUS = "ambiguous"  # More than one distinct video; picking one is a guess.
+    MALFORMED = "malformed"  # Broken watch URL/ID, or past the traversal limits.
+
+
+def _video_from_data(data: object) -> str | NoVideo:
     """Fail closed on ambiguity or traversal limits; never parse titles as IDs."""
     videos: set[str] = set()
     remaining = 256
@@ -60,5 +74,13 @@ def _video_id_from_data(data: object) -> str | None:
     try:
         visit(data)
     except (ValueError, RecursionError):
-        return None
-    return next(iter(videos)) if len(videos) == 1 else None
+        return NoVideo.MALFORMED
+    if len(videos) == 1:
+        return next(iter(videos))
+    return NoVideo.AMBIGUOUS if videos else NoVideo.ABSENT
+
+
+def _video_id_from_data(data: object) -> str | None:
+    """The same rules for callers that act on the ID alone, reason or not."""
+    video = _video_from_data(data)
+    return video if isinstance(video, str) else None

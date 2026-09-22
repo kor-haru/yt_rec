@@ -26,6 +26,7 @@ youtube.com 에 아무것도 묻지 않는다.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import socket
@@ -41,7 +42,14 @@ from PySide6.QtWebSockets import QWebSocket
 
 from .notifications import LiveNotification
 from .notification_history import ReceivedNotification
-from .push_payload import NOTIFICATION_SETTINGS_URL, YOUTUBE, _is_youtube_url, _video_id_from_data
+from .push_payload import (
+    NOTIFICATION_SETTINGS_URL,
+    YOUTUBE,
+    NoVideo,
+    _is_youtube_url,
+    _video_from_data,
+    _video_id_from_data,
+)
 from ..webengine_boot import profile_root
 
 __all__ = [
@@ -50,6 +58,8 @@ __all__ = [
     "chrome_executable",
     "chrome_profile_directory",
 ]
+
+_LOG = logging.getLogger(__name__)
 
 #: 서비스 워커가 앱으로 페이로드를 넘길 때 쓰는 ``Runtime.addBinding`` 이름.
 BINDING = "__ytRecPush"
@@ -75,6 +85,9 @@ _RECHECK_DELAY_MS = 800
 _RECHECK_ATTEMPTS = 15
 _RESTART_DELAY_MS = (5_000, 10_000, 20_000, 40_000, 60_000)
 _SERVICE_WORKER_SCOPE = YOUTUBE + "/"
+#: 쉬는 상태. 등록 확인을 마쳤을 때와, 녹화할 것이 없는 알림을 넘겼을 때 모두 여기로
+#: 돌아온다. 한 곳에 둬야 둘이 갈라지지 않는다.
+_RESTING = "알림 수신 준비됨 · 실제 도착 대기 중"
 
 
 def chrome_executable() -> Path | None:
@@ -587,11 +600,20 @@ class ChromePushReceiver(QObject):
         self.notification_arrived.emit(ReceivedNotification(
             datetime.now(timezone.utc), title, body, synthetic=False,
         ))
-        video_id = _video_id_from_data(options.get("data"))
-        if video_id is None:
+        video = _video_from_data(options.get("data"))
+        if video is NoVideo.ABSENT:
+            # 커뮤니티 글이나 멤버십 알림에는 watch 주소가 없다 (#94). 구독 채널이
+            # 으레 보내는 정상적인 알림이므로 수신기 고장과 같은 칸에 넣지 않는다.
+            # 오류로 두면 다음 알림이 올 때까지 몇 시간이고 그대로 눌어붙는다.
+            _LOG.info("영상이 없는 알림을 넘겼습니다")
+            self._status("ready", _RESTING)
+            return
+        if isinstance(video, NoVideo):
+            # 사유만 남긴다. 알림 문구는 이력에만 있고 로그로는 나가지 않는다.
+            _LOG.warning("알림에서 영상 하나를 고르지 못했습니다: %s", video.value)
             self._status("error", "알림에서 영상 하나를 식별하지 못해 녹화하지 않습니다")
             return
-        self._emit(video_id)
+        self._emit(video)
 
     def _push(self, value: dict) -> None:
         """원본 푸시 본문. 표시 문구가 없으므로 이력에는 남기지 않는다.
@@ -688,7 +710,7 @@ class ChromePushReceiver(QObject):
         elif not value["subscription"]:
             self._status("unsubscribed", "알림 권한은 허용됨 · 푸시 수신 등록이 없습니다. 수신 브라우저에서 YouTube 알림 설정을 확인한 뒤 알림 상태 확인을 누르세요")
         else:
-            self._status("ready", "알림 수신 준비됨 · 실제 도착 대기 중")
+            self._status("ready", _RESTING)
 
     # -- 감시 -----------------------------------------------------------------
 
