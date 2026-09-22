@@ -145,3 +145,12 @@ GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로�
 7. 자동 시작을 켠 뒤 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 의
    `yt-rec` 값이 `wscript.exe "...\yt-rec.vbs"` 인지 보고, 다시 로그인해 빈 터미널이
    없는지 본다.
+8. 6·7 번으로 띄웠을 때 **앱 창이 실제로 보이는지** 본다(#101). 런처는 창을 숨겨
+   달라는 표시 상태를 함께 넘기므로, 창을 띄울지는 설정의
+   `시작할 때 창을 숨기고 트레이로 실행` 만 정해야 한다. 꺼져 있으면 창이 떠야 하고, 켜져 있으면 트레이 아이콘만 있어야
+   한다.
+
+이 항목은 Windows 전용이다 — uv 가 venv 에 두는 `pythonw.exe` 트램펄린이 콘솔
+프로그램이라서 생기는 문제다. macOS 는 `~/Library/LaunchAgents` plist 로, 리눅스는
+`Terminal=false` 인 `.desktop` 으로 자동 시작하며 터미널이 뜨지 않는다. 앱은 어느
+운영체제에서도 이 런처에 의존하지 않는다.
