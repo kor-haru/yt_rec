@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QDialog, QMessageBox, QSystemTrayIcon
 
@@ -277,6 +278,54 @@ def test_without_tray_hidden_start_still_shows_and_close_exits(qapp, state, wind
     assert window.isVisible()
     window.close()
     assert session.stopped
+    window.desktop_managed = False
+    window.close()
+
+
+def _pretend_launcher_hid_the_first_show(window):
+    """실행한 쪽의 SW_HIDE 가 첫 표시를 가로챈 상태를 그대로 만든다 (#101).
+
+    Qt 는 창을 띄운 줄 알고(``isVisible()`` 이 참이고 ``show()`` 는 아무 일도 하지
+    않는다) 정작 창은 화면에 없다. 플랫폼 창의 표시 여부로만 진짜 상태를 잰다.
+    """
+    window.show()
+    window.hide()
+    window.setAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide, True)
+    window.setAttribute(Qt.WidgetAttribute.WA_WState_Hidden, False)
+    window.setAttribute(Qt.WidgetAttribute.WA_WState_Visible, True)
+    window.show()
+    assert window.isVisible() and not window.windowHandle().isVisible()
+
+
+@pytest.mark.parametrize("start_hidden", [False, True])
+def test_app_setting_not_launch_show_state_decides_visibility(
+    qapp, state, window_settings, monkeypatch, tmp_path, start_hidden,
+):
+    options = RecordingOptions(output_dir=tmp_path, start_hidden=start_hidden)
+    window, session, _tray = _session(
+        qapp, state, window_settings, monkeypatch, True, options=options,
+    )
+    _pretend_launcher_hid_the_first_show(window)
+    session.show_initial()
+    assert window.windowHandle().isVisible() is not start_hidden
+    window.desktop_managed = False
+    window.close()
+
+
+def test_launch_show_state_is_cleared_once_not_on_every_reopen(
+    qapp, state, window_settings, monkeypatch, tmp_path,
+):
+    options = RecordingOptions(output_dir=tmp_path)
+    window, session, _tray = _session(
+        qapp, state, window_settings, monkeypatch, True, options=options,
+    )
+    session.show_initial()
+    assert window.windowHandle().isVisible()
+    # 이미 보이는 창을 트레이로 되부를 때까지 접었다 펴면 화면이 깜빡인다.
+    monkeypatch.setattr(window, "hide", MagicMock())
+    session.show_window()
+    window.hide.assert_not_called()
+    assert window.windowHandle().isVisible()
     window.desktop_managed = False
     window.close()
 

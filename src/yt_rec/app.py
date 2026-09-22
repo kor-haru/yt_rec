@@ -224,6 +224,7 @@ class DesktopSession(QObject):
         self._shutdown: threading.Thread | None = None
         self._shutdown_error: Exception | None = None
         self.stopped = False
+        self._first_show = True
         self._last_errors = context.state.error_count
         self._last_stop = context.state.watch.stop_reason
         self._started_at = datetime.now(timezone.utc)
@@ -273,6 +274,14 @@ class DesktopSession(QObject):
             # Remove only minimization; a maximized window must stay maximized.
             window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
         window.show()
+        if self._first_show:
+            self._first_show = False
+            # 창을 띄울지는 이 앱의 설정이 정한다. 그런데 실행한 쪽이 넘긴 표시 상태는
+            # 프로세스가 처음 띄우는 창 하나를 가로채고(런처의 SW_HIDE, #101), 그러면
+            # Qt 는 이미 띄운 줄 알아 show() 를 무시한다. 첫 표시만 한 번 접었다 펴서
+            # 그 지시를 흘려보낸다. 두 번째부터는 가로채는 쪽이 없으므로 건드리지 않는다.
+            window.hide()
+            window.show()
         window.raise_()
         window.activateWindow()
 
