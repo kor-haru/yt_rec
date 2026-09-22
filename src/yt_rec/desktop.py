@@ -20,11 +20,28 @@ def set_app_id() -> None:
             raise OSError("작업 표시줄 앱 식별자를 설정하지 못했습니다.")
 
 
+def hidden_launcher() -> Path | None:
+    """콘솔 창 없이 앱을 띄우는 wscript 런처. 소스 트리에만 있다.
+
+    uv 가 venv 에 두는 ``pythonw.exe`` 는 정작 콘솔 프로그램이라, 그것으로 GUI
+    런처를 불러도 빈 터미널이 함께 뜬다(#99). 앱은 이 파일에 의존하지 않는다 —
+    uv 가 트램펄린을 고치면 지우면 되고, 없으면 예전 방식으로 떨어진다.
+    """
+    launcher = Path(__file__).resolve().parents[2] / "yt-rec.vbs"
+    return launcher if launcher.is_file() else None
+
+
 def startup_command() -> list[str]:
     executable = Path(sys.executable).absolute()
     if getattr(sys, "frozen", False):
         return [str(executable)]
     if sys.platform == "win32":
+        launcher = hidden_launcher()
+        if launcher is not None:
+            # 레지스트리 Run 값은 실행 파일을 부른다. .vbs 경로만 넣지 않고
+            # wscript 를 앞세워야 확실히 돈다.
+            system32 = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+            return [str(system32 / "wscript.exe"), str(launcher)]
         windowed = executable.with_name("pythonw.exe")
         if windowed.is_file():
             executable = windowed

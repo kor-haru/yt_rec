@@ -180,6 +180,38 @@ def test_windows_startup_only_changes_our_value(monkeypatch):
     assert registry.DeleteValue.call_args.args[1] == "yt-rec"
 
 
+@pytest.mark.parametrize("frozen", [False, True])
+def test_windows_autostart_uses_the_hidden_launcher(monkeypatch, tmp_path, frozen):
+    launcher = tmp_path / "yt-rec.vbs"
+    launcher.write_text("' launcher\n", encoding="ascii")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(desktop, "hidden_launcher", lambda: launcher)
+    command = desktop.startup_command()
+    if frozen:
+        # 배포본은 이미 콘솔이 없다. 런처를 끼우면 배포물에 없는 파일을 부르게 된다.
+        assert command == [str(Path(sys.executable).absolute())]
+    else:
+        assert Path(command[0]).name == "wscript.exe"
+        assert command[1:] == [str(launcher)]
+
+
+def test_windows_autostart_falls_back_without_the_launcher(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(desktop, "hidden_launcher", lambda: None)
+    assert desktop.startup_command()[1:] == ["-m", "yt_rec"]
+
+
+def test_hidden_launcher_starts_the_venv_executable_without_a_window():
+    launcher = desktop.hidden_launcher()
+    assert launcher is not None and launcher.name == "yt-rec.vbs"
+    # Windows Script Host 가 ANSI 코드 페이지로 읽으므로 비ASCII 가 있으면 깨진다.
+    text = launcher.read_text(encoding="ascii")
+    assert r".venv\Scripts\yt-rec.exe" in text  # 절대 경로를 박아 두지 않는다.
+    assert ", 0, False" in text  # 창 모드 0 이 빠지면 콘솔이 다시 뜬다.
+
+
 @pytest.mark.parametrize("system", ["darwin", "linux"])
 def test_native_startup_files_round_trip(system, monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", system)

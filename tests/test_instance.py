@@ -77,6 +77,9 @@ def main_runtime(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(application, "DesktopSession", Mock(return_value=desktop))
     monkeypatch.setattr(application, "set_app_id", lambda: None)
     monkeypatch.setattr("yt_rec.recording.binaries.prepare_bundled_environment", lambda: None)
+    # 여기 시험들은 main() 이 예외를 내도록 만든다. 그 합성 traceback 이 기동 실패
+    # 기록으로 새어 나가면 진짜 크래시 기록을 덮는다(#98).
+    monkeypatch.setattr(application, "startup_failure_path", lambda: tmp_path / "startup-crash.log")
     try:
         yield primary, context, desktop
     finally:
