@@ -119,6 +119,16 @@ def test_기동_실패는_파일에_남는다(tmp_path, monkeypatch) -> None:
     assert "RuntimeError" in recorded and "부팅 실패" in recorded
 
 
+def test_테스트는_진짜_앱_데이터_폴더에_쓰지_않는다(isolated_app_data) -> None:
+    """합성 예외의 기동 실패 기록이 사용자 폴더에 남았다(#98). 뿌리째 돌려 둔다."""
+    from conftest import REAL_APP_DATA
+    from yt_rec.recording.options import default_settings_path
+
+    for path in (default_settings_path(), application.startup_failure_path()):
+        assert path.is_relative_to(isolated_app_data)
+        assert not path.is_relative_to(REAL_APP_DATA)
+
+
 def test_기동_실패_기록은_앱_로그_옆에_둔다() -> None:
     from yt_rec.recording.options import default_settings_path
 

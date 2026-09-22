@@ -129,7 +129,7 @@ ffprobe -v error -show_entries stream=index,codec_type,duration -of default=nw=1
 - 녹화 중 탐색기에서 본 중간 파일 크기와, 엔진이 보고하는 크기를 비교한다.
 - 탐색기 쪽이 작게 나오는 것이 정상이다. 엔진 쪽 숫자가 계속 늘어나야 한다.
 
-## 8. 실행할 때 빈 터미널 창이 뜨지 않는지 (#96)
+## 8. 실행할 때 빈 터미널 창이 뜨지 않는지 (#96, #99)
 
 GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로는 확인할 수 없다.
 
@@ -139,3 +139,9 @@ GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로�
    창이 번쩍이면 안 된다.
 4. 자동 시작을 켜고 다시 로그인해도 창이 없어야 한다.
 5. `uv run yt-rec-console --help` 는 그대로 터미널에 도움말을 낸다.
+6. uv 가 만든 venv 에서는 1번이 아직 창을 하나 띄운다 — `.venv\Scripts\pythonw.exe`
+   트램펄린이 콘솔 프로그램이다(#99). 대신 프로젝트 폴더의 `yt-rec.vbs` 를
+   더블클릭해 앱 창 말고는 아무것도 늘지 않는지 본다.
+7. 자동 시작을 켠 뒤 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 의
+   `yt-rec` 값이 `wscript.exe "...\yt-rec.vbs"` 인지 보고, 다시 로그인해 빈 터미널이
+   없는지 본다.

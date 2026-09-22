@@ -40,6 +40,7 @@ from PySide6.QtGui import QColor, QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from yt_rec.recording.binaries import BinaryNotFoundError, Toolchain, resolve_toolchain  # noqa: E402
+from yt_rec.recording.options import default_settings_path  # noqa: E402
 from yt_rec.state.store import AppState  # noqa: E402
 from yt_rec.state.stub import StubEventSource  # noqa: E402
 from yt_rec.ui.settings_store import WindowSettings  # noqa: E402
@@ -47,6 +48,37 @@ from yt_rec.ui.settings_store import WindowSettings  # noqa: E402
 # Match the real entrypoint before the shared QApplication is constructed.
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402, F401
+
+
+#: 갈아끼우기 **전에** 읽어 둔 진짜 사용자 설정 폴더. 검사에서 비교 기준으로 쓴다.
+REAL_APP_DATA = default_settings_path().parent
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_data(tmp_path: Path, monkeypatch) -> Path:
+    """앱 데이터 뿌리를 테스트마다 임시 폴더로 돌린다.
+
+    :func:`~yt_rec.recording.options.default_settings_path` 아래에 설정·로그·토큰·
+    보관함 목록이 모두 달린다. 테스트 하나가 경로 갈아끼우기를 빠뜨리면 진짜
+    ``%APPDATA%\\yt-rec`` 에 쓴다 — 실제로 합성 예외의 traceback 이 사용자 폴더의
+    ``logs/startup-crash.log`` 에 남아 진짜 기동 실패처럼 보였다(#98).
+
+    쓰는 쪽마다 막지 않고 뿌리를 옮긴다. 경로를 부르는 자리는 계속 늘어나고,
+    그때마다 갈아끼우기를 기억해야 하면 언젠가 또 빠뜨린다.
+    :func:`default_settings_path` 자체를 monkeypatch 하지 않는 이유는 여러 모듈이
+    import 시점에 이름으로 들여와 각자 물고 있어서다 — 원본만 바꾸면 그 사본들은
+    그대로 진짜 경로를 낸다. 환경 변수는 호출할 때마다 읽으므로 전부 덮는다.
+    """
+    # 이름이 겹치면 안 된다. 환경 변수 이름 그대로 하위 폴더를 만드는 시험이 있고,
+    # Windows 파일 이름은 대소문자를 가리지 않는다(`APPDATA` 와 `appdata` 가 같다).
+    root = tmp_path / "user-data"
+    root.mkdir()
+    monkeypatch.setenv("APPDATA", str(root))  # Windows
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root))  # Linux
+    # macOS 는 ~/Library/Application Support 를 쓴다. Path.home() 까지 돌린다.
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setenv("USERPROFILE", str(root))
+    return root
 
 
 @pytest.fixture(scope="session")
