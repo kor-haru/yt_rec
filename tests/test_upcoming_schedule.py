@@ -1,7 +1,9 @@
 """예약 라이브(`upcoming`) 처리. 가짜 시계만 쓰고 실제로 자지 않는다 (#82).
 
 라이브 시작 순간에는 푸시가 오지 않는다. 30 분 전 예고 푸시가 유일한 기회이므로
-그 한 번으로 예정 시각을 적어 두고, 예정 시각 *이후에만* 유한하게 다시 확인한다.
+그 한 번으로 예정 시각을 적어 두고, 방송자가 예고보다 일찍 켜는 경우를 위해
+*알림 받은 시점부터* 창 안에서, 늦게 켜는 경우를 위해 예정 시각 이후에, 각각
+유한하게 다시 확인한다 (#103).
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ import pytest
 
 from yt_rec.backend.notifications import LiveNotification, NotificationRecorder
 from yt_rec.backend.schedule import (
+    EARLY_CHECK_WINDOW_SECONDS,
+    MAX_EARLY_CHECKS,
     MAX_RECHECKS,
     MAX_SCHEDULE_AHEAD_SECONDS,
     MAX_WAIT_SECONDS,
@@ -28,6 +32,10 @@ from backend_fakes import FakeResponse, ScriptedSession
 
 VIDEO = "notify00001"
 START = 1_000_000.0
+#: 예고 알림 수신 시각. 실측 21 분 40 초 전이고 창(60 분) 안이다.
+NOTICE_AT = START - 1300.0
+#: 알림 직후 첫 이른 확인. 알림 자체가 한 번 물었으므로 1 분 뒤다.
+FIRST_EARLY = NOTICE_AT + RECHECK_INTERVAL_SECONDS
 
 
 class Clock:
@@ -92,7 +100,12 @@ def build(*, clock=None, store=None, premieres=False, seen=None):
 
 
 def notice(at: float | None = None) -> LiveNotification:
-    return LiveNotification(VIDEO, START - 1300.0 if at is None else at)
+    return LiveNotification(VIDEO, NOTICE_AT if at is None else at)
+
+
+def spent_early() -> MemoryScheduleStore:
+    """이른 확인 예산을 다 쓴 예약 하나. 예정 시각 이후 몫만 남아 있다."""
+    return MemoryScheduleStore([ScheduledLive(VIDEO, START, NOTICE_AT, 0, False, MAX_EARLY_CHECKS)])
 
 
 # ----------------------------------------------------------------------
@@ -124,31 +137,35 @@ def test_upcoming_branch_schedules_without_recording():
     assert result.status == "scheduled"
     assert recorder.calls == []
     assert handler.scheduled_video_ids == (VIDEO,)
-    assert handler.next_schedule_at() == START
+    assert handler.next_schedule_at() == FIRST_EARLY
     assert wakes == [1]  # 대기자에게 새 예약을 알렸다
     assert [update.status for update in updates] == ["scheduled"]
 
 
 def test_schedule_uses_the_api_value_not_the_notification_body():
     """본문 문구("30분 후에")는 반올림·현지화된 값이라 보지 않는다."""
-    handler, api, _, _, _, _ = build()
+    store = MemoryScheduleStore()
+    handler, api, _, _, _, _ = build(store=store)
     api.upcoming(START + 1304.0)  # 실측: 문구 30분, 실제 21분 44초
     handler.receive(notice(at=START))
-    assert handler.next_schedule_at() == START + 1304.0
+    assert store.load()[0].scheduled_at == START + 1304.0
 
 
 # ----------------------------------------------------------------------
-# 3번: 예정 시각 전에는 요청이 0 회
+# 3번: 창이 열리기 전에는 요청이 0 회
 # ----------------------------------------------------------------------
-def test_waiting_until_scheduled_start_issues_no_api_request():
-    handler, api, recorder, clock, _, _ = build()
+def test_waiting_until_the_window_opens_issues_no_api_request():
+    """먼 예약은 창이 열릴 때까지 잔다. 30 일 뒤 예약까지 매분 물으면 한도가 녹는다."""
+    handler, api, recorder, clock, _, _ = build(clock=Clock(START - 4 * 60 * 60.0))
     api.upcoming(START)
-    handler.receive(notice())
+    handler.receive(notice(at=clock.now))
     assert api.calls == [VIDEO]
     api.calls.clear()
 
+    opens = START - EARLY_CHECK_WINDOW_SECONDS
+    assert handler.next_schedule_at() == opens
     moment = clock.now
-    while moment < START:
+    while moment < opens:
         clock.now = moment
         assert handler.check_schedules() == ()
         moment += 30.0
@@ -156,10 +173,37 @@ def test_waiting_until_scheduled_start_issues_no_api_request():
     assert recorder.calls == []
     assert handler.scheduled_video_ids == (VIDEO,)
 
-    clock.now = START
+    clock.now = opens
     api.live()
     assert handler.check_schedules() == (VIDEO,)
     assert api.calls == [VIDEO]
+    assert recorder.calls == [VIDEO]
+    assert handler.scheduled_video_ids == ()
+
+
+def test_notice_inside_the_window_checks_from_the_notice_not_the_start_time():
+    """실측(#103): 예정 11:00 인데 10:57:44 에 켰다. 기다렸으면 2 분 16 초를 놓친다."""
+    handler, api, recorder, clock, _, _ = build()
+    api.upcoming(START)
+    handler.receive(notice())
+    api.calls.clear()
+    assert handler.next_schedule_at() == FIRST_EARLY
+
+    clock.now = FIRST_EARLY
+    assert handler.check_schedules() == (VIDEO,)  # 예정 시각 전인데 확인했다
+    assert handler.next_schedule_at() == FIRST_EARLY + RECHECK_INTERVAL_SECONDS
+    assert handler.check_schedules() == ()  # 같은 분 안에서는 늘지 않는다
+    assert api.calls == [VIDEO]
+    assert recorder.calls == []
+
+
+def test_early_start_is_recorded_before_the_scheduled_time():
+    handler, api, recorder, clock, _, _ = build()
+    api.upcoming(START)
+    handler.receive(notice())
+    clock.now = START - 136.0  # 실측: 예고보다 2 분 16 초 일찍 켰다
+    api.live()
+    assert handler.check_schedules() == (VIDEO,)
     assert recorder.calls == [VIDEO]
     assert handler.scheduled_video_ids == ()
 
@@ -179,7 +223,7 @@ def test_construction_and_idle_checks_start_no_thread(monkeypatch):
         threading.Thread, "start",
         lambda self: pytest.fail("예약 처리는 스스로 스레드를 띄우지 않는다"),
     )
-    store = MemoryScheduleStore([ScheduledLive(VIDEO, START, START - 1300.0)])
+    store = MemoryScheduleStore([ScheduledLive(VIDEO, START + 4 * 60 * 60.0, NOTICE_AT)])
     handler, api, _, _, _, _ = build(store=store)
     for _ in range(50):
         handler.check_schedules()
@@ -187,13 +231,12 @@ def test_construction_and_idle_checks_start_no_thread(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# 4번: 예정 시각부터 1 분 간격, 상한 30 회
+# 4번: 1 분 간격. 예산은 이른 확인 60 회와 예정 시각 이후 30 회로 따로 센다
 # ----------------------------------------------------------------------
 def test_rechecks_once_a_minute_and_gives_up_at_the_cap():
-    handler, api, recorder, clock, updates, _ = build()
+    """이른 확인을 다 쓴 예약. 예정 시각 이후 몫 30 회는 그대로 남아 있다."""
+    handler, api, recorder, clock, updates, _ = build(store=spent_early())
     api.upcoming(START)
-    handler.receive(notice())
-    api.calls.clear()
 
     for index in range(MAX_RECHECKS):
         clock.now = START + index * RECHECK_INTERVAL_SECONDS
@@ -214,9 +257,8 @@ def test_rechecks_once_a_minute_and_gives_up_at_the_cap():
 
 
 def test_late_start_within_the_cap_is_recorded():
-    handler, api, recorder, clock, _, _ = build()
+    handler, api, recorder, clock, _, _ = build(store=spent_early())
     api.upcoming(START)
-    handler.receive(notice())
     clock.now = START
     handler.check_schedules()
     clock.now = START + RECHECK_INTERVAL_SECONDS
@@ -226,17 +268,63 @@ def test_late_start_within_the_cap_is_recorded():
     assert handler.scheduled_video_ids == ()
 
 
-def test_moved_scheduled_time_restarts_the_recheck_budget():
-    handler, api, _, clock, _, _ = build()
+def test_early_checks_spend_their_own_budget_and_leave_the_rechecks_intact():
+    """창을 통째로 써도 예정 시각 이후 30 회가 남는다. 예산을 따로 센다."""
+    store = MemoryScheduleStore()
+    handler, api, recorder, clock, updates, _ = build(
+        clock=Clock(START - 2 * 60 * 60.0), store=store
+    )
+    api.upcoming(START)
+    handler.receive(notice(at=clock.now))
+    api.calls.clear()
+
+    opens = START - EARLY_CHECK_WINDOW_SECONDS
+    for index in range(MAX_EARLY_CHECKS):
+        clock.now = opens + index * RECHECK_INTERVAL_SECONDS
+        assert handler.check_schedules() == (VIDEO,), index
+    assert len(api.calls) == MAX_EARLY_CHECKS
+    assert store.load()[0].attempts == 0  # 예정 시각 이후 몫은 손대지 않았다
+    assert handler.next_schedule_at() == START  # 이른 확인은 창에서 끝난다
+
+    for index in range(MAX_RECHECKS):
+        clock.now = START + index * RECHECK_INTERVAL_SECONDS
+        assert handler.check_schedules() == (VIDEO,), index
+    assert recorder.calls == []
+    clock.now = START + MAX_RECHECKS * RECHECK_INTERVAL_SECONDS
+    assert handler.check_schedules() == ()
+    assert handler.scheduled_video_ids == ()
+    assert updates[-1].status == "expired"
+    # 예약 1 건의 최악 비용: 알림 1 + 이른 확인 60 + 재확인 30 (하루 한도 10,000).
+    assert 1 + len(api.calls) == 91
+
+
+def test_moved_scheduled_time_restarts_both_budgets():
+    store = MemoryScheduleStore()
+    handler, api, _, clock, _, _ = build(store=store)
     api.upcoming(START)
     handler.receive(notice())
-    clock.now = START
+    clock.now = FIRST_EARLY
     handler.check_schedules()
-    assert handler.next_schedule_at() == START + RECHECK_INTERVAL_SECONDS
+    assert store.load()[0].early_attempts == 1
+
     api.upcoming(START + 3600.0)  # 방송자가 예정 시각을 미뤘다
-    clock.now = START + RECHECK_INTERVAL_SECONDS
+    clock.now = FIRST_EARLY + RECHECK_INTERVAL_SECONDS
     handler.check_schedules()
-    assert handler.next_schedule_at() == START + 3600.0
+    entry = store.load()[0]
+    assert entry.scheduled_at == START + 3600.0
+    assert (entry.attempts, entry.early_attempts) == (0, 0)
+    assert handler.next_schedule_at() == START  # 밀린 예정 시각의 창이 열리는 때
+
+
+def test_unchanged_scheduled_time_keeps_the_spent_counts():
+    store = MemoryScheduleStore()
+    handler, api, _, clock, _, _ = build(store=store)
+    api.upcoming(START)
+    handler.receive(notice())
+    for index in range(3):
+        clock.now = FIRST_EARLY + index * RECHECK_INTERVAL_SECONDS
+        handler.check_schedules()
+    assert store.load()[0].early_attempts == 3  # 같은 예정 시각이면 이어 센다
 
 
 def test_schedule_is_dropped_when_the_video_turns_out_not_to_be_a_live():
@@ -261,7 +349,7 @@ def test_schedule_survives_a_restart(tmp_path):
 
     restarted, restarted_api, recorder, clock, _, _ = build(store=FileScheduleStore(path))
     assert restarted.scheduled_video_ids == (VIDEO,)
-    assert restarted.next_schedule_at() == START
+    assert restarted.next_schedule_at() == FIRST_EARLY
     assert restarted_api.calls == []  # 복원만으로는 요청하지 않는다
 
     clock.now = START
@@ -273,10 +361,10 @@ def test_schedule_survives_a_restart(tmp_path):
 
 def test_restored_schedule_whose_time_already_passed_rechecks_immediately(tmp_path):
     path = tmp_path / "upcoming_lives.json"
-    FileScheduleStore(path).save([ScheduledLive(VIDEO, START, START - 1300.0)])
+    FileScheduleStore(path).save([ScheduledLive(VIDEO, START, NOTICE_AT)])
     clock = Clock(START + 300.0)  # 예정 시각이 5 분 지난 뒤 앱이 켜졌다
     handler, api, recorder, _, _, _ = build(clock=clock, store=FileScheduleStore(path))
-    assert handler.next_schedule_at() == START  # 이미 만기다
+    assert handler.next_schedule_at() <= clock.now  # 이미 만기다
     waker = ScheduleWaker(due_at=handler.next_schedule_at, on_due=handler.check_schedules, clock=clock)
     assert waker.next_wait() == 0.0  # 기다리지 않고 바로 확인한다
 
@@ -290,6 +378,29 @@ def test_unreadable_schedule_file_does_not_break_startup(tmp_path):
     path.write_text('{"schedules": [{"video_id": "bad"}, ' + '{"video_id": "notify00001", '
                     '"scheduled_at": 1000000.0, "received_at": 999000.0}]}', encoding="utf-8")
     assert FileScheduleStore(path).load() == (ScheduledLive(VIDEO, START, 999000.0),)
+
+
+def test_old_format_schedule_file_still_loads(tmp_path):
+    """이른 확인이 생기기 전에 저장된 파일. 없는 필드는 0 으로 본다."""
+    path = tmp_path / "upcoming_lives.json"
+    path.write_text('{"schedules": [{"video_id": "notify00001", "scheduled_at": 1000000.0, '
+                    '"received_at": 999000.0, "attempts": 3, "synthetic": false}]}', encoding="utf-8")
+    entry = FileScheduleStore(path).load()[0]
+    assert entry.early_attempts == 0
+    assert entry.attempts == 3  # 예정 시각 이후 몫은 읽은 그대로다
+    assert entry.due_at() == 999000.0 + RECHECK_INTERVAL_SECONDS
+
+
+def test_early_checks_missed_while_the_app_was_off_are_not_paid_for():
+    """창 앞부분을 통째로 놓쳤다고 지난 1 분마다 요청을 하나씩 태우지 않는다."""
+    store = MemoryScheduleStore([ScheduledLive(VIDEO, START, START - 3 * 60 * 60.0)])
+    clock = Clock(START - 300.0)  # 창이 열린 지 55 분 만에 앱이 켜졌다
+    handler, api, _, _, _, _ = build(clock=clock, store=store)
+    api.upcoming(START)
+    assert handler.check_schedules() == (VIDEO,)
+    assert len(api.calls) == 1
+    assert handler.next_schedule_at() == clock.now + RECHECK_INTERVAL_SECONDS
+    assert handler.check_schedules() == ()
 
 
 # ----------------------------------------------------------------------
