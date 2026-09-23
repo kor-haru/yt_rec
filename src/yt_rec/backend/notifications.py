@@ -25,6 +25,7 @@ import math
 import re
 import threading
 import time
+from datetime import datetime
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -32,6 +33,7 @@ from typing import Protocol
 from yt_rec.logs import redact
 
 from .schedule import (
+    MAX_EARLY_CHECKS,
     MAX_RECHECKS,
     MAX_SCHEDULE_AHEAD_SECONDS,
     ScheduledLive,
@@ -73,6 +75,14 @@ class NotificationResult:
     # A received byte or successful mux says nothing about earliest coverage.
     coverage: str = "unknown"
     coverage_reason: str = "시작 지점 확보 여부는 아직 확인되지 않았습니다 (알림 지연/DVR/되감기 제한 가능)"
+
+
+def _local_time(epoch: float) -> str:
+    """예정 시각을 사람이 읽는 로컬 시각으로. 로그에 epoch 를 그대로 내보내지 않는다."""
+    try:
+        return datetime.fromtimestamp(float(epoch)).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "시각 미상"
 
 
 class NotificationRecorder:
@@ -256,7 +266,8 @@ class NotificationRecorder:
         self._persist_schedules_locked()
         result = replace(
             base, status="scheduled",
-            reason=f"예약 라이브입니다. 예정 시각 {scheduled_at} 부터 최대 {MAX_RECHECKS}회 확인합니다",
+            reason=f"예약 라이브입니다. {_local_time(scheduled_at)} 예정이며, 그 전 최대 "
+                   f"{MAX_EARLY_CHECKS}회와 그 뒤 최대 {MAX_RECHECKS}회 확인합니다",
         )
         if previous is None or previous.scheduled_at != scheduled_at:
             self._notify_schedule_changed()

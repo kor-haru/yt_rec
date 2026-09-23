@@ -130,6 +130,23 @@ def test_none_branch_is_ignored_silently_and_never_scheduled():
     assert [update.status for update in updates] == ["ignored"]
 
 
+def test_the_scheduled_reason_tells_the_truth_about_when_it_checks():
+    """사유가 동작과 어긋나면 안 된다. 창이 생기기 전 문구는 "예정 시각부터" 였다.
+
+    epoch 를 그대로 내보내면 로그에서 읽을 수 없으므로 로컬 시각으로 적는다.
+    """
+    from yt_rec.backend.notifications import _local_time
+    from yt_rec.backend.schedule import MAX_EARLY_CHECKS, MAX_RECHECKS
+
+    handler, api, recorder, clock, updates, wakes = build()
+    api.upcoming(START)
+    reason = handler.receive(notice()).reason
+
+    assert _local_time(START) in reason
+    assert str(int(START)) not in reason  # epoch 가 새어 나가면 안 된다
+    assert f"{MAX_EARLY_CHECKS}회" in reason and f"{MAX_RECHECKS}회" in reason
+
+
 def test_upcoming_branch_schedules_without_recording():
     handler, api, recorder, clock, updates, wakes = build()
     api.upcoming(START)
