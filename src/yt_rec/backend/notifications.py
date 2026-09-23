@@ -6,9 +6,11 @@ this downstream contract. BackendSource's explicit event-only option wires this
 handler; legacy construction still uses polling. No receiver is installed here.
 
 A notified video may be a *scheduled* live rather than a running one. Those are
-recorded in a ScheduleStore and re-checked only from their YouTube-supplied
-scheduledStartTime, a bounded number of times (see .schedule). Nothing here polls
-before that instant, and an idle handler still issues zero requests.
+recorded in a ScheduleStore and re-checked a bounded number of times: once a
+minute inside a fixed window that ends at their YouTube-supplied
+scheduledStartTime, since broadcasters do go live early, then a separately
+budgeted number of times after it (see .schedule). Nothing here polls before that
+window opens, and an idle handler still issues zero requests.
 
 Wire recorder's post-slot-release on_result to recording_finished(), and ONLY
 positive-byte engine ProgressReported events to report_progress(). Call resume()
@@ -23,6 +25,7 @@ import math
 import re
 import threading
 import time
+from datetime import datetime
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -30,6 +33,7 @@ from typing import Protocol
 from yt_rec.logs import redact
 
 from .schedule import (
+    MAX_EARLY_CHECKS,
     MAX_RECHECKS,
     MAX_SCHEDULE_AHEAD_SECONDS,
     ScheduledLive,
@@ -71,6 +75,14 @@ class NotificationResult:
     # A received byte or successful mux says nothing about earliest coverage.
     coverage: str = "unknown"
     coverage_reason: str = "시작 지점 확보 여부는 아직 확인되지 않았습니다 (알림 지연/DVR/되감기 제한 가능)"
+
+
+def _local_time(epoch: float) -> str:
+    """예정 시각을 사람이 읽는 로컬 시각으로. 로그에 epoch 를 그대로 내보내지 않는다."""
+    try:
+        return datetime.fromtimestamp(float(epoch)).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "시각 미상"
 
 
 class NotificationRecorder:
@@ -227,7 +239,7 @@ class NotificationRecorder:
     def _schedule_upcoming_locked(
         self, notice: LiveNotification, state: VideoState, base: NotificationResult,
     ) -> NotificationResult:
-        """예약 라이브를 예정 시각까지 적어만 둔다. 지금은 아무것도 녹화하지 않는다."""
+        """예약 라이브를 적어만 둔다. 지금은 아무것도 녹화하지 않는다."""
         video_id = notice.video_id
         live, scheduled_at = state.broadcast, state.scheduled_start
         if live is None or scheduled_at is None:
@@ -244,13 +256,18 @@ class NotificationRecorder:
             return self._publish(replace(base, reason="예정 시각이 너무 멀어 예약하지 않습니다"))
         previous = self._schedules.get(video_id)
         # 같은 예정 시각이면 이미 쓴 확인 횟수를 유지한다. 시각이 밀렸으면 처음부터.
-        attempts = previous.attempts if previous is not None and previous.scheduled_at == scheduled_at else 0
-        entry = ScheduledLive(video_id, scheduled_at, notice.received_at, attempts, notice.synthetic)
+        kept = previous if previous is not None and previous.scheduled_at == scheduled_at else None
+        entry = ScheduledLive(
+            video_id, scheduled_at, notice.received_at,
+            kept.attempts if kept is not None else 0, notice.synthetic,
+            kept.early_attempts if kept is not None else 0,
+        )
         self._schedules[video_id] = entry
         self._persist_schedules_locked()
         result = replace(
             base, status="scheduled",
-            reason=f"예약 라이브입니다. 예정 시각 {scheduled_at} 부터 최대 {MAX_RECHECKS}회 확인합니다",
+            reason=f"예약 라이브입니다. {_local_time(scheduled_at)} 예정이며, 그 전 최대 "
+                   f"{MAX_EARLY_CHECKS}회와 그 뒤 최대 {MAX_RECHECKS}회 확인합니다",
         )
         if previous is None or previous.scheduled_at != scheduled_at:
             self._notify_schedule_changed()
@@ -259,10 +276,12 @@ class NotificationRecorder:
         return result
 
     def check_schedules(self, *, now: float | None = None) -> tuple[str, ...]:
-        """예정 시각이 된 예약만 다시 확인한다. 아직이면 요청을 하나도 보내지 않는다.
+        """만기가 된 예약만 다시 확인한다. 아직이면 요청을 하나도 보내지 않는다.
 
-        재확인은 :data:`~.schedule.MAX_RECHECKS` 회로 끝난다. 돌려주는 값은 이번에
-        실제로 확인한 video id 다.
+        만기는 창이 열린 뒤의 이른 확인이거나 예정 시각 이후의 재확인이고, 둘은
+        예산을 따로 센다 — 각각 :data:`~.schedule.MAX_EARLY_CHECKS` 회,
+        :data:`~.schedule.MAX_RECHECKS` 회로 끝난다. 돌려주는 값은 이번에 실제로
+        확인한 video id 다.
         """
         moment = self._clock() if now is None else now
         with self._dispatch_lock:
@@ -279,7 +298,7 @@ class NotificationRecorder:
                     self._schedules.pop(entry.video_id, None)
                 for entry in due:
                     # 요청을 보내기 전에 소모한다. 실패해도 같은 만기를 되풀이하지 않는다.
-                    self._schedules[entry.video_id] = bump(entry)
+                    self._schedules[entry.video_id] = bump(entry, moment)
                 if due or expired:
                     self._persist_schedules_locked()
             for entry in expired:

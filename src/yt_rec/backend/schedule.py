@@ -1,15 +1,18 @@
 """예약 라이브(`upcoming`) 일정 보관과 만기 대기.
 
 푸시 알림이 예약 라이브를 알려 주면 YouTube 가 함께 준 ``scheduledStartTime``
-을 여기에 적어 둔다. **예정 시각 전에는 아무 요청도 하지 않는다.** 예정 시각이
-되어서야, 방송자가 늦게 켜는 경우를 위해 정해진 횟수만큼만 다시 확인한다.
+을 여기에 적어 둔다. 예정 시각이 :data:`EARLY_CHECK_WINDOW_SECONDS` 보다 멀면
+**창이 열릴 때까지 아무 요청도 하지 않는다.** 창 안에서는 방송자가 예고보다
+일찍 켜는 경우를 위해 알림 받은 시점부터 1 분 간격으로 확인하고, 예정 시각이
+지나면 늦게 켜는 경우를 위해 정해진 횟수만큼만 다시 확인한다.
 
 이것은 #38 / #39 / #63 이 배제한 폴링이 아니다.
 
 - 푸시라는 *이벤트에서 파생*된다. 주기적으로 전체를 훑지 않는다.
 - 대상이 *그 video id 하나*다. 선택 채널 전체가 아니다.
-- *유한*하다. :data:`MAX_RECHECKS` 회로 끝난다.
-- 시작 시각도 *YouTube 가 알려 준 값*이다.
+- *유한*하다. 예정 시각 전 :data:`MAX_EARLY_CHECKS` 회, 그 뒤
+  :data:`MAX_RECHECKS` 회로 끝난다.
+- 시작 시각도 *YouTube 가 알려 준 값*이다. 창은 그 값에서 거꾸로 잰다.
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ from typing import Any, Protocol
 from yt_rec.recording.options import default_settings_path
 
 __all__ = [
+    "EARLY_CHECK_WINDOW_SECONDS",
+    "MAX_EARLY_CHECKS",
     "MAX_RECHECKS",
     "MAX_SCHEDULE_AHEAD_SECONDS",
     "MAX_WAIT_SECONDS",
@@ -50,8 +55,20 @@ _LOG = logging.getLogger(__name__)
 RECHECK_INTERVAL_SECONDS = 60.0
 
 #: 재확인 상한. 넘기면 방송자가 끝내 켜지 않은 것으로 보고 포기한다.
-#: 예약 1 건당 최대 비용은 알림 1 + 재확인 30 = 31 units 다 (하루 한도 10,000).
 MAX_RECHECKS = 30
+
+#: 예정 시각보다 이만큼 앞에서부터 확인을 시작한다(초). 방송자가 예고보다 일찍
+#: 켜면 예정 시각까지 기다리는 만큼 통째로 놓치기 때문이다(#103).
+#: YouTube 예고 알림은 보통 30 분 전에 온다(실측: 11:00 예정에 10:30:07 수신).
+#: 60 분이면 그 알림을 받은 순간이 창 안에 들어오고도 여유가 남는다. 더 넓히면
+#: 얻는 것 없이 조회만 늘어난다 — 알림이 오기도 전에는 확인할 이유가 없다.
+EARLY_CHECK_WINDOW_SECONDS = 60 * 60.0
+
+#: 이른 확인 상한. 창 하나를 1 분 간격으로 훑는 횟수다. :data:`MAX_RECHECKS` 와
+#: **예산을 따로 센다** — 이른 확인을 다 써도 예정 시각 이후 몫은 그대로 남는다.
+#: 예약 1 건당 최대 비용은 알림 1 + 이른 확인 60 + 재확인 30 = 91 units 다
+#: (하루 한도 10,000).
+MAX_EARLY_CHECKS = int(EARLY_CHECK_WINDOW_SECONDS // RECHECK_INTERVAL_SECONDS)
 
 #: 한 번에 기다리는 최대 시간(초). 사흘 뒤 예약까지 타이머를 들고 있지 않는다.
 #: 이 시간이 지나면 남은 시간을 다시 계산해서 잔다.
@@ -76,6 +93,8 @@ class ScheduledLive:
     attempts: int = 0
     #: 원본 알림이 합성 입력이었는가. 로그를 정직하게 남기려고 함께 적는다.
     synthetic: bool = False
+    #: 예정 시각 *전에* 이미 확인한 횟수. 옛 예약 파일에는 없으므로 0 이 기본이다.
+    early_attempts: int = 0
 
     def __post_init__(self) -> None:
         if not _VIDEO_ID.fullmatch(self.video_id):
@@ -85,12 +104,32 @@ class ScheduledLive:
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name}: 올바른 시각이 아닙니다")
             object.__setattr__(self, name, value)
-        if int(self.attempts) < 0:
-            raise ValueError("attempts 는 음수일 수 없습니다")
-        object.__setattr__(self, "attempts", int(self.attempts))
+        for name in ("attempts", "early_attempts"):
+            count = int(getattr(self, name))
+            if count < 0:
+                raise ValueError(f"{name} 는 음수일 수 없습니다")
+            object.__setattr__(self, name, count)
+
+    def early_due_at(self) -> float | None:
+        """예정 시각 전 다음 확인 시각. 창 밖이거나 예산을 다 썼으면 ``None``.
+
+        알림을 창 안에서 받았으면 그 시점부터, 창보다 일찍 받았으면 창이 열릴
+        때부터 1 분 간격이다. 알림 자체가 이미 한 번 물었으므로 1 분을 띄운다.
+        """
+        if self.early_attempts >= MAX_EARLY_CHECKS:
+            return None
+        opens = max(
+            self.received_at + RECHECK_INTERVAL_SECONDS,
+            self.scheduled_at - EARLY_CHECK_WINDOW_SECONDS,
+        )
+        due = opens + self.early_attempts * RECHECK_INTERVAL_SECONDS
+        return due if due < self.scheduled_at else None
 
     def due_at(self) -> float:
-        """다음 확인 시각. 첫 확인은 예정 시각 그 자체다."""
+        """다음 확인 시각. 창이 열린 뒤에는 예정 시각 전에도 확인한다."""
+        early = self.early_due_at()
+        if early is not None:
+            return early
         return self.scheduled_at + self.attempts * RECHECK_INTERVAL_SECONDS
 
     @property
@@ -104,6 +143,7 @@ class ScheduledLive:
             "received_at": self.received_at,
             "attempts": self.attempts,
             "synthetic": self.synthetic,
+            "early_attempts": self.early_attempts,
         }
 
     @classmethod
@@ -116,6 +156,7 @@ class ScheduledLive:
             received_at=float(data.get("received_at") or 0.0),
             attempts=int(data.get("attempts") or 0),
             synthetic=bool(data.get("synthetic")),
+            early_attempts=int(data.get("early_attempts") or 0),
         )
 
 
@@ -254,6 +295,15 @@ class ScheduleWaker:
             pass
 
 
-def bump(entry: ScheduledLive) -> ScheduledLive:
-    """확인 한 번을 소모한 사본."""
-    return replace(entry, attempts=entry.attempts + 1)
+def bump(entry: ScheduledLive, now: float | None = None) -> ScheduledLive:
+    """확인 한 번을 소모한 사본. 이른 확인과 재확인은 예산이 따로다.
+
+    ``now`` 를 주면 앱이 꺼져 있는 동안 지나간 이른 확인 몫은 함께 버린다.
+    창 앞부분을 통째로 놓쳤다고 지난 1 분마다 요청을 하나씩 태우지 않는다.
+    """
+    early = entry.early_due_at()
+    if early is None:
+        return replace(entry, attempts=entry.attempts + 1)
+    missed = 0 if now is None else int(max(0.0, now - early) // RECHECK_INTERVAL_SECONDS)
+    spent = min(entry.early_attempts + 1 + missed, MAX_EARLY_CHECKS)
+    return replace(entry, early_attempts=spent)
