@@ -129,7 +129,7 @@ ffprobe -v error -show_entries stream=index,codec_type,duration -of default=nw=1
 - 녹화 중 탐색기에서 본 중간 파일 크기와, 엔진이 보고하는 크기를 비교한다.
 - 탐색기 쪽이 작게 나오는 것이 정상이다. 엔진 쪽 숫자가 계속 늘어나야 한다.
 
-## 8. 실행할 때 빈 터미널 창이 뜨지 않는지 (#96, #99)
+## 8. 실행할 때 빈 터미널 창이 뜨지 않는지 (#96, #99, #105)
 
 GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로는 확인할 수 없다.
 
@@ -139,7 +139,7 @@ GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로�
    창이 번쩍이면 안 된다.
 4. 자동 시작을 켜고 다시 로그인해도 창이 없어야 한다.
 5. `uv run yt-rec-console --help` 는 그대로 터미널에 도움말을 낸다.
-6. uv 가 만든 venv 에서는 1번이 아직 창을 하나 띄운다 — `.venv\Scripts\pythonw.exe`
+6. uv 0.12.4 미만이 만든 venv 에서는 1번이 창을 하나 띄운다 — `.venv\Scripts\pythonw.exe`
    트램펄린이 콘솔 프로그램이다(#99). 대신 프로젝트 폴더의 `yt-rec.vbs` 를
    더블클릭해 앱 창 말고는 아무것도 늘지 않는지 본다.
 7. 자동 시작을 켠 뒤 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 의
@@ -149,8 +149,10 @@ GUI 런처(`[project.gui-scripts]`)라 콘솔이 붙지 않는다. 자동으로�
    달라는 표시 상태를 함께 넘기므로, 창을 띄울지는 설정의
    `시작할 때 창을 숨기고 트레이로 실행` 만 정해야 한다. 꺼져 있으면 창이 떠야 하고, 켜져 있으면 트레이 아이콘만 있어야
    한다.
+9. uv 0.12.4 이상으로 `.venv` 를 새로 만든 뒤(`.venv` 삭제 → `uv sync`) `.venv\Scripts\pythonw.exe`
+   의 PE subsystem 이 2(GUI)인지, `uv run yt-rec` 로 띄운 `yt-rec.exe` 아래에 conhost 가 없는지 본다.
 
-이 항목은 Windows 전용이다 — uv 가 venv 에 두는 `pythonw.exe` 트램펄린이 콘솔
+이 항목은 Windows 전용이다 — uv 0.12.4 미만이 venv 에 두는 `pythonw.exe` 트램펄린이 콘솔
 프로그램이라서 생기는 문제다. macOS 는 `~/Library/LaunchAgents` plist 로, 리눅스는
 `Terminal=false` 인 `.desktop` 으로 자동 시작하며 터미널이 뜨지 않는다. 앱은 어느
 운영체제에서도 이 런처에 의존하지 않는다.
