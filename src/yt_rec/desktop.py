@@ -23,9 +23,10 @@ def set_app_id() -> None:
 def hidden_launcher() -> Path | None:
     """콘솔 창 없이 앱을 띄우는 wscript 런처. 소스 트리에만 있다.
 
-    uv 가 venv 에 두는 ``pythonw.exe`` 는 정작 콘솔 프로그램이라, 그것으로 GUI
-    런처를 불러도 빈 터미널이 함께 뜬다(#99). 앱은 이 파일에 의존하지 않는다 —
-    uv 가 트램펄린을 고치면 지우면 되고, 없으면 예전 방식으로 떨어진다.
+    uv 0.12.4 미만이 venv 에 두는 ``pythonw.exe`` 는 정작 콘솔 프로그램이라, 그것으로
+    GUI 런처를 불러도 빈 터미널이 함께 뜬다(#99). 앱은 이 파일에 의존하지 않는다 —
+    uv 는 트램펄린을 고쳤지만 이미 등록된 자동 시작 값이 이 파일을 가리키므로 남겨
+    두고(#105), 없으면 예전 방식으로 떨어진다.
     """
     launcher = Path(__file__).resolve().parents[2] / "yt-rec.vbs"
     return launcher if launcher.is_file() else None

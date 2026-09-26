@@ -1,11 +1,12 @@
 ' Start yt-rec from a source checkout without a console window.
 '
-' Why this file exists: uv writes .venv\Scripts\pythonw.exe as a console
-' subsystem trampoline (measured on uv 0.11.8), so launching the GUI entry
-' point through it still attaches an empty terminal. WScript.Shell.Run with
-' window style 0 creates no window at all. See README and issue #99. Once uv
-' ships a GUI trampoline this file can be deleted; nothing in the app imports
-' it.
+' Why this file exists: uv older than 0.12.4 writes .venv\Scripts\pythonw.exe
+' as a console subsystem trampoline (measured on uv 0.11.8), so launching the
+' GUI entry point through a venv it made still attaches an empty terminal.
+' WScript.Shell.Run with window style 0 creates no window at all. See README
+' and issues #99, #105. uv 0.12.4 fixed the trampoline, but autostart entries
+' already registered run "wscript <this file>", so keep it; nothing in the
+' app imports it.
 '
 ' ASCII only, on purpose: Windows Script Host reads .vbs in the system ANSI
 ' code page, so non-ASCII text in this file would reach the user as mojibake.
