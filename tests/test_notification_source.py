@@ -328,10 +328,10 @@ def test_slot_release_and_capacity_changes_resume_only_pending_notices(wired, qa
     source.receive_notification(notice(THIRD), trusted=True)
     until(qapp, lambda: source._notifications.pending_video_ids == (THIRD,))
     engines[VIDEO].actions.put(("finish", False))
-    until(qapp, lambda: THIRD in engines)
+    # 실패 결과는 엔진 스레드에서 Qt 큐로 온다. THIRD 가 먼저 보여도 함께 기다린다.
+    until(qapp, lambda: THIRD in engines and bool(diagnostic(events, "failed")))
     assert api.get_calls == [VIDEO, OTHER, OTHER, THIRD, THIRD]
     assert not source._notifications.pending_video_ids
-    assert diagnostic(events, "failed")
     assert api.find_calls == []
 
 
@@ -347,8 +347,9 @@ def test_reconnect_and_selection_revalidate_pending_without_discovery(wired, qap
     source.receive_notification(notice(OTHER), trusted=True)
     until(qapp, lambda: source._notifications.pending_video_ids == (OTHER,))
     source.handle_command(cmd.SetWatchedChannels(("UC2",)))
-    until(qapp, lambda: not source._notifications.pending_video_ids)
-    assert OTHER not in engines and diagnostic(events, "ignored")
+    # 대기열에서 빠지는 것은 API 확인 전이다. 무시 결과가 Qt 큐를 거쳐 도착할 때까지 기다린다.
+    until(qapp, lambda: not source._notifications.pending_video_ids and bool(diagnostic(events, "ignored")))
+    assert OTHER not in engines
     source.receive_notification(notice(THIRD), trusted=True)
     flush(source, qapp)
     assert THIRD not in engines
