@@ -42,6 +42,7 @@ from .models import (
     RecordingState,
     StopReason,
     Subscription,
+    UpcomingLive,
     WatchedChannel,
     WatchState,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "ConnectionChanged",
     "WatchStatusChanged",
     "ChannelsChanged",
+    "SchedulesChanged",
     "RecordingStarted",
     "RecordingProgress",
     "RecordingFinished",
@@ -94,6 +96,16 @@ class ChannelsChanged:
     """감시 대상 채널 목록 전체 교체."""
 
     channels: tuple[WatchedChannel, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulesChanged:
+    """예약 라이브 목록 전체 교체. 예약이 생기거나 옮겨지거나 사라질 때만 온다.
+
+    1 분 확인마다 오지 않는다. 확인 횟수만 바뀐 것은 화면에 보낼 것이 없다.
+    """
+
+    schedules: tuple[UpcomingLive, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +221,7 @@ BackendEvent = (
     ConnectionChanged
     | WatchStatusChanged
     | ChannelsChanged
+    | SchedulesChanged
     | RecordingStarted
     | RecordingProgress
     | RecordingFinished

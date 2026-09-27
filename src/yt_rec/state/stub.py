@@ -33,6 +33,7 @@ from .models import (
     RecordingState,
     Severity,
     StopReason,
+    UpcomingLive,
     WatchedChannel,
     WatchState,
 )
@@ -199,8 +200,9 @@ def empty_preset() -> list[ev.BackendEvent]:
 
 
 def populated_preset() -> list[ev.BackendEvent]:
-    """감시 3채널, 동시 녹화 3건, 완료 이력 4건. 레이아웃 육안 확인용."""
+    """감시 3채널, 예약 라이브 1건, 동시 녹화 3건, 완료 이력 4건. 레이아웃 육안 확인용."""
     now = _now()
+    upcoming_at = now + timedelta(minutes=35)
     return [
         ev.ConnectionChanged(ConnectionState.CONNECTED),
         ev.WatchStatusChanged(
@@ -231,6 +233,18 @@ def populated_preset() -> list[ev.BackendEvent]:
                     next_check_at=now + timedelta(minutes=9, seconds=30),
                     last_check_at=now - timedelta(seconds=30),
                     last_check_result="확인 실패 — 네트워크 오류",
+                ),
+            )
+        ),
+        # 예고 알림(보통 30 분 전)을 받은 직후. 창(백엔드 기준 60 분) 안이라 `확인 중` 이다.
+        ev.SchedulesChanged(
+            (
+                UpcomingLive(
+                    video_id="upcoming001",
+                    channel_id="UC0000000000000000000001",
+                    title="오늘 밤 정규 방송 — 신곡 무대 최초 공개",
+                    scheduled_at=upcoming_at,
+                    checks_from=upcoming_at - timedelta(hours=1),
                 ),
             )
         ),

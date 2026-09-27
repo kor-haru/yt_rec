@@ -549,6 +549,26 @@ def _labels_with_text(window: MainWindow) -> list[QLabel]:
     ]
 
 
+def _scroll_to_row_of(window: MainWindow, label: QLabel) -> None:
+    """대시보드 안 라벨이면 그 높이까지 세로로만 내린다.
+
+    세로 스크롤은 허용된 동작이다. 스크롤 아래에 가려진 라벨은 보이는 영역이
+    비어 `''` 로 그려진 것처럼 측정되므로 그 줄까지 내린 뒤 잰다(실측: Ubuntu
+    CI 에서 가로로는 들어맞는 완료 행 문구가 `''` 로 측정됐고, Windows 에서 창
+    높이를 400px 로 줄이면 같은 실패가 난다). 가로 위치는 되돌린다 — 가로로
+    따라가면 창보다 넓어진 행 끝의 배지가 하나씩 보이게 되어 이 검사가 잡으려는
+    결함을 가린다.
+    """
+    area = window.scroll_area
+    if not area.widget().isAncestorOf(label):
+        return
+    horizontal = area.horizontalScrollBar()
+    kept = horizontal.value()
+    area.ensureWidgetVisible(label)
+    horizontal.setValue(kept)
+    QApplication.processEvents()
+
+
 def _silent_cuts(window: MainWindow) -> list[str]:
     """원문과 다르게 그려지면서 잘렸다는 표시조차 없는 라벨을 모은다.
 
@@ -559,6 +579,7 @@ def _silent_cuts(window: MainWindow) -> list[str]:
     """
     problems: list[str] = []
     for label in _labels_with_text(window):
+        _scroll_to_row_of(window, label)
         text = label.text()
         drawn = drawn_text(label)
         if drawn == text:

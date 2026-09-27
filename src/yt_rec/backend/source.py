@@ -6,7 +6,7 @@ import queue
 import threading
 from uuid import uuid4
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QThread, QTimer, Slot
 
@@ -15,7 +15,7 @@ from yt_rec.recording.events import ProgressReported
 from yt_rec.logs import LogStore, sanitize_event
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, NotificationHistoryEntry, Severity
+from yt_rec.state.models import CompletedRecording, CompletionStatus, ConnectionState, LogEntry, NotificationHistoryEntry, Severity, UpcomingLive
 from yt_rec.state.store import EventSource, MAX_COMPLETED
 
 from .archive import ArchiveStore, archive_key, load_archive, open_archive_path
@@ -24,7 +24,7 @@ from .notifications import LiveNotification, NotificationRecorder, NotificationR
 from .notification_history import MAX_HISTORY, NotificationHistoryStore, ReceivedNotification
 from .oauth import GoogleAuth
 from .recorder import EngineRecorder
-from .schedule import FileScheduleStore, ScheduleStore, ScheduleWaker
+from .schedule import EARLY_CHECK_WINDOW_SECONDS, FileScheduleStore, ScheduledLive, ScheduleStore, ScheduleWaker
 from .selection import FileSeenStore, FileSelectionStore
 from .tokens import default_token_store
 from .youtube import YouTubeApi, session_from_credentials
@@ -32,6 +32,15 @@ from .youtube import YouTubeApi, session_from_credentials
 __all__ = ["BackendSource", "create_backend_source"]
 
 _SENTINEL = object()
+
+
+def _upcoming(entry: ScheduledLive) -> UpcomingLive:
+    """화면에 보낼 예약 한 건. 확인 횟수는 빼고 창이 열리는 시각을 함께 준다."""
+    at = datetime.fromtimestamp(entry.scheduled_at, timezone.utc)
+    return UpcomingLive(
+        entry.video_id, entry.channel_id, entry.title, at,
+        checks_from=at - timedelta(seconds=EARLY_CHECK_WINDOW_SECONDS),
+    )
 
 
 class BackendSource(EventSource):
@@ -81,7 +90,7 @@ class BackendSource(EventSource):
             can_start=lambda: not self._stopping,
             schedules=schedule_store,
             record_premieres=lambda: controller._options.record_premieres,
-            on_schedule=self._wake_schedules,
+            on_schedule=self._schedules_changed,
         ) if controller.event_only else None
         # 예약 라이브 전용 대기자. 예약이 없으면 자고, 예정 시각에만 깨어난다.
         self._schedule_waker = ScheduleWaker(
@@ -89,9 +98,15 @@ class BackendSource(EventSource):
             on_due=self._notifications.check_schedules,
         ) if self._notifications is not None else None
 
-    def _wake_schedules(self) -> None:
+    def _schedules_changed(self) -> None:
+        """예약이 바뀌었다. 대기자를 다시 계산시키고 화면에 목록 전체를 보낸다."""
         if self._schedule_waker is not None:
             self._schedule_waker.wake()
+        self._publish_schedules()
+
+    def _publish_schedules(self) -> None:
+        if self._notifications is not None:
+            self.publish(ev.SchedulesChanged(tuple(_upcoming(item) for item in self._notifications.schedules)))
 
     @Slot(object)
     def handle_command(self, command: object) -> None:
@@ -338,6 +353,8 @@ class BackendSource(EventSource):
             )
             self._worker.start()
         self._run(self._load_notification_history)
+        # 디스크에서 되살린 예약을 한 번 알린다. 이후에는 바뀔 때만 보낸다.
+        self._run(self._publish_schedules)
         self._run(self._controller.start)
         if self._schedule_waker is not None:
             # 복원된 예약 중 예정 시각이 이미 지난 것은 첫 확인에서 바로 처리된다.

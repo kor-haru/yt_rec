@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -27,6 +30,7 @@ from ..state.models import (
     Recording,
     RecordingState,
     StopReason,
+    UpcomingLive,
     WatchedChannel,
     WatchState,
     WatchStatus,
@@ -38,6 +42,8 @@ from .formatting import (
     format_countdown,
     format_duration,
     format_timestamp,
+    format_upcoming,
+    now,
     recording_state_text,
     stop_reason_text,
 )
@@ -143,11 +149,15 @@ class RecordingRow(_Row):
 
 
 class ChannelRow(_Row):
-    """감시 중 채널 한 건. 남은 시간은 로컬 시계로 다시 그린다."""
+    """감시 중 채널 한 건. 남은 시간과 예약 단계는 로컬 시계로 다시 그린다."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, clock: Callable[[], datetime] = now
+    ) -> None:
         super().__init__(parent)
         self._channel: WatchedChannel | None = None
+        self._upcoming: tuple[UpcomingLive, ...] = ()
+        self._clock = clock
 
         self.name_label = ElidedLabel("", self)
         self.name_label.setObjectName("rowTitle")
@@ -156,6 +166,15 @@ class ChannelRow(_Row):
         set_muted(self.countdown_label)
         self.result_label = ElidedLabel("", self, muted=True)
         self.result_label.setObjectName("rowMeta")
+        # 예약 라이브 한 줄(#108). 예약이 없으면 숨겨서 지금 모양 그대로 둔다.
+        # `외 N건` 을 따로 두는 것은 긴 제목의 말줄임에 함께 잘리지 않게 하려는 것이다.
+        self.upcoming_label = ElidedLabel("", self, muted=True)
+        self.upcoming_label.setObjectName("rowMeta")
+        self.upcoming_more_label = QLabel("", self)
+        self.upcoming_more_label.setObjectName("rowMeta")
+        set_muted(self.upcoming_more_label)
+        self.upcoming_label.hide()
+        self.upcoming_more_label.hide()
 
         grid = QGridLayout(self)
         grid.setContentsMargins(6, 4, 6, 4)
@@ -164,6 +183,8 @@ class ChannelRow(_Row):
         grid.addWidget(self.name_label, 0, 0)
         grid.addWidget(self.countdown_label, 0, 1, Qt.AlignmentFlag.AlignRight)
         grid.addWidget(self.result_label, 1, 0, 1, 2)
+        grid.addWidget(self.upcoming_label, 2, 0)
+        grid.addWidget(self.upcoming_more_label, 2, 1, Qt.AlignmentFlag.AlignRight)
         grid.setColumnStretch(0, 1)
 
     def update_from(self, channel: WatchedChannel) -> None:
@@ -174,10 +195,25 @@ class ChannelRow(_Row):
         self.result_label.setText(f"마지막 확인 {when}  ·  {result}")
         self.refresh_countdown()
 
+    def set_upcoming(self, upcoming: tuple[UpcomingLive, ...]) -> None:
+        """이 채널의 예약 라이브. 예정 시각 순이며 가장 이른 한 건만 그린다."""
+        self._upcoming = tuple(upcoming)
+        self.upcoming_label.setVisible(bool(self._upcoming))
+        extra = len(self._upcoming) - 1
+        self.upcoming_more_label.setText(f"외 {extra}건" if extra > 0 else "")
+        self.upcoming_more_label.setVisible(extra > 0)
+        self.refresh_countdown()
+
     def refresh_countdown(self) -> None:
-        """이미 받아 둔 다음 확인 시각을 기준으로 남은 시간만 다시 그린다."""
+        """이미 받아 둔 시각을 기준으로 남은 시간과 예약 단계만 다시 그린다."""
+        reference = self._clock()
         deadline = self._channel.next_check_at if self._channel else None
-        self.countdown_label.setText(format_countdown(deadline))
+        self.countdown_label.setText(format_countdown(deadline, reference=reference))
+        if not self._upcoming:
+            return
+        first = self._upcoming[0]
+        text = format_upcoming(first.scheduled_at, first.checks_from, reference=reference)
+        self.upcoming_label.setText(f"{text}  ·  {first.title}" if first.title else text)
 
 
 class CompletedRow(_Row):
@@ -231,6 +267,7 @@ class Dashboard(QWidget):
         self._recording_rows: dict[str, QWidget] = {}
         self._channel_rows: dict[str, QWidget] = {}
         self._completed_rows: dict[str, QWidget] = {}
+        self._schedules: dict[str, tuple[UpcomingLive, ...]] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -273,12 +310,14 @@ class Dashboard(QWidget):
 
         state.recordings_changed.connect(self._on_recordings)
         state.channels_changed.connect(self._on_channels)
+        state.schedules_changed.connect(self._on_schedules)
         state.completed_changed.connect(self._on_completed)
         state.watch_changed.connect(self._on_watch)
         state.connection_changed.connect(self._on_connection)
 
         # 최초 1회는 현재 스냅샷으로 채운다. 이후에는 시그널로만 갱신된다.
         self._on_recordings(state.recordings)
+        self._on_schedules(state.schedules)
         self._on_channels(state.channels)
         self._on_completed(state.completed)
         self._on_watch(state.watch)
@@ -338,10 +377,20 @@ class Dashboard(QWidget):
             items,
             key_of=lambda c: c.channel_id,
             create=lambda _c: ChannelRow(),
-            update=lambda w, c: w.update_from(c),
+            update=self._update_channel_row,
             registry=self._channel_rows,
         )
         self.channels_empty.setVisible(not items)
+
+    def _update_channel_row(self, row: ChannelRow, channel: WatchedChannel) -> None:
+        row.update_from(channel)
+        row.set_upcoming(self._schedules.get(channel.channel_id, ()))
+
+    def _on_schedules(self, schedules) -> None:
+        # 예약은 채널 목록과 따로 온다. 먼저 와도 행이 생길 때 _update_channel_row 가 붙인다.
+        self._schedules = dict(schedules)
+        for channel_id, row in self._channel_rows.items():
+            row.set_upcoming(self._schedules.get(channel_id, ()))
 
     def _on_completed(self, completed) -> None:
         items = list(completed)
@@ -388,10 +437,10 @@ class Dashboard(QWidget):
 
     # ------------------------------------------------------------------
     def refresh_countdowns(self) -> None:
-        """채널 행의 남은 시간 표시만 다시 그린다.
+        """채널 행의 남은 시간과 예약 단계 표시만 다시 그린다.
 
-        백엔드를 조회하지 않는다. 이미 받아 둔 `다음 확인 시각`과 로컬 시계로
-        문자열만 다시 만든다.
+        백엔드를 조회하지 않는다. 이미 받아 둔 `다음 확인 시각`·예정 시각과
+        로컬 시계로 문자열만 다시 만든다.
         """
         for row in self._channel_rows.values():
             row.refresh_countdown()
