@@ -40,6 +40,7 @@ __all__ = [
     "Severity",
     "WatchStatus",
     "WatchedChannel",
+    "UpcomingLive",
     "Recording",
     "CompletedRecording",
     "LogEntry",
@@ -158,6 +159,26 @@ class WatchedChannel:
 
     last_check_result: str = ""
     live_now: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class UpcomingLive:
+    """예정 시각을 기다리는 예약 라이브 한 건. 대시보드 채널 줄에 붙는다(#108).
+
+    확인 횟수는 담지 않는다. 단계(확인 전 / 확인 중 / 시작 대기)는 화면이 아래
+    두 절대 시각과 로컬 시계로 정한다. 남은 시간 표시와 같은 방식이다.
+    """
+
+    video_id: str
+    channel_id: str
+    """빈 값이면 어느 채널 줄에도 붙이지 않는다. 옛 예약 파일의 항목이 그렇다."""
+
+    title: str
+    scheduled_at: datetime
+    """YouTube 가 알려 준 예정 시작 시각. 시간대 있음."""
+
+    checks_from: datetime
+    """이른 확인 창이 열리는 시각. 창 길이는 백엔드가 정하고 화면은 여기서 잰다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +312,8 @@ class AppSnapshot:
     connection: ConnectionState = ConnectionState.DISCONNECTED
     watch: WatchStatus = field(default_factory=WatchStatus)
     channels: tuple[WatchedChannel, ...] = ()
+    schedules: dict[str, tuple[UpcomingLive, ...]] = field(default_factory=dict)
+    """채널 ID → 그 채널의 예약 라이브(예정 시각 순). 채널 ID 가 빈 예약은 없다."""
     recordings: tuple[Recording, ...] = ()
     completed: tuple[CompletedRecording, ...] = ()
     logs: tuple[LogEntry, ...] = ()

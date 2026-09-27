@@ -408,6 +408,26 @@ def test_old_format_schedule_file_still_loads(tmp_path):
     assert entry.due_at() == 999000.0 + RECHECK_INTERVAL_SECONDS
 
 
+def test_schedule_file_without_channel_and_title_still_loads(tmp_path):
+    """#108 전에 저장된 파일. 채널·제목은 빈 값이라 어느 채널 줄에도 붙지 않는다."""
+    path = tmp_path / "upcoming_lives.json"
+    path.write_text('{"schedules": [{"video_id": "notify00001", "scheduled_at": 1000000.0, '
+                    '"received_at": 999000.0, "attempts": 0, "synthetic": false, '
+                    '"early_attempts": 12}]}', encoding="utf-8")
+    entry = FileScheduleStore(path).load()[0]
+    assert (entry.channel_id, entry.title) == ("", "")
+    assert entry.early_attempts == 12
+
+
+def test_schedule_keeps_channel_and_title_on_disk(tmp_path):
+    path = tmp_path / "upcoming_lives.json"
+    handler, api, _, _, _, _ = build(store=FileScheduleStore(path))
+    api.upcoming(START)
+    handler.receive(notice())
+    entry, = FileScheduleStore(path).load()
+    assert (entry.channel_id, entry.title) == ("UC1", "예약 라이브")
+
+
 def test_early_checks_missed_while_the_app_was_off_are_not_paid_for():
     """창 앞부분을 통째로 놓쳤다고 지난 1 분마다 요청을 하나씩 태우지 않는다."""
     store = MemoryScheduleStore([ScheduledLive(VIDEO, START, START - 3 * 60 * 60.0)])
@@ -418,6 +438,62 @@ def test_early_checks_missed_while_the_app_was_off_are_not_paid_for():
     assert len(api.calls) == 1
     assert handler.next_schedule_at() == clock.now + RECHECK_INTERVAL_SECONDS
     assert handler.check_schedules() == ()
+
+
+# ----------------------------------------------------------------------
+# 화면 알림(#108): 예약 목록이 바뀔 때만. 확인 횟수만 바뀌면 알리지 않는다
+# ----------------------------------------------------------------------
+def test_schedule_changes_are_signalled_but_checks_alone_are_not():
+    handler, api, _, clock, _, wakes = build()
+    api.upcoming(START)
+    handler.receive(notice())
+    assert wakes == [1]
+    assert [(item.channel_id, item.title) for item in handler.schedules] == [("UC1", "예약 라이브")]
+
+    for index in range(3):
+        clock.now = FIRST_EARLY + index * RECHECK_INTERVAL_SECONDS
+        assert handler.check_schedules() == (VIDEO,)
+    assert wakes == [1]  # 확인 횟수만 늘었다
+
+    api.upcoming(START + 3600.0)  # 방송자가 예정 시각을 미뤘다
+    clock.now += RECHECK_INTERVAL_SECONDS
+    handler.check_schedules()
+    assert len(wakes) == 2
+
+    clock.now = START
+    api.live()
+    handler.check_schedules()
+    assert handler.schedules == ()
+    assert len(wakes) == 3
+
+
+def test_giving_up_is_signalled():
+    store = MemoryScheduleStore([
+        ScheduledLive(VIDEO, START, NOTICE_AT, 0, False, MAX_EARLY_CHECKS, "UC1", "예약 라이브"),
+    ])
+    handler, api, _, clock, _, wakes = build(store=store)
+    api.upcoming(START)
+    for index in range(MAX_RECHECKS):
+        clock.now = START + index * RECHECK_INTERVAL_SECONDS
+        handler.check_schedules()
+    assert wakes == []
+    clock.now = START + MAX_RECHECKS * RECHECK_INTERVAL_SECONDS
+    handler.check_schedules()
+    assert handler.schedules == ()
+    assert wakes == [1]
+
+
+def test_restored_entry_is_signalled_once_it_learns_its_channel():
+    """옛 파일의 예약은 첫 재확인에서 채널·제목을 얻는다. 그때 한 번 알린다."""
+    handler, api, _, clock, _, wakes = build(store=spent_early())
+    api.upcoming(START)
+    clock.now = START
+    handler.check_schedules()
+    assert [(item.channel_id, item.title) for item in handler.schedules] == [("UC1", "예약 라이브")]
+    assert wakes == [1]
+    clock.now = START + RECHECK_INTERVAL_SECONDS
+    handler.check_schedules()
+    assert wakes == [1]
 
 
 # ----------------------------------------------------------------------

@@ -36,6 +36,7 @@ __all__ = [
     "format_duration",
     "format_countdown",
     "format_timestamp",
+    "format_upcoming",
     "watch_badge_text",
     "stop_reason_text",
     "recording_state_text",
@@ -130,6 +131,27 @@ def format_timestamp(value: datetime | None) -> str:
     if local is None:
         return "—"
     return local.strftime("%m-%d %H:%M")
+
+
+def format_upcoming(
+    scheduled_at: datetime, checks_from: datetime, *, reference: datetime | None = None
+) -> str:
+    """예약 라이브의 예정 시각과 단계. 확인 횟수는 넣지 않는다(#108).
+
+    :func:`format_countdown` 처럼 백엔드가 준 절대 시각과 로컬 시계만 본다. 창
+    길이도 ``checks_from`` 에서 거꾸로 잰다 — 화면이 숫자를 따로 들고 있지 않다.
+    """
+    ref = to_local(reference) if reference is not None else now()
+    start = to_local(scheduled_at)
+    opens = to_local(checks_from)
+    when = start.strftime("%H:%M") if start.date() == ref.date() else start.strftime("%m-%d %H:%M")
+    if ref >= start:
+        phase = "시작 대기"
+    elif ref >= opens:
+        phase = "확인 중"
+    else:
+        phase = f"{round((start - opens).total_seconds() / 60)}분 전부터 확인"
+    return f"{when} 예정 · {phase}"
 
 
 def watch_badge_text(connection: ConnectionState, watch: WatchStatus) -> str:

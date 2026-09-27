@@ -15,6 +15,7 @@ from yt_rec.backend import source as production
 from yt_rec.backend.archive import ArchiveStore
 from yt_rec.backend.notifications import LiveNotification
 from yt_rec.backend.recorder import EngineRecorder
+from yt_rec.backend.schedule import EARLY_CHECK_WINDOW_SECONDS, FileScheduleStore, ScheduledLive
 from yt_rec.backend.selection import FileSeenStore, FileSelectionStore
 from yt_rec.backend.tokens import MemoryTokenStore
 from yt_rec.backend.youtube import ChannelRef, LiveBroadcast, VideoState
@@ -216,6 +217,34 @@ def test_production_rejects_probe_synthetic_and_untrusted_inputs(wired, qapp):
     assert len([e for e in events if isinstance(e, ev.LogAppended) and "알림 거절" in e.entry.message]) == 3
     with pytest.raises(ValueError, match="백그라운드"):
         production.create_backend_source(event_only=True, background=False)
+
+
+def test_schedules_reach_the_screen_on_start_and_when_they_change(production_backend, qapp, tmp_path):
+    """#108: 되살린 예약은 시작할 때 한 번, 새 예약은 등록될 때 화면으로 간다."""
+    later = time.time() + 2 * 60 * 60
+    FileScheduleStore(tmp_path / "upcoming_lives.json").save(
+        [ScheduledLive(OTHER, later, time.time(), channel_id="UC1", title="저장된 예약")]
+    )
+    source, api, engines, _, _, events = production_backend()
+    source.start()
+    until(qapp, lambda: any(isinstance(e, ev.ConnectionChanged) and e.state is ConnectionState.CONNECTED for e in events))
+    flush(source, qapp)
+    changes = [e for e in events if isinstance(e, ev.SchedulesChanged)]
+    assert len(changes) == 1
+    restored, = changes[0].schedules
+    assert (restored.video_id, restored.channel_id, restored.title) == (OTHER, "UC1", "저장된 예약")
+    assert restored.scheduled_at.timestamp() == pytest.approx(later)
+    assert restored.scheduled_at - restored.checks_from == timedelta(seconds=EARLY_CHECK_WINDOW_SECONDS)
+
+    api.get_video_state = lambda video_id: VideoState(
+        video_id, "upcoming", LiveBroadcast(video_id, "UC1", "새 예약"), later,
+    )
+    assert source.receive_notification(notice(), trusted=True)
+    flush(source, qapp)
+    changes = [e for e in events if isinstance(e, ev.SchedulesChanged)]
+    assert len(changes) == 2
+    assert [item.video_id for item in changes[-1].schedules] == [VIDEO, OTHER]  # 예정 시각, ID 순
+    assert not engines
 
 
 def test_flush_delivers_logs_queued_after_the_first_gui_event_pass(wired, qapp, monkeypatch):

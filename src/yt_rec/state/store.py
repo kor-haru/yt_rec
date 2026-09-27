@@ -79,6 +79,7 @@ from .models import (
     Severity,
     StopReason,
     Subscription,
+    UpcomingLive,
     WatchedChannel,
     WatchState,
     WatchStatus,
@@ -135,6 +136,9 @@ class AppState(QObject):
 
     channels_changed = Signal(object)
     """payload: ``tuple[WatchedChannel, ...]``"""
+
+    schedules_changed = Signal(object)
+    """payload: ``dict[str, tuple[UpcomingLive, ...]]`` — 채널 ID → 예정 시각 순 예약"""
 
     recordings_changed = Signal(object)
     """payload: ``tuple[Recording, ...]`` — 진행 중 녹화 전체"""
@@ -212,6 +216,7 @@ class AppState(QObject):
         self._connection = ConnectionState.DISCONNECTED
         self._watch = WatchStatus()
         self._channels: tuple[WatchedChannel, ...] = ()
+        self._schedules: dict[str, tuple[UpcomingLive, ...]] = {}
         self._recordings: dict[str, Recording] = {}
         self._completed: list[CompletedRecording] = []
         self._archive: tuple[CompletedRecording, ...] = ()
@@ -275,6 +280,11 @@ class AppState(QObject):
     def channels(self) -> tuple[WatchedChannel, ...]:
         self._require_gui_thread("channels")
         return self._channels
+
+    @property
+    def schedules(self) -> dict[str, tuple[UpcomingLive, ...]]:
+        self._require_gui_thread("schedules")
+        return dict(self._schedules)
 
     @property
     def recordings(self) -> tuple[Recording, ...]:
@@ -353,6 +363,7 @@ class AppState(QObject):
             connection=self._connection,
             watch=self._watch,
             channels=self._channels,
+            schedules=dict(self._schedules),
             recordings=tuple(self._recordings.values()),
             completed=tuple(self._completed),
             archive=self._archive,
@@ -625,6 +636,15 @@ class AppState(QObject):
         self._channels = tuple(event.channels)
         self._dirty.add("channels")
 
+    def _on_schedules(self, event: ev.SchedulesChanged) -> None:
+        grouped: dict[str, list[UpcomingLive]] = {}
+        for item in sorted(event.schedules, key=lambda entry: entry.scheduled_at):
+            # 채널을 모르는 예약(옛 예약 파일)은 어느 줄에도 붙이지 않는다.
+            if item.channel_id:
+                grouped.setdefault(item.channel_id, []).append(item)
+        self._schedules = {channel_id: tuple(items) for channel_id, items in grouped.items()}
+        self._dirty.add("schedules")
+
     def _on_recording_started(self, event: ev.RecordingStarted) -> None:
         rec = event.recording
         if rec.started_at is None:
@@ -721,6 +741,7 @@ class AppState(QObject):
         ev.ConnectionChanged: _on_connection,
         ev.WatchStatusChanged: _on_watch,
         ev.ChannelsChanged: _on_channels,
+        ev.SchedulesChanged: _on_schedules,
         ev.RecordingStarted: _on_recording_started,
         ev.RecordingProgress: _on_recording_progress,
         ev.RecordingFinished: _on_recording_finished,
@@ -764,6 +785,8 @@ class AppState(QObject):
             self.watch_changed.emit(self._watch)
         if "channels" in dirty:
             self.channels_changed.emit(self._channels)
+        if "schedules" in dirty:
+            self.schedules_changed.emit(dict(self._schedules))
         if "recordings" in dirty:
             self.recordings_changed.emit(tuple(self._recordings.values()))
         if "completed" in dirty:

@@ -53,6 +53,7 @@ def test_더미_데이터_프리셋이_주입한_값이_그대로_반영된다(
     assert state.watch.state is WatchState.WATCHING
     assert state.watch.channel_count == 3
     assert len(state.channels) == 3
+    assert set(state.schedules) == {"UC0000000000000000000001"}
     assert len(state.recordings) == 3
     assert len(state.completed) == 4
     assert state.error_count == 1

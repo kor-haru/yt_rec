@@ -105,7 +105,8 @@ class NotificationRecorder:
         self._can_start = can_start
         self._schedule_store = schedules
         self._record_premieres = record_premieres
-        # 예약이 생기거나 사라졌음을 알리는 신호. 막히면 안 된다.
+        # 예약이 생기거나 사라졌음을 알리는 신호. 막히면 안 된다. 확인 횟수만
+        # 바뀔 때는 부르지 않는다 — 화면에 보낼 것이 없다(#108).
         self._on_schedule = on_schedule
         # Dispatch -> state is the only lock order. Engine callbacks use state
         # alone, so a slow API lookup cannot stall an already-running engine.
@@ -128,6 +129,12 @@ class NotificationRecorder:
     def scheduled_video_ids(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(sorted(self._schedules))
+
+    @property
+    def schedules(self) -> tuple[ScheduledLive, ...]:
+        """지금 기다리는 예약 전체. 예정 시각 순."""
+        with self._lock:
+            return tuple(sorted(self._schedules.values(), key=lambda item: (item.scheduled_at, item.video_id)))
 
     def next_schedule_at(self) -> float | None:
         """다음 확인이 필요한 시각. 예약이 없으면 ``None`` — 기다릴 일이 없다."""
@@ -261,6 +268,7 @@ class NotificationRecorder:
             video_id, scheduled_at, notice.received_at,
             kept.attempts if kept is not None else 0, notice.synthetic,
             kept.early_attempts if kept is not None else 0,
+            channel_id=live.channel_id, title=live.title,
         )
         self._schedules[video_id] = entry
         self._persist_schedules_locked()
@@ -269,8 +277,11 @@ class NotificationRecorder:
             reason=f"예약 라이브입니다. {_local_time(scheduled_at)} 예정이며, 그 전 최대 "
                    f"{MAX_EARLY_CHECKS}회와 그 뒤 최대 {MAX_RECHECKS}회 확인합니다",
         )
-        if previous is None or previous.scheduled_at != scheduled_at:
+        moved = previous is None or previous.scheduled_at != scheduled_at
+        # 옛 예약 파일의 항목은 첫 재확인에서야 채널·제목을 얻는다. 그때도 알린다.
+        if moved or (previous.channel_id, previous.title) != (entry.channel_id, entry.title):
             self._notify_schedule_changed()
+        if moved:
             return self._publish(result)
         # 재확인 중에는 같은 말을 매분 남기지 않는다.
         return result
@@ -307,10 +318,11 @@ class NotificationRecorder:
                     "expired",
                     f"예정 시각 이후 {MAX_RECHECKS}회 확인했지만 방송이 시작되지 않아 예약을 취소합니다",
                 ))
+            if expired:
+                # 재확인할 예약이 함께 있어도 알린다. 화면이 포기한 예약을 지워야 한다.
+                self._notify_schedule_changed()
             for entry in due:
                 self._attempt(LiveNotification(entry.video_id, entry.received_at, entry.synthetic))
-            if expired and not due:
-                self._notify_schedule_changed()
             return tuple(entry.video_id for entry in due)
 
     def recording_finished(self, video_id: str, succeeded: bool, *, resume: bool = True) -> None:

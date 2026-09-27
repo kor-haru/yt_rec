@@ -95,6 +95,9 @@ class ScheduledLive:
     synthetic: bool = False
     #: 예정 시각 *전에* 이미 확인한 횟수. 옛 예약 파일에는 없으므로 0 이 기본이다.
     early_attempts: int = 0
+    #: 대시보드 채널 줄에 붙일 채널과 제목(#108). 옛 예약 파일에는 없어 빈 값이다.
+    channel_id: str = ""
+    title: str = ""
 
     def __post_init__(self) -> None:
         if not _VIDEO_ID.fullmatch(self.video_id):
@@ -144,6 +147,8 @@ class ScheduledLive:
             "attempts": self.attempts,
             "synthetic": self.synthetic,
             "early_attempts": self.early_attempts,
+            "channel_id": self.channel_id,
+            "title": self.title,
         }
 
     @classmethod
@@ -157,6 +162,8 @@ class ScheduledLive:
             attempts=int(data.get("attempts") or 0),
             synthetic=bool(data.get("synthetic")),
             early_attempts=int(data.get("early_attempts") or 0),
+            channel_id=str(data.get("channel_id") or ""),
+            title=str(data.get("title") or ""),
         )
 
 
