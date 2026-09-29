@@ -524,6 +524,7 @@ class AppState(QObject):
                 cmd.OpenNotificationBrowser, cmd.OpenNotificationSettings,
                 cmd.InspectNotificationRegistration, cmd.OpenSystemNotificationSettings,
                 cmd.DeleteNotificationHistory,
+                cmd.RefreshSubscriptions, cmd.DisconnectAccount,
             )) and bool(self._sources)
         )
         if not connected and not usable_while_attached:

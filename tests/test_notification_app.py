@@ -26,6 +26,9 @@ def notification_app(production_backend, fake_push_receiver, monkeypatch, qapp, 
     captured = []
 
     def factory(**kwargs):
+        # These receiver/lifecycle tests intentionally retain the legacy fake API.
+        # Browser-session production wiring is exercised in test_browser_web.
+        assert isinstance(kwargs.pop("browser"), application.BrowserYouTube)
         assert kwargs == {"event_only": True}
         result = production_backend(**kwargs)
         captured.append(result)

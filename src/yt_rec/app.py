@@ -34,6 +34,7 @@ configure_webengine_process()
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 
 from .backend import create_backend_source
+from .backend.browser_web import BrowserYouTube
 from .desktop import set_app_id
 from .instance import InstanceLock
 from .logs import redact
@@ -98,6 +99,13 @@ class NotificationSession(QObject):
         self.browser = None
         self._stopped = False
         self._received = False
+        self.account_browser = getattr(getattr(source, "_controller", None), "_browser", None)
+        self._account_refresh = QTimer(self)
+        self._account_refresh.setSingleShot(True)
+        self._account_refresh.setInterval(300)
+        self._account_refresh.timeout.connect(lambda: self.source.browser_changed(True))
+        if self.account_browser is not None:
+            self.account_browser.session_invalidated.connect(self._account_invalidated)
         state.command_requested.connect(self.handle_command)
 
     def start(self) -> None:
@@ -105,10 +113,15 @@ class NotificationSession(QObject):
             return
         self._status("connecting", "YouTube 알림 수신기를 시작하는 중입니다.")
         try:
-            self.receiver = notification_receiver_class(load_settings().notification_receiver)(self)
+            self.receiver = notification_receiver_class(
+                "chrome" if self.account_browser is not None else load_settings().notification_receiver
+            )(self)
             self.receiver.notification_received.connect(self._notification)
             self.receiver.notification_arrived.connect(self._notification_arrived)
             self.receiver.status_changed.connect(self._status)
+            if self.account_browser is not None:
+                self.account_browser.bind(self.receiver)
+                self.receiver.browser_changed.connect(self._browser_changed)
             self.receiver.start()
         except Exception as exc:
             # No fallback discovery: startup failure must remain visible and safe.
@@ -116,6 +129,17 @@ class NotificationSession(QObject):
                 self.receiver.stop()
                 self.receiver = None
             self._status("error", f"알림 수신기를 시작하지 못했습니다. 앱을 다시 실행하고 로그를 확인하세요: {redact(str(exc))}")
+
+    def _browser_changed(self, ready: bool) -> None:
+        if self._stopped:
+            return
+        self._account_refresh.stop()
+        self.source.browser_changed(False)  # Fence pending old-account replies now.
+        if ready:
+            self._account_refresh.start()
+
+    def _account_invalidated(self) -> None:
+        self._browser_changed(True)
 
     def _notification(self, notice: object) -> None:
         if self._stopped:
@@ -146,6 +170,22 @@ class NotificationSession(QObject):
 
     def handle_command(self, command: object) -> None:
         if self._stopped:
+            return
+        if self.account_browser is not None and isinstance(command, (cmd.ConnectAccount, cmd.DisconnectAccount)):
+            if self.receiver is None:
+                self.start()
+            if self.receiver is not None:
+                self.source.publish(ev.LogAppended(LogEntry(
+                    at=datetime.now(timezone.utc), severity=Severity.INFO, source="browser-account",
+                    message="앱 전용 브라우저에서 YouTube 계정을 확인해 주세요.",
+                )))
+                if isinstance(command, cmd.DisconnectAccount):
+                    self.receiver.open_logout()
+                else:
+                    self.receiver.open_browser()
+            return
+        if self.account_browser is not None and isinstance(command, cmd.RefreshSubscriptions):
+            self._browser_changed(True)
             return
         if isinstance(command, cmd.OpenSystemNotificationSettings):
             if sys.platform != "win32":
@@ -207,6 +247,9 @@ class NotificationSession(QObject):
         if self._stopped:
             return
         self._stopped = True
+        self._account_refresh.stop()
+        if self.account_browser is not None:
+            self.account_browser.close()
         if self.browser is not None:
             self.browser.hide()
             self.browser.deleteLater()
@@ -434,7 +477,7 @@ def build_application(
         _start_stub(stub, args.stub)
         source = stub
     else:
-        source = create_backend_source(event_only=True)
+        source = create_backend_source(event_only=True, browser=BrowserYouTube(window))
         state.attach(source)
         source.start()
         notifications = NotificationSession(state, source, window)

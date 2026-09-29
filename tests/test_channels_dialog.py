@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QStyle, QStyleOptionViewItem
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton, QStyle, QStyleOptionViewItem
 
 from yt_rec.state import commands as cmd
 from yt_rec.state import events as ev
-from yt_rec.state.models import ConnectionState, StopReason, Subscription, WatchState
+from yt_rec.state.models import ConnectionState, LogEntry, Severity, StopReason, Subscription, WatchState
 from yt_rec.state.store import AppState
 from yt_rec.ui.account import AccountDialog
 from yt_rec.ui.channels import ChannelsDialog, SubscriptionListModel
@@ -113,34 +114,60 @@ def test_미연결에서_연결_버튼이_명령을_보낸다(state: AppState, s
     dialog.close()
 
 
-def test_세션_로그인은_사용자_선택을_명령에_전달한다(state: AppState, stub) -> None:
+def test_account_screen_only_requires_browser_login(state: AppState) -> None:
+    dialog = AccountDialog(state)
+    text = " ".join(widget.text() for widget in dialog.findChildren(QLabel) + dialog.findChildren(QPushButton))
+    assert "Google 로그인" in text
+    assert "앱 전용" in text
+    assert "OAuth" not in text
+    assert "JSON" not in text
+    assert "Google Auth Platform" not in text
+    assert "Test users" not in text
+    assert not dialog.findChildren(QCheckBox)
+    dialog.close()
+
+
+@pytest.mark.parametrize("dialog_type", [AccountDialog, ChannelsDialog])
+def test_browser_account_controls_retry_switch_and_logout(state: AppState, stub, dialog_type) -> None:
     received = []
     state.command_requested.connect(received.append)
+    dialog = dialog_type(state)
+    try:
+        assert dialog.pane.reload_button.isEnabled()
+        dialog.pane.reload_button.click()
+        assert received == [cmd.RefreshSubscriptions()]
+        state.apply(ev.ConnectionChanged(ConnectionState.CONNECTING))
+        assert not dialog.pane.connect_button.isEnabled()
+        assert not dialog.pane.disconnect_button.isEnabled()
+        assert not dialog.pane.reload_button.isEnabled()
+        state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+        assert dialog.pane.connect_button.text() == "계정 전환"
+        dialog.pane.connect_button.click()
+        dialog.pane.disconnect_button.click()
+        assert received[-2:] == [cmd.ConnectAccount(), cmd.DisconnectAccount()]
+    finally:
+        dialog.close()
+
+
+def test_account_error_ignores_unrelated_logs_and_clears_after_retry(state: AppState) -> None:
+    def log(source, severity, message):
+        state.apply(ev.LogAppended(LogEntry(datetime.now(timezone.utc), severity, message, source)))
+
+    log("recording", Severity.ERROR, "녹화 실패")
     dialog = AccountDialog(state)
-    assert not dialog.pane.session_only.isChecked()
-    dialog.pane.session_only.setChecked(True)
-    dialog.pane.connect_button.click()
-    assert received == [cmd.ConnectAccount(session_only=True)]
-    dialog.close()
-
-
-def test_계정_화면에서_Desktop_JSON_가져오기_후_준비_상태가_된다(state: AppState, monkeypatch, tmp_path) -> None:
-    import json
-    import yt_rec.backend.oauth as oauth
-
-    monkeypatch.delenv(oauth.ENV_CLIENT_SECRETS, raising=False)
-    monkeypatch.delenv(oauth.ENV_CLIENT_ID, raising=False)
-    monkeypatch.delenv(oauth.ENV_CLIENT_SECRET, raising=False)
-    monkeypatch.setattr(oauth, "_default_secrets_path", lambda: tmp_path / "config" / "client_secrets.json")
-    source = tmp_path / "download.json"
-    source.write_text(json.dumps({"installed": {"client_id": "id", "client_secret": "s"}}), encoding="utf-8")
-    monkeypatch.setattr("yt_rec.ui.account.QFileDialog.getOpenFileName", lambda *_a: (str(source), ""))
-    dialog = AccountDialog(state)
-    assert "설정이 없습니다" in dialog.config_status.text()
-    dialog.import_button.click()
-    assert "준비되었습니다" in dialog.config_status.text()
-    assert oauth.load_client_config()["installed"]["client_id"] == "id"
-    dialog.close()
+    try:
+        assert not dialog.pane.error_label.text()
+        log("browser-account", Severity.ERROR, "구독 목록을 읽지 못했습니다")
+        assert dialog.pane.error_label.text() == "구독 목록을 읽지 못했습니다"
+        log("recording", Severity.ERROR, "다른 녹화 실패")
+        assert dialog.pane.error_label.text() == "구독 목록을 읽지 못했습니다"
+        log("browser-account", Severity.INFO, "로그인 확인 중")
+        assert not dialog.pane.error_label.text()
+        state.apply(ev.ConnectionChanged(ConnectionState.CONNECTED))
+        log("browser-account", Severity.ERROR, "이전 오류")
+        assert not dialog.pane.error_label.text()
+    finally:
+        dialog.close()
 
 
 def test_계정_화면에_인증_만료_원인을_보여_준다(state: AppState, stub) -> None:

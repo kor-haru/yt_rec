@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QComboBox, QDialog, QLabel
 
 from backend_fakes import FakeAuth, FakeRecorder, FakeYouTube
 from yt_rec.backend.controller import WatchController
@@ -158,6 +158,22 @@ def open_dialog(state, tmp_path, options=None):
     state.attach(EventSource())
     state.apply(ev.SettingsChanged(options or RecordingOptions(output_dir=tmp_path)))
     return SettingsDialog(state)
+
+
+def test_settings_explains_chrome_without_offering_ignored_legacy_receiver(tmp_path, state):
+    commands = []
+    state.command_requested.connect(commands.append)
+    options = RecordingOptions(output_dir=tmp_path, notification_receiver="qtwebengine")
+    dialog = open_dialog(state, tmp_path, options)
+    try:
+        assert dialog.findChild(QComboBox, "notificationReceiver") is None
+        note = dialog.findChild(QLabel, "notificationReceiverInfo")
+        assert "전용 Chrome" in note.text()
+        dialog._save()
+        assert "notification_receiver" not in commands[-1].values
+        assert state.settings.notification_receiver == "qtwebengine"
+    finally:
+        dialog.close()
 
 
 def test_파일명_규칙을_토큰으로_배치한다(tmp_path, state):

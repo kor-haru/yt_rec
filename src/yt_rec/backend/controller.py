@@ -51,6 +51,7 @@ class WatchController:
         options: RecordingOptions | None = None,
         settings_saver: Callable[[RecordingOptions], object] = save_settings,
         event_only: bool = False,
+        browser: object | None = None,
     ) -> None:
         self._emit = emit
         self._auth = auth
@@ -76,12 +77,18 @@ class WatchController:
         self._subs: list[Subscription] = []
         self._names: dict[str, str] = {}
         self._last_poll_at: datetime | None = None
+        self._browser = browser
 
     def start(self) -> None:
         self._emit(ev.SettingsChanged(self._options))
         recover = getattr(self._recorder, "recover_pending", None)
         if recover is not None:
             recover()
+        if self._browser is not None:
+            # Browser session restoration is event-driven, after CDP attaches.
+            # Never restore/refresh/erase old OAuth credentials in this path.
+            self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+            return
         with self._lock:
             try:
                 blob = self._tokens.load()
@@ -120,6 +127,11 @@ class WatchController:
             self._finish_login_locked()
 
     def handle_command(self, command: cmd.GuiCommand) -> None:
+        if self._browser is not None and isinstance(command, (cmd.ConnectAccount, cmd.DisconnectAccount)):
+            return  # NotificationSession owns the browser UI on the GUI thread.
+        if self._browser is not None and isinstance(command, cmd.RefreshSubscriptions):
+            self.refresh_browser()
+            return
         if isinstance(command, cmd.ConnectAccount):
             self._connect(session_only=command.session_only)
             return
@@ -247,6 +259,49 @@ class WatchController:
             self._handle_api_error(extra)
             return
         self._quota_event()
+        self._apply_subscriptions(label, fetched)
+
+    def browser_unavailable(self) -> None:
+        """A lost page/session stops new work, never running recordings or disk data."""
+        self._connected = False
+        self._youtube = None
+        self._emit(ev.ConnectionChanged(ConnectionState.DISCONNECTED))
+        self._emit(ev.WatchStatusChanged(
+            state=WatchState.STOPPED, channel_count=len(self._selection.load()),
+            stop_reason=StopReason.AUTH_EXPIRED,
+        ))
+
+    def refresh_browser(self) -> None:
+        browser = self._browser
+        if browser is None or browser.closed:
+            return
+        with self._lock:
+            generation = browser.generation
+            self._emit(ev.ConnectionChanged(ConnectionState.CONNECTING))
+            self._browser_log(Severity.INFO, "브라우저의 YouTube 로그인과 구독 목록을 확인합니다.")
+            try:
+                _account, fetched = browser.snapshot()
+            except YouTubeError as exc:
+                if generation != browser.generation:
+                    return  # A newer page event owns the next state update.
+                browser.available = False
+                self.browser_unavailable()
+                self._browser_log(Severity.ERROR, str(exc))
+                return
+            if generation != browser.generation or not browser.available:
+                return
+            self._youtube = browser
+            self._connected = True
+            self._apply_subscriptions("YouTube 로그인됨", fetched)
+            self._browser_log(Severity.INFO, "브라우저 로그인으로 구독 목록을 불러왔습니다.")
+            # Publish readiness last: queued notifications resume only with a full list.
+            self._emit(ev.ConnectionChanged(ConnectionState.CONNECTED))
+
+    def _browser_log(self, severity: Severity, message: str) -> None:
+        self._emit(ev.LogAppended(LogEntry(at=self._clock(), severity=severity,
+                                         source="browser-account", message=message)))
+
+    def _apply_subscriptions(self, label: str, fetched: Sequence) -> None:
         for item in fetched:
             self._names[item.channel_id] = item.name
         selected = set(self._selection.load())

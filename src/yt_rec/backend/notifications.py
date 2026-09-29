@@ -208,8 +208,12 @@ class NotificationRecorder:
                     self._pending[video_id] = notice
                     return self._publish(replace(base, status="queued", reason="연결 복구를 기다립니다"))
             # 같은 요청이 live / upcoming / none / ended 를 한 번에 답한다 (#82).
+            generation = getattr(api, "generation", None)
             state = api.get_video_state(video_id)
             with self._lock:
+                if self._youtube() is not api or getattr(api, "generation", None) != generation:
+                    self._pending[video_id] = notice
+                    return self._publish(replace(base, status="queued", reason="계정 연결 복구를 기다립니다"))
                 if not self._can_start():
                     return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
                 if state.status == "upcoming":
@@ -218,6 +222,8 @@ class NotificationRecorder:
                 if live is None or live.video_id != video_id:
                     self._forget_schedule_locked(video_id)
                     return self._publish(replace(base, reason="현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)"))
+                if state.premiere and not self._record_premieres():
+                    return self._publish(replace(base, reason="프리미어 녹화가 꺼져 있습니다"))
                 # Re-read AFTER network I/O: selection may have changed while waiting.
                 if live.channel_id not in self._selection.load():
                     self._forget_schedule_locked(video_id)
@@ -241,6 +247,9 @@ class NotificationRecorder:
             with self._lock:
                 self._active.pop(video_id, None)
                 self._seen.unmark_started(video_id)
+                if self._youtube() is None and self._can_start():
+                    self._pending[video_id] = notice
+                    return self._publish(replace(base, status="queued", reason="계정 연결 복구를 기다립니다"))
             return self._publish(replace(base, status="failed", reason=redact(str(exc))))
 
     def _schedule_upcoming_locked(
