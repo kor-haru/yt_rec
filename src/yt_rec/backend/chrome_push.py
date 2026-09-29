@@ -41,6 +41,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWebSockets import QWebSocket
 
 from .notifications import LiveNotification
+from .browser_web import BrowserRequest
 from .notification_history import ReceivedNotification
 from .push_payload import (
     NOTIFICATION_SETTINGS_URL,
@@ -262,6 +263,7 @@ class ChromePushReceiver(QObject):
     notification_received = Signal(object)  # LiveNotification, never raw web data.
     notification_arrived = Signal(object)  # Native display text, before video identification.
     status_changed = Signal(str, str)
+    browser_changed = Signal(bool)  # page usable, not authenticated or push-ready
 
     def __init__(
         self, parent: QObject | None = None, *,
@@ -290,6 +292,8 @@ class ChromePushReceiver(QObject):
         self._worker_sessions: dict[str, str] = {}  # targetId -> sessionId
         self._page_session = ""
         self._page_target = ""
+        self._page_sessions: dict[str, str] = {}
+        self._page_urls: dict[str, str] = {}
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(_HEARTBEAT_MS)
         self._heartbeat.timeout.connect(self._pulse)
@@ -449,9 +453,13 @@ class ChromePushReceiver(QObject):
         cdp.events["Target.targetInfoChanged"] = self._target_seen
         cdp.events["Inspector.targetCrashed"] = self._worker_stopped
         cdp.events["Runtime.bindingCalled"] = self._binding_called
+        cdp.events["Page.loadEventFired"] = self._page_loaded
+        cdp.events["Page.frameNavigated"] = self._page_loading
         self._cdp = cdp
         self._worker_sessions.clear()
         self._page_session = self._page_target = ""
+        self._page_sessions.clear()
+        self._page_urls.clear()
         self._awaiting_pong = False
         # CDP 권한 부여는 이 브라우저 세션 동안만 유효하다. 연결할 때마다 다시
         # 준다. 이것이 없으면 Chrome 이 푸시를 받아도 표시를 거절한다.
@@ -474,9 +482,15 @@ class ChromePushReceiver(QObject):
         target = info.get("targetId")
         if not isinstance(target, str) or not isinstance(url, str):
             return
-        if info.get("type") == "page" and _is_youtube_url(url) and not self._page_target:
-            self._page_target = target
-            if self._cdp is not None:
+        if info.get("type") == "page":
+            previous = self._page_urls.get(target)
+            self._page_urls[target] = url
+            if target in self._page_sessions and previous != url:
+                self.browser_changed.emit(False)
+            if _is_youtube_url(url) and target not in self._page_sessions and self._cdp is not None:
+                # Mark pending before the asynchronous attach reply.
+                self._page_sessions[target] = ""
+                self._page_target = target
                 self._cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})
         elif info.get("type") == "service_worker" and _is_youtube_url(url):
             # 새로 시작하는 워커는 자동 붙잡기가 **멈춰 세운 채로** 넘겨 준다. 그
@@ -509,8 +523,58 @@ class ChromePushReceiver(QObject):
             self._install_hook(session, waiting)
         elif info.get("type") == "page":
             self._page_session = session
+            self._page_target = target
+            self._page_sessions[target] = session
+            self._page_urls[target] = url
+            self._cdp.call("Page.enable", session=session)
+            self._cdp.call("Runtime.enable", session=session)
+            self._cdp.call("Runtime.addBinding", {"name": "__ytRecAccountChanged"}, session=session)
+            hook = "if (!window.__ytRecAccountHook) { window.__ytRecAccountHook=true; addEventListener('yt-navigate-finish', () => __ytRecAccountChanged('')); }"
+            self._cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": hook}, session=session)
+            self._cdp.call("Runtime.evaluate", {"expression": hook}, session=session)
+            self._cdp.call("Runtime.evaluate", {
+                "expression": "JSON.stringify(document.readyState === 'complete')", "returnByValue": True,
+            }, session=session, on_reply=lambda reply: self._page_loaded({}, session) if CdpProtocol.value(reply) is True else None)
             self._cdp.call("ServiceWorker.enable", session=session)
             self.inspect_registration()
+
+    def _page_loading(self, params: dict, session: str) -> None:
+        frame = params.get("frame") or {}
+        if session in self._page_sessions.values() and not frame.get("parentId"):
+            self.browser_changed.emit(False)
+
+    def _page_loaded(self, _params: dict, session: str) -> None:
+        if self._closed:
+            return
+        target = next((target for target, value in self._page_sessions.items() if value == session), "")
+        if target and _is_youtube_url(self._page_urls.get(target, "")):
+            self._page_target, self._page_session = target, session
+            self.browser_changed.emit(True)
+
+    @Slot(object)
+    def read_browser(self, request: BrowserRequest) -> None:
+        if request.done.is_set():
+            return
+        cdp, session = self._cdp, self._page_session
+        if self._closed or cdp is None or not session:
+            request.done.set()
+            return
+
+        def finished(reply: dict) -> None:
+            if not request.done.is_set() and self._cdp is cdp:
+                request.value = CdpProtocol.value(reply)
+                request.done.set()
+
+        call = cdp.call("Runtime.evaluate", {
+            "expression": request.expression, "awaitPromise": True,
+            "returnByValue": True, "timeout": 42000,
+        }, session=session, on_reply=finished)
+
+        def expired() -> None:
+            cdp._replies.pop(call, None)
+            request.done.set()
+
+        QTimer.singleShot(44000, expired)
 
     def _detached(self, params: dict, _session: str) -> None:
         session = params.get("sessionId")
@@ -521,6 +585,14 @@ class ChromePushReceiver(QObject):
                 del self._worker_sessions[target]
         if session == self._page_session:
             self._page_session = self._page_target = ""
+            self.browser_changed.emit(False)
+        for target, value in tuple(self._page_sessions.items()):
+            if value == session:
+                self._page_sessions.pop(target, None)
+                self._page_urls.pop(target, None)
+        if not self._page_session and self._page_sessions:
+            target, session = next(iter(self._page_sessions.items()))
+            self._page_loaded({}, session)
 
     def _worker_stopped(self, _params: dict, session: str) -> None:
         """워커가 멈추면 세션을 놓아 준다.
@@ -564,6 +636,10 @@ class ChromePushReceiver(QObject):
     # -- 수신 -----------------------------------------------------------------
 
     def _binding_called(self, params: dict, session: str) -> None:
+        if (not self._closed and params.get("name") == "__ytRecAccountChanged"
+                and session in self._page_sessions.values()):
+            self._page_loaded({}, session)
+            return
         if (self._closed or params.get("name") != BINDING
                 or session not in self._worker_sessions.values()):
             return
@@ -751,11 +827,14 @@ class ChromePushReceiver(QObject):
             self._bring_up()
 
     def _teardown(self) -> None:
+        self.browser_changed.emit(False)
         self._heartbeat.stop()
         self._visible = False  # 다음 기동은 언제나 헤드리스다. 보이는 모드는 눌어붙지 않는다.
         self._cdp = None
         self._worker_sessions.clear()
         self._page_session = self._page_target = ""
+        self._page_sessions.clear()
+        self._page_urls.clear()
         self._awaiting_pong = False
         websocket, self._socket = self._socket, None
         if websocket is not None:
@@ -794,6 +873,11 @@ class ChromePushReceiver(QObject):
     @Slot()
     def open_settings(self) -> None:
         self._open(NOTIFICATION_SETTINGS_URL)
+
+    @Slot()
+    def open_logout(self) -> None:
+        self.browser_changed.emit(False)
+        self._open(YOUTUBE + "/logout")
 
     def _open(self, url: str) -> None:
         """Chrome 창에 탭을 열고 앞으로 부른다. 앱 안에 웹뷰를 띄우지 않는다.

@@ -29,6 +29,8 @@ class _FakeBackend(EventSource):
 def test_스텁_없이_실제_백엔드를_붙인다(qapp, monkeypatch, fake_push_receiver, window_settings) -> None:
     fake = _FakeBackend()
     def factory(**kwargs):
+        from yt_rec.backend.browser_web import BrowserYouTube
+        assert isinstance(kwargs.pop("browser"), BrowserYouTube)
         assert kwargs == {"event_only": True}
         return fake
     monkeypatch.setattr("yt_rec.app.create_backend_source", factory)

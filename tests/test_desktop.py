@@ -346,6 +346,7 @@ def test_minimize_option_keeps_source_and_receiver_running(
     qapp, state, window_settings, monkeypatch, tmp_path, fake_push_receiver, available, enabled,
 ):
     source = MagicMock()
+    source._controller._browser = None  # Explicit legacy fake; not a browser session.
     options = RecordingOptions(output_dir=tmp_path, minimize_to_tray=enabled)
     window, session, _tray = _session(
         qapp, state, window_settings, monkeypatch, available, source, options,

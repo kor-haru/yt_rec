@@ -84,7 +84,9 @@ class BackendSource(EventSource):
         self._results_lock = threading.Lock()
         self._notification_capacity = controller._options.max_recordings
         self._notifications = NotificationRecorder(
-            youtube=lambda: controller._youtube if controller._connected else None,
+            youtube=lambda: controller._youtube if controller._connected and (
+                controller._browser is None or controller._browser.available
+            ) else None,
             selection=controller._selection, recorder=controller._recorder,
             seen=controller._seen, on_update=self._notification_update,
             can_start=lambda: not self._stopping,
@@ -97,6 +99,21 @@ class BackendSource(EventSource):
             due_at=self._notifications.next_schedule_at,
             on_due=self._notifications.check_schedules,
         ) if self._notifications is not None else None
+
+    def browser_changed(self, ready: bool) -> None:
+        browser = self._controller._browser
+        if browser is None or self._stopping:
+            return
+        browser.invalidate()
+        generation = browser.generation
+        def update() -> None:
+            if browser.generation != generation:
+                return
+            if ready:
+                self._controller.refresh_browser()
+            else:
+                self._controller.browser_unavailable()
+        self._run(update)
 
     def _schedules_changed(self) -> None:
         """예약이 바뀌었다. 대기자를 다시 계산시키고 화면에 목록 전체를 보낸다."""
@@ -469,6 +486,7 @@ def create_backend_source(
     background: bool = True,
     poll_interval: float | None = None,
     event_only: bool = True,
+    browser: object | None = None,
 ) -> BackendSource:
     """생산용 소스는 알림 전용이다. 수신기 수명주기는 app이 소유한다.
 
@@ -521,8 +539,8 @@ def create_backend_source(
 
     controller = WatchController(
         emit=emit,  # type: ignore[arg-type]
-        auth=GoogleAuth(),
-        tokens=default_token_store(),
+        auth=GoogleAuth() if browser is None else None,
+        tokens=default_token_store() if browser is None else None,
         selection=FileSelectionStore(),
         recorder=recorder,
         youtube_factory=youtube_factory,  # type: ignore[arg-type]
@@ -531,6 +549,7 @@ def create_backend_source(
         options=options,
         settings_saver=persist_settings,
         event_only=event_only,
+        browser=browser,
     )
     source = BackendSource(
         controller,
