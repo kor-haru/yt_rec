@@ -8,6 +8,7 @@ import uuid
 
 import pytest
 
+from yt_rec.backend import tokens
 from yt_rec.backend.tokens import (
     LinuxSecretServiceStore,
     MacOSKeychainStore,
@@ -53,8 +54,65 @@ def test_windows_credential_manager_왕복() -> None:
         assert store.load() is None
 
 
+@pytest.fixture
+def private_macos_keychain(tmp_path, monkeypatch):
+    """실제 Security.framework CRUD를 잠금 해제된 임시 키체인에만 수행한다.
+
+    기본 로그인 키체인의 Add가 CI에서 무기한 멈췄다(#107).
+    사용자 기본값은 바꾸지 않고 Find/Add의 키체인 인자만 테스트 소유로 지정한다.
+    """
+    api = tokens._security_framework()
+    pointer = ctypes.POINTER(ctypes.c_void_p)
+    for name, arguments in {
+        "SecKeychainCreate": [ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p,
+                              ctypes.c_bool, ctypes.c_void_p, pointer],
+        "SecKeychainUnlock": [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_bool],
+        "SecKeychainDelete": [ctypes.c_void_p],
+        "SecKeychainGetUserInteractionAllowed": [ctypes.POINTER(ctypes.c_bool)],
+        "SecKeychainSetUserInteractionAllowed": [ctypes.c_bool],
+    }.items():
+        function = getattr(api, name)
+        function.argtypes = arguments
+        function.restype = ctypes.c_int32
+
+    class PrivateKeychain:
+        def __getattr__(self, name):
+            return getattr(api, name)
+
+        def SecKeychainFindGenericPassword(self, _default, *args):
+            return api.SecKeychainFindGenericPassword(keychain, *args)
+
+        def SecKeychainAddGenericPassword(self, _default, *args):
+            return api.SecKeychainAddGenericPassword(keychain, *args)
+
+    keychain = ctypes.c_void_p()
+    interaction = ctypes.c_bool()
+    password = uuid.uuid4().hex.encode("ascii")
+    buffer = ctypes.create_string_buffer(password)
+    secret = ctypes.cast(buffer, ctypes.c_void_p)
+    assert api.SecKeychainGetUserInteractionAllowed(ctypes.byref(interaction)) == 0
+    assert api.SecKeychainSetUserInteractionAllowed(False) == 0
+    try:
+        assert api.SecKeychainCreate(
+            os.fsencode(tmp_path / "test.keychain"), len(password), secret,
+            False, None, ctypes.byref(keychain),
+        ) == 0
+        assert api.SecKeychainUnlock(keychain, len(password), secret, True) == 0
+        monkeypatch.setattr(tokens, "_security_framework", lambda: PrivateKeychain())
+        yield
+    finally:
+        try:
+            if keychain.value:
+                try:
+                    assert api.SecKeychainDelete(keychain) == 0
+                finally:
+                    tokens._cf_release(keychain)
+        finally:
+            assert api.SecKeychainSetUserInteractionAllowed(interaction.value) == 0
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS Keychain")
-def test_macos_keychain_고유한_임시_항목을_왕복한다() -> None:
+def test_macos_keychain_고유한_임시_항목을_왕복한다(private_macos_keychain) -> None:
     service = f"yt-rec-test/{uuid.uuid4()}"
     account = f"test-{uuid.uuid4()}"
     store = MacOSKeychainStore(service=service, account=account)
