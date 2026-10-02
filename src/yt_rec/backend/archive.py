@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QFile
 
+from yt_rec.recording.metadata import restore_stored_title
 from yt_rec.recording.options import default_settings_path
 from yt_rec.state.models import CompletedRecording, CompletionStatus
 
@@ -167,9 +168,12 @@ def load_archive(
                 completion = CompletionStatus.MISSING
             stamp = _number(raw.get("finished_at"))
             finished = datetime.fromtimestamp(stamp, timezone.utc) if stamp else None
+            video_id = str(raw.get("video_id") or state_path.parent.name)
             items.append(CompletedRecording(
-                recording_id=str(raw.get("video_id") or state_path.parent.name),
-                title=str(metadata.get("title") or raw.get("video_id") or state_path.parent.name),
+                recording_id=video_id,
+                title=restore_stored_title(
+                    state_path.parent, video_id, str(metadata.get("title") or video_id)
+                ) or video_id,
                 channel_name=str(metadata.get("channel") or metadata.get("uploader") or ""),
                 finished_at=finished,
                 duration=timedelta(seconds=_number(verification.get("duration"))),

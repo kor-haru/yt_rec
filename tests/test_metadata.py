@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -60,6 +61,43 @@ def test_보관된_값이_없으면_None(tmp_path):
 def test_깨진_보관_파일은_None(tmp_path):
     (tmp_path / METADATA_FILENAME).write_text("{망가짐", encoding="utf-8")
     assert LiveMetadata.load(tmp_path) is None
+
+
+@pytest.mark.parametrize("fulltitle", ["원제목", "행사 2026-09-30 19:29"])
+def test_구형_제목만_원제목으로_복원하고_보관_파일은_수정하지_않는다(tmp_path, fulltitle):
+    original = make_metadata(title=fulltitle + " 2026-10-02 20:15")
+    original.save(tmp_path)
+    raw_path = tmp_path / "metadata.raw.json"
+    raw_path.write_text(json.dumps({
+        "id": original.video_id, "title": original.title, "fulltitle": fulltitle,
+        "channel": "다른 채널", "release_timestamp": 1,
+    }, ensure_ascii=False), encoding="utf-8")
+    original_bytes = {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+
+    assert LiveMetadata.load(tmp_path) == replace(original, title=fulltitle)
+    assert {path: path.read_bytes() for path in original_bytes} == original_bytes
+
+
+@pytest.mark.parametrize("raw", [
+    None, b"\xff", b"{broken", b"[]", b"null", b"{}", b"",
+    {"id": "다른 영상"}, {"title": "낡은 시도의 다른 제목"},
+    {"fulltitle": ""}, {"fulltitle": "  "}, {"fulltitle": []},
+    {"fulltitle": "원제목 2026-09-30 19:29"},
+])
+def test_일치하는_raw_원제목이_없으면_보관된_제목의_날짜도_그대로_둔다(tmp_path, raw):
+    original = make_metadata(title="원제목 2026-09-30 19:29")
+    original.save(tmp_path)
+    raw_path = tmp_path / "metadata.raw.json"
+    if isinstance(raw, dict):
+        raw_path.write_text(json.dumps({
+            "id": original.video_id, "title": original.title, "fulltitle": "원제목", **raw,
+        }, ensure_ascii=False), encoding="utf-8")
+    elif raw is not None:
+        raw_path.write_bytes(raw)
+    original_bytes = {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+
+    assert LiveMetadata.load(tmp_path) == original
+    assert {path: path.read_bytes() for path in original_bytes} == original_bytes
 
 
 # -- 파일명 결정 ---------------------------------------------------------------

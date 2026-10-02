@@ -451,8 +451,12 @@ def test_최종명과_재시작_복구는_세션_시작시각과_선택한_규�
         RecordingOptions(output_dir=tmp_path / "out", filename_template=template),
         toolchain=DUMMY_TOOLCHAIN, tz=KST,
     )
-    _prestore(engine, stored_metadata("원제목"))
+    legacy = stored_metadata("원제목 2026-09-30 19:29")
+    _prestore(engine, legacy)
     work_dir = engine.work_dir_for(VIDEO_ID)
+    (work_dir / "metadata.raw.json").write_text(json.dumps({
+        "id": VIDEO_ID, "title": legacy.title, "fulltitle": "원제목",
+    }, ensure_ascii=False), encoding="utf-8")
     merged = work_dir / f"{VIDEO_ID}.mp4"
     merged.write_bytes(b"verified-media")
     monkeypatch.setattr(engine_module, "select_merge_sources", lambda *a, **kw: SourceSelection())
@@ -468,8 +472,11 @@ def test_최종명과_재시작_복구는_세션_시작시각과_선택한_규�
         assert len(results) == 1
         result = results[0]
     else:
+        metadata, denial = engine._secure_metadata(VIDEO_ID, work_dir)
+        assert metadata.title == "원제목" and denial is None
+        assert json.loads((work_dir / "metadata.json").read_text(encoding="utf-8"))["title"] == legacy.title
         result = engine._finalize(
-            video_id=VIDEO_ID, metadata=stored_metadata("원제목"), work_dir=work_dir,
+            video_id=VIDEO_ID, metadata=metadata, work_dir=work_dir,
             started_at=recorded, stalled=False, skipped_fragments=(),
             downloaded_bytes=None, download_message="", denial=None,
         )
