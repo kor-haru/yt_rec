@@ -26,23 +26,25 @@ CACHE = ROOT / "build/downloads"
 VENDOR = ROOT / "build/vendor"
 YTDLP_VERSION = "2026.08.19"
 DENO_VERSION = "v2.9.6"
-FFMPEG_RELEASE = "autobuild-2026-09-07-15-39"
-FFMPEG_NAME = "ffmpeg-n8.1.2-51-g7ba069f4f1"
+# Monthly final builds are retained for two years; only the last 14 daily builds remain.
+# Refresh the dated pin and all archive hashes before September 2028.
+FFMPEG_RELEASE = "autobuild-2026-09-30-13-08"
+FFMPEG_NAME = "ffmpeg-n8.1.3-9-g29e619e767"
 FFMPEG_SOURCE = ("https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz",
                  "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41")
 TOOLS = {
     "win32-x86_64": (
         ("yt-dlp.exe", "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"),
         ("x86_64-pc-windows-msvc", "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11"),
-        ("win64-lgpl-8.1.zip", "232464b6f9f1d55fa42c1b0e7ae1c9ca5a19272ba61229e8b32a93751055e135")),
+        ("win64-lgpl-8.1.zip", "4a7642b2264c03e8a0ce8a3825b933ee5580656f45695a086fe7e294045ffc0a")),
     "linux-x86_64": (
         ("yt-dlp_linux", "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"),
         ("x86_64-unknown-linux-gnu", "394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"),
-        ("linux64-lgpl-8.1.tar.xz", "602b4386efc01c4fccf03792d7d6c4db13e591e3b6019ee1e05fce459ec0f44d")),
+        ("linux64-lgpl-8.1.tar.xz", "dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e")),
     "linux-arm64": (
         ("yt-dlp_linux_aarch64", "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc"),
         ("aarch64-unknown-linux-gnu", "9a46afc6c392c7cd2ff71a31558935545b46408d0e87f7a86908c712721c046e"),
-        ("linuxarm64-lgpl-8.1.tar.xz", "bcb045c44fc4bf7818ec8fe62cf46500491e96d1c58fb1b03320611fc17bd755")),
+        ("linuxarm64-lgpl-8.1.tar.xz", "8463881ca7a25015ca6e00f5c91dd2f1637eb73d33c8230413cb74db760a86b3")),
     "darwin-x86_64": (
         ("yt-dlp_macos", "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202"),
         ("x86_64-apple-darwin", "7d4524b82bcc557fe020a1a5b56956ed42b992ae5b28026e8ad5d17329533f5f"), None),
