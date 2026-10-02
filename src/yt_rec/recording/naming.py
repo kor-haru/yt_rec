@@ -98,7 +98,7 @@ def local_date_from_epoch(epoch: int | float, tz: tzinfo | None = None) -> date:
 class NameFields:
     """파일명 토큰을 채울 재료.
 
-    ``start`` 는 **이미 로컬 시간대로 옮긴** 시작 시각이다. UTC 기준 값을 넘기면
+    ``start`` 는 **이미 로컬 시간대로 옮긴** 방송 시작 시각이다. UTC 기준 값을 넘기면
     심야 방송에서 날짜가 하루 어긋난다(#14).
     """
 
@@ -109,6 +109,8 @@ class NameFields:
     channel_id: str = ""
     #: 실제로 받은 세로 해상도 표시(``1080p``). 못 읽었으면 빈 문자열.
     quality: str = ""
+    #: 로컬 녹화 시작 시각. 이전 호출자는 방송 시작 시각으로 대체한다.
+    recording_start: datetime | None = None
 
 
 #: 대괄호 토큰 이름 -> 값 뽑기. 여기 적힌 순서가 설정 화면 목록 순서다.
@@ -121,6 +123,9 @@ FILENAME_TOKENS: dict[str, Callable[[NameFields], str]] = {
     "YYYY.MM.DD": lambda f: f.start.strftime("%Y.%m.%d"),
     "HHMM": lambda f: f.start.strftime("%H%M"),
     "HH-MM": lambda f: f.start.strftime("%H-%M"),
+    "녹화일시": lambda f: (f.recording_start or f.start).strftime("%Y-%m-%d %H:%M"),
+    "녹화날짜": lambda f: (f.recording_start or f.start).strftime("%Y-%m-%d"),
+    "녹화시각": lambda f: (f.recording_start or f.start).strftime("%H:%M"),
     "채널명": lambda f: f.channel,
     "영상제목": lambda f: f.title,
     "영상고유url키": lambda f: f.video_id,
@@ -136,6 +141,7 @@ SAMPLE_NAME_FIELDS = NameFields(
     video_id="EYEAaG3cxME",
     channel_id="UCUj6rrhMTR9pipbAWBAMvUQ",
     quality="1080p",
+    recording_start=datetime(2026, 9, 21, 19, 59),
 )
 
 #: 사용자가 아무것도 정하지 않았을 때의 배치. 옛 ``{date}_{title}`` 과 같다.

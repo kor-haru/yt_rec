@@ -436,6 +436,49 @@ def test_같은_제목이_이미_있으면_덮어쓰지_않는다(tmp_path, tool
 # -- 메타데이터 선확보 -----------------------------------------------------------
 
 
+@pytest.mark.parametrize("recover, template, expected", [
+    (False, "[영상제목]", "원제목.mp4"),
+    (False, "[녹화일시]_[영상제목]", "2026-10-02 01：30_원제목.mp4"),
+    (True, "[영상제목]_[녹화일시]", "원제목_2026-10-02 01：30.mp4"),
+])
+def test_최종명과_재시작_복구는_세션_시작시각과_선택한_규칙을_쓴다(
+    tmp_path, monkeypatch, recover, template, expected,
+):
+    from yt_rec.recording.merge import MediaVerification, SourceSelection
+
+    recorded = datetime(2026, 10, 1, 16, 30, tzinfo=timezone.utc).timestamp()
+    engine = RecordingEngine(
+        RecordingOptions(output_dir=tmp_path / "out", filename_template=template),
+        toolchain=DUMMY_TOOLCHAIN, tz=KST,
+    )
+    _prestore(engine, stored_metadata("원제목"))
+    work_dir = engine.work_dir_for(VIDEO_ID)
+    merged = work_dir / f"{VIDEO_ID}.mp4"
+    merged.write_bytes(b"verified-media")
+    monkeypatch.setattr(engine_module, "select_merge_sources", lambda *a, **kw: SourceSelection())
+    monkeypatch.setattr(
+        engine_module, "verify_media",
+        lambda path, *a, **kw: MediaVerification(path, playable=True, complete=True),
+    )
+    if recover:
+        (work_dir / STATE_FILENAME).write_text(
+            json.dumps({"status": "recording", "started_at": recorded}), encoding="utf-8"
+        )
+        results = engine.recover_pending()
+        assert len(results) == 1
+        result = results[0]
+    else:
+        result = engine._finalize(
+            video_id=VIDEO_ID, metadata=stored_metadata("원제목"), work_dir=work_dir,
+            started_at=recorded, stalled=False, skipped_fragments=(),
+            downloaded_bytes=None, download_message="", denial=None,
+        )
+    assert result.succeeded, result.message
+    assert result.output_path.name == expected
+    assert result.output_path.read_bytes() == b"verified-media"
+    assert result.started_at == recorded
+
+
 @pytest.mark.integration
 def test_방송_종료_후_조회가_막혀도_보관된_제목으로_이름을_정한다(
     tmp_path, toolchain, sample_streams, monkeypatch

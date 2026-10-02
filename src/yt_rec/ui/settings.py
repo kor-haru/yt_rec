@@ -77,6 +77,14 @@ class SettingsDialog(QDialog):
         self.preview_label.setObjectName("filenamePreview")
         self.preview_label.setWordWrap(True)
         form.addRow("미리보기", self.preview_label)
+        timestamp_note = QLabel(
+            "날짜·시각 토큰은 방송 시작 기준, [녹화일시]·[녹화날짜]·[녹화시각]은 "
+            "앱의 녹화 시작 기준입니다. 원하는 위치에 넣거나 빼세요. "
+            "미리보기 시각은 예시이며, 최근 이력이 있으면 완료 시각을 사용합니다.", self
+        )
+        timestamp_note.setObjectName("filenameTimestampInfo")
+        timestamp_note.setWordWrap(True)
+        form.addRow(timestamp_note)
         self.quality_combo = QComboBox(self)
         self.quality_combo.setObjectName("maxHeight")
         for label, height in QUALITY_PRESETS.items():
@@ -182,6 +190,7 @@ class SettingsDialog(QDialog):
         return replace(
             SAMPLE_NAME_FIELDS,
             start=done.finished_at or SAMPLE_NAME_FIELDS.start,
+            recording_start=done.finished_at or SAMPLE_NAME_FIELDS.recording_start,
             title=done.title or SAMPLE_NAME_FIELDS.title,
             channel=done.channel_name or SAMPLE_NAME_FIELDS.channel,
             video_id=done.recording_id or SAMPLE_NAME_FIELDS.video_id,

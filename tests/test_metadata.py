@@ -134,6 +134,28 @@ def test_심야_방송의_시각_토큰도_로컬_기준이다():
     assert metadata.basename("[YYMMDD]_[HHMM]_[영상제목]", tz=KST) == "260812_0130_심야 방송"
 
 
+def test_녹화_시작은_방송과_확보_시각에_독립적이며_로컬로_변환한다():
+    recorded = datetime(2026, 8, 11, 16, 30, tzinfo=timezone.utc).timestamp()
+    metadata = make_metadata(title="심야 방송")
+    assert metadata.basename(
+        "[YYMMDD]_[HHMM]_[녹화일시]_[영상제목]", tz=KST,
+        recording_started_at=recorded,
+    ) == "260811_2000_2026-08-12 01：30_심야 방송"
+
+
+@pytest.mark.parametrize("fetched_at, expected", [
+    (datetime(2026, 8, 12, 1, 30, tzinfo=KST).timestamp(), "2026-08-12 01：30"),
+    (0.0, "2026-08-11 20：00"),
+])
+def test_녹화_시각이_없으면_보관된_시각으로_대체한다(fetched_at, expected, monkeypatch):
+    def unexpected_now():
+        raise AssertionError("보관된 값으로 이름을 만들 때 현재 시각을 읽으면 안 된다")
+
+    monkeypatch.setattr("yt_rec.recording.metadata.time.time", unexpected_now)
+    metadata = make_metadata(fetched_at=fetched_at)
+    assert metadata.basename("[녹화일시]", tz=KST) == expected
+
+
 def test_모르는_토큰이_닿으면_기본_배치로_떨어진다():
     """녹화가 다 끝난 시점이다. 여기서 예외를 던지면 파일을 잃는다."""
     metadata = make_metadata(title="제목")
@@ -213,6 +235,30 @@ def test_한글_제목이_깨지지_않는다(stub_ytdlp, tmp_path, python_execu
         {"id": "x", "title": "왕초보도 하루만에 끝내는 경매 기초! 🔥"}, tmp_path, python_executable
     )
     assert metadata.title == "왕초보도 하루만에 끝내는 경매 기초! 🔥"
+
+
+@pytest.mark.parametrize("original", ["라이브 제목", "행사 2026-09-29 19:59"])
+def test_라이브_조회가_붙인_일시_대신_원제목을_보관한다(
+    original, stub_ytdlp, tmp_path, python_executable,
+):
+    metadata = stub_ytdlp(
+        {"id": "x", "title": original + " 2026-10-02 20:15",
+         "fulltitle": original, "live_status": "is_live"},
+        tmp_path, python_executable,
+    )
+    assert metadata.title == original
+    assert metadata.basename("[영상제목]", tz=KST) == original.replace(":", "：")
+
+
+@pytest.mark.parametrize("fulltitle", [None, "", "  ", 42])
+def test_fulltitle이_없으면_제목의_날짜도_그대로_보관한다(
+    fulltitle, stub_ytdlp, tmp_path, python_executable,
+):
+    metadata = stub_ytdlp(
+        {"id": "x", "title": "행사 2026-09-29 19:59", "fulltitle": fulltitle},
+        tmp_path, python_executable,
+    )
+    assert metadata.title == "행사 2026-09-29 19:59"
 
 
 def test_멤버_전용이면_범주와_함께_실패한다(stub_ytdlp, tmp_path, python_executable):

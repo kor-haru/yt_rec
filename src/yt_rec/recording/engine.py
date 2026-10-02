@@ -1020,6 +1020,7 @@ class RecordingEngine:
             max_title_chars=self.options.max_title_chars,
             tz=self._tz,
             quality=verification.quality_label,
+            recording_started_at=started_at,
         )
         basename = _fit_to_path_limit(self.options.output_dir, basename, suffix)
         final_path = reserve_unique_path(self.options.output_dir, basename, suffix)

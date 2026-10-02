@@ -194,6 +194,40 @@ def test_파일명_규칙을_토큰으로_배치한다(tmp_path, state):
     assert commands[-1].values["filename_template"] == "[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])"
 
 
+def test_녹화_토큰을_선택하고_미리본_규칙을_저장후_복원한다(tmp_path, state):
+    path = tmp_path / "settings.json"
+    controller = make_controller(
+        RecordingOptions(output_dir=tmp_path), lambda options: save_settings(options, path),
+        state.apply,
+    )
+    source = BackendSource(controller, poll_interval_ms=0)
+    state.attach(source)
+    state.command_requested.connect(source.handle_command)
+    source.start()
+    dialog = SettingsDialog(state)
+    try:
+        for token in ("[녹화일시]", "[녹화날짜]", "[녹화시각]"):
+            assert dialog.token_combo.findData(token) > 0
+        note = dialog.findChild(QLabel, "filenameTimestampInfo").text()
+        assert "방송 시작" in note and "녹화 시작" in note and "완료 시각" in note
+        dialog.template_edit.setText("[영상제목]_")
+        dialog.token_combo.setCurrentIndex(dialog.token_combo.findData("[녹화일시]"))
+        assert dialog.template_edit.text() == "[영상제목]_[녹화일시]"
+        assert dialog.preview_label.text() == "오늘도 한다_2026-09-21 19：59.mp4"
+        dialog._save()
+        restored = load_settings(path)
+        assert restored.filename_template == "[영상제목]_[녹화일시]"
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        state.apply(ev.SettingsChanged(restored))
+        reopened = SettingsDialog(state)
+        assert reopened.template_edit.text() == restored.filename_template
+        assert reopened.preview_label.text() == "오늘도 한다_2026-09-21 19：59.mp4"
+        reopened.close()
+    finally:
+        dialog.close()
+        source.stop()
+
+
 def test_모르는_토큰은_어느_것인지_알려_주고_저장을_막는다(tmp_path, state):
     commands = []
     state.command_requested.connect(commands.append)
@@ -226,6 +260,8 @@ def test_미리보기는_최근_완료된_녹화로_그린다(tmp_path, state):
 
     dialog.template_edit.setText("[YYMMDD] [채널명] [영상제목] ([영상고유url키])")
     assert dialog.preview_label.text() == "260811 행백TV 어제 방송 (zoYkEERlM0w).mp4"
+    dialog.template_edit.setText("[영상제목]_[녹화일시]")
+    assert dialog.preview_label.text() == "어제 방송_2026-08-11 20：00.mp4"
 
 
 def test_recording_limit_and_new_options_only_affect_next_recording(tmp_path):

@@ -88,13 +88,21 @@ class LiveMetadata:
         return local_date_from_epoch(self.start_epoch, tz)
 
     def name_fields(
-        self, tz: tzinfo | None = None, *, quality: str = ""
+        self, tz: tzinfo | None = None, *, quality: str = "",
+        recording_started_at: float | None = None,
     ) -> NameFields:
         """파일명 토큰을 채울 재료. 날짜·시각은 로컬 시간대 기준이다.
 
         ``quality`` 는 보관된 값이 아니라 결과 파일을 훑어 얻는다. 방송 화질이
         상한보다 낮으면 실제로 받은 것이 설정값과 다르다.
+        ``recording_started_at`` 은 세션의 실제 시작 epoch 다. 이전 호출자는 보관된
+        확보 시각, 방송 시작 시각 순으로 대체하며 현재 시각을 새로 만들지 않는다.
         """
+        recording_epoch = recording_started_at
+        if recording_epoch is None:
+            recording_epoch = (
+                self.fetched_at or self.release_timestamp or self.upload_timestamp or 0.0
+            )
         return NameFields(
             start=self.start_datetime(tz),
             title=self.display_title,
@@ -102,6 +110,9 @@ class LiveMetadata:
             video_id=self.video_id,
             channel_id=self.channel_id or "",
             quality=quality,
+            recording_start=datetime.fromtimestamp(
+                recording_epoch, tz=timezone.utc
+            ).astimezone(tz),
         )
 
     def basename(
@@ -111,9 +122,12 @@ class LiveMetadata:
         max_title_chars: int = 120,
         tz: tzinfo | None = None,
         quality: str = "",
+        recording_started_at: float | None = None,
     ) -> str:
         """보관된 값만으로 최종 파일 이름(확장자 제외)을 만든다."""
-        fields = self.name_fields(tz, quality=quality)
+        fields = self.name_fields(
+            tz, quality=quality, recording_started_at=recording_started_at
+        )
         try:
             rendered = render_filename(
                 template, fields, max_title_chars=max_title_chars
@@ -179,9 +193,14 @@ def _parse_raw(raw_path: Path, video_id: str) -> LiveMetadata | None:
         return None
     if not isinstance(info, dict):
         return None
+    # yt-dlp 는 live-from-start 없는 라이브 조회에서 title 뒤에 현재 시각을 붙인다.
+    # fulltitle 은 그 전의 원제목이다. 제목 안의 실제 날짜를 정규식으로 지우지 않는다.
+    title = info.get("fulltitle")
+    if not isinstance(title, str) or not title.strip():
+        title = info.get("title")
     return LiveMetadata(
         video_id=info.get("id") or video_id,
-        title=info.get("title") or info.get("fulltitle"),
+        title=title if isinstance(title, str) else None,
         channel=info.get("channel"),
         channel_id=info.get("channel_id"),
         uploader=info.get("uploader"),
