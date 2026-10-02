@@ -12,6 +12,7 @@ from yt_rec.recording.naming import (
     DEFAULT_FILENAME_TEMPLATE,
     FILENAME_TOKENS,
     FORBIDDEN_CHAR_MAP,
+    NameFields,
     SAMPLE_NAME_FIELDS,
     local_date_from_epoch,
     migrate_filename_template,
@@ -174,12 +175,30 @@ def test_모든_토큰이_예시대로_풀린다():
         "YYYY.MM.DD": "2026.09.21",
         "HHMM": "1954",
         "HH-MM": "19-54",
+        "녹화일시": "2026-09-21 19：59",
+        "녹화날짜": "2026-09-21",
+        "녹화시각": "19：59",
         "채널명": "침착맨",
         "영상제목": "오늘도 한다",
         "영상고유url키": "EYEAaG3cxME",
         "채널ID": "UCUj6rrhMTR9pipbAWBAMvUQ",
         "화질": "1080p",
     }
+
+
+def test_녹화일시의_포함과_위치를_템플릿으로_고른다():
+    assert render_filename("[영상제목]", SAMPLE_NAME_FIELDS) == "오늘도 한다"
+    assert render_filename("[영상제목]_[녹화일시]", SAMPLE_NAME_FIELDS) == (
+        "오늘도 한다_2026-09-21 19：59"
+    )
+    assert render_filename("[녹화시각]_[영상제목]_[녹화날짜]", SAMPLE_NAME_FIELDS) == (
+        "19：59_오늘도 한다_2026-09-21"
+    )
+
+
+def test_이전_위치인자_호출은_방송_시작_시각으로_대체한다():
+    fields = NameFields(datetime(2026, 9, 21, 19, 54), "제목", "채널", "id", "cid", "720p")
+    assert render_filename("[녹화일시]_[화질]", fields) == "2026-09-21 19：54_720p"
 
 
 def test_채널명이_없으면_구분자가_접힌다():
