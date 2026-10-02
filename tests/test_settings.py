@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -262,6 +263,47 @@ def test_미리보기는_최근_완료된_녹화로_그린다(tmp_path, state):
     assert dialog.preview_label.text() == "260811 행백TV 어제 방송 (zoYkEERlM0w).mp4"
     dialog.template_edit.setText("[영상제목]_[녹화일시]")
     assert dialog.preview_label.text() == "어제 방송_2026-08-11 20：00.mp4"
+
+
+@pytest.mark.parametrize("metadata_title", [None, "다른 시도의 최신 제목"])
+@pytest.mark.parametrize("has_video_id", [True, False])
+def test_구형_보관함의_원제목으로_녹화토큰_없는_미리보기를_그린다(
+    tmp_path, state, metadata_title, has_video_id,
+):
+    from yt_rec.backend.archive import load_archive
+
+    video_id = "YW4WdLGmZls"
+    fulltitle = "내일부터 일시적 2주택 처분기한 3년에서 2년으로 줄어든다!"
+    title = fulltitle + " 2026-09-30 19:29"
+    work_dir = tmp_path / ".yt-rec" / video_id
+    work_dir.mkdir(parents=True)
+    media = tmp_path / f"{video_id}.mp4"
+    media.write_bytes(b"saved-media")
+    (work_dir / "state.json").write_text(json.dumps({
+        **({"video_id": video_id} if has_video_id else {}),
+        "status": "completed", "output_path": str(media),
+        "metadata": {"title": title, "channel": "메디테라"},
+        "finished_at": datetime(2026, 9, 30, 21, tzinfo=timezone(timedelta(hours=9))).timestamp(),
+    }, ensure_ascii=False), encoding="utf-8")
+    (work_dir / "metadata.raw.json").write_text(json.dumps({
+        "id": video_id, "title": title, "fulltitle": fulltitle,
+    }, ensure_ascii=False), encoding="utf-8")
+    if metadata_title is not None:
+        (work_dir / "metadata.json").write_text(json.dumps({
+            "video_id": video_id, "title": metadata_title,
+        }, ensure_ascii=False), encoding="utf-8")
+    original_bytes = {path: path.read_bytes() for path in work_dir.iterdir()}
+    dialog = open_dialog(state, tmp_path)
+    try:
+        state.apply(ev.CompletedChanged(load_archive(tmp_path)))
+        dialog.template_edit.setText("[YYMMDD]_[채널명]_[영상제목]_([영상고유url키])")
+        assert dialog.preview_label.text() == f"260930_메디테라_{fulltitle}_({video_id}).mp4"
+        assert state.completed[0].title == fulltitle
+        assert state.completed[0].channel_name == "메디테라"
+        assert {path: path.read_bytes() for path in work_dir.iterdir()} == original_bytes
+        assert media.read_bytes() == b"saved-media"
+    finally:
+        dialog.close()
 
 
 def test_recording_limit_and_new_options_only_affect_next_recording(tmp_path):

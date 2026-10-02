@@ -17,7 +17,7 @@ import os
 import subprocess
 import time
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone, tzinfo
 from pathlib import Path
 
@@ -31,7 +31,7 @@ from .naming import (
     sanitize_filename_component,
 )
 
-__all__ = ["LiveMetadata", "fetch_metadata"]
+__all__ = ["LiveMetadata", "fetch_metadata", "restore_stored_title"]
 
 #: 파일명과 보관함 표시에 필요한 필드만 추린 yt-dlp 출력 템플릿(JSON).
 _PRINT_TEMPLATE = (
@@ -168,9 +168,12 @@ class LiveMetadata:
         """보관된 값을 읽는다. 없으면 ``None``."""
         target = Path(work_dir) / METADATA_FILENAME
         try:
-            return cls.from_dict(json.loads(target.read_text(encoding="utf-8")))
+            stored = cls.from_dict(json.loads(target.read_text(encoding="utf-8")))
         except (OSError, ValueError, TypeError):
             return None
+        return replace(
+            stored, title=restore_stored_title(work_dir, stored.video_id, stored.title)
+        )
 
     @classmethod
     def placeholder_for(cls, video_id: str) -> LiveMetadata:
@@ -178,11 +181,11 @@ class LiveMetadata:
         return cls(video_id=video_id, fetched_at=time.time(), placeholder=True)
 
 
-def _parse_raw(raw_path: Path, video_id: str) -> LiveMetadata | None:
+def _read_raw_info(raw_path: Path) -> dict | None:
     """``--print-to-file`` 이 남긴 UTF-8 JSON 을 읽는다."""
     try:
         text = raw_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
@@ -192,6 +195,25 @@ def _parse_raw(raw_path: Path, video_id: str) -> LiveMetadata | None:
     except ValueError:
         return None
     if not isinstance(info, dict):
+        return None
+    return info
+
+
+def restore_stored_title(work_dir: Path, video_id: str, title: str | None) -> str | None:
+    """구형 제목과 같은 조회 기록일 때만 원제목을 읽는다. 보관 파일은 수정하지 않는다."""
+    if not isinstance(title, str) or not title.strip():
+        return title
+    info = _read_raw_info(Path(work_dir) / _RAW_FILENAME)
+    if info is None or info.get("id") != video_id or info.get("title") != title:
+        return title
+    fulltitle = info.get("fulltitle")
+    return fulltitle if isinstance(fulltitle, str) and fulltitle.strip() else title
+
+
+def _parse_raw(raw_path: Path, video_id: str) -> LiveMetadata | None:
+    """조회 기록을 메타데이터로 옮긴다."""
+    info = _read_raw_info(raw_path)
+    if info is None:
         return None
     # yt-dlp 는 live-from-start 없는 라이브 조회에서 title 뒤에 현재 시각을 붙인다.
     # fulltitle 은 그 전의 원제목이다. 제목 안의 실제 날짜를 정규식으로 지우지 않는다.
