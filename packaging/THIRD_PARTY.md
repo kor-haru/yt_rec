@@ -16,13 +16,16 @@ outer application receive ad-hoc signatures. Downloaded vendor tools retain thei
   `yt-dlp-THIRD_PARTY_LICENSES.txt` in addition to `yt-dlp-LICENSE`.
 - Deno v2.9.6: https://github.com/denoland/deno/tree/v2.9.6
   MIT and component notices: `deno-LICENSE.md`.
-- Windows/Linux FFmpeg LGPL builds, dated 2026-09-07:
-  https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-07-15-39
+- Windows/Linux FFmpeg 8.1 LGPL builds, monthly snapshot dated 2026-09-30:
+  https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-30-13-08
+  Archive hashes are pinned from that release's `checksums.sha256`.
   Build scripts, patches and source acquisition instructions:
   https://github.com/BtbN/FFmpeg-Builds
   Keep the included FFmpeg build information and licenses with the executables.
-  Upstream may remove dated artifacts; retain the SHA256-verified download cache
-  for rebuilds. Never silently switch a missing pinned artifact to `latest`.
+  Upstream retains the final build of each month for two years and the last 14 daily
+  builds. Refresh this monthly pin and its hashes before September
+  2028; retain the SHA256-verified download cache for older rebuilds. Never silently
+  switch a missing pinned artifact to the floating `latest` release.
 - macOS FFmpeg 8.0.1: https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
   Built without external libraries, GPL or nonfree flags; corresponding source
   archive and COPYING files are included. Build command is in `packaging/build.py`.

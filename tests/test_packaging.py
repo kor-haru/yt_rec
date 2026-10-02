@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import calendar
 import importlib.util
 import io
 import json
 import zipfile
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -127,6 +129,23 @@ def test_bundle_download_rejects_changed_cached_binary(monkeypatch, tmp_path):
     (tmp_path / name).write_bytes(b"wrong")
     with pytest.raises(RuntimeError, match="SHA256 mismatch"):
         builder.download(url, "0" * 64)
+
+
+def test_ffmpeg_pin_is_a_retained_month_end_with_verified_lgpl_archives():
+    builder = _builder()
+    parts = builder.FFMPEG_RELEASE.split("-")
+    pinned = date(*map(int, parts[1:4]))
+    assert parts[0] == "autobuild"
+    assert pinned.day == calendar.monthrange(pinned.year, pinned.month)[1]
+    assert builder.FFMPEG_RELEASE == "autobuild-2026-09-30-13-08"
+    assert builder.FFMPEG_NAME == "ffmpeg-n8.1.3-9-g29e619e767"
+    # Official checksums.sha256 from the pinned release; no live network in tests.
+    expected = {
+        "win32-x86_64": ("win64-lgpl-8.1.zip", "4a7642b2264c03e8a0ce8a3825b933ee5580656f45695a086fe7e294045ffc0a"),
+        "linux-x86_64": ("linux64-lgpl-8.1.tar.xz", "dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e"),
+        "linux-arm64": ("linuxarm64-lgpl-8.1.tar.xz", "8463881ca7a25015ca6e00f5c91dd2f1637eb73d33c8230413cb74db760a86b3"),
+    }
+    assert {target: tools[2] for target, tools in builder.TOOLS.items() if tools[2]} == expected
 
 
 @pytest.mark.parametrize("url,authenticated", [
