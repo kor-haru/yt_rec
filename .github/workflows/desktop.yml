@@ -34,7 +34,7 @@ jobs:
       - name: Inspect Linux WebEngine runtime dependencies
         if: runner.os == 'Linux'
         run: find .venv/lib -path '*/PySide6/Qt/lib/libQt6WebEngineCore.so.6' -exec ldd {} \;
-      - run: uv run --frozen pytest -m "not integration"
+      - run: uv run --frozen pytest -m "not integration" -o addopts="" -vv -o faulthandler_timeout=60
       - name: Install bundle builder in project environment
         run: uv pip install --python .venv pyinstaller==6.22.2
       - name: Build native bundle and run isolated GUI/media smoke
