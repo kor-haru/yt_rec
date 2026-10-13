@@ -17,6 +17,25 @@ from .youtube import ChannelRef, LiveBroadcast, VideoState, YouTubeError
 
 TIMEOUT = 45.0
 
+# 로그인 상태의 innertube 요청 머리글. 페이지 안에서 만들며 SAPISID 쿠키와 그로
+# 만든 해시는 페이지 밖으로 나가지 않는다. ``config`` 는 ytcfg 값을 담는다.
+_HEADERS = r"""
+  const headers = async config => {
+    const cookies = Object.fromEntries(document.cookie.split(';').map(part => {
+      const split = part.indexOf('='); return [part.slice(0,split).trim(), part.slice(split+1)];
+    }));
+    const sid = cookies.SAPISID || cookies['__Secure-3PAPISID'];
+    if (!sid) fail('auth');
+    const stamp = Math.floor(Date.now()/1000);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-1',
+      new TextEncoder().encode(`${stamp} ${sid} ${location.origin}`))), b => b.toString(16).padStart(2,'0')).join('');
+    return {'Content-Type':'application/json', 'X-Goog-AuthUser':String(config.SESSION_INDEX || '0'),
+      'Authorization':`SAPISIDHASH ${stamp}_${digest}`, 'X-Origin':location.origin,
+      'X-Youtube-Client-Name':String(config.INNERTUBE_CONTEXT_CLIENT_NAME || 1),
+      'X-Youtube-Client-Version':String(config.INNERTUBE_CONTEXT.client.clientVersion)};
+  };
+"""
+
 # No HTML, cookies, API credentials or raw account identifiers leave the page.
 # This is a web-page integration, not a supported YouTube Data API contract.
 _READ = r"""
@@ -24,6 +43,7 @@ _READ = r"""
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), 40000);
   const fail = code => { throw new Error(code); };
+HEADERS
   const readJSON = (text, marker) => {
     let start = text.indexOf(marker);
     if (start < 0) fail('format');
@@ -124,20 +144,8 @@ _READ = r"""
       for (const match of page.text.matchAll(/ytcfg\.set\(\s*(?=\{)/g))
         Object.assign(config, readJSON(page.text.slice(match.index), 'ytcfg.set('));
       if (!config.INNERTUBE_CONTEXT?.client) fail('format');
-      const cookies = Object.fromEntries(document.cookie.split(';').map(part => {
-        const split = part.indexOf('='); return [part.slice(0,split).trim(), part.slice(split+1)];
-      }));
-      const sid = cookies.SAPISID || cookies['__Secure-3PAPISID'];
-      if (!sid) fail('auth');
-      const stamp = Math.floor(Date.now()/1000);
-      const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-1',
-        new TextEncoder().encode(`${stamp} ${sid} ${location.origin}`))), b => b.toString(16).padStart(2,'0')).join('');
       const response = await fetch('/youtubei/v1/browse?prettyPrint=false', {
-        method:'POST', credentials:'same-origin', signal:deadline.signal,
-        headers:{'Content-Type':'application/json', 'X-Goog-AuthUser':String(config.SESSION_INDEX || '0'),
-          'Authorization':`SAPISIDHASH ${stamp}_${digest}`, 'X-Origin':location.origin,
-          'X-Youtube-Client-Name':String(config.INNERTUBE_CONTEXT_CLIENT_NAME || 1),
-          'X-Youtube-Client-Version':String(config.INNERTUBE_CONTEXT.client.clientVersion)},
+        method:'POST', credentials:'same-origin', signal:deadline.signal, headers:await headers(config),
         body:JSON.stringify({context:config.INNERTUBE_CONTEXT, continuation:continuations[0]})});
       if (!response.ok) fail('network');
       data = await response.json();
@@ -150,7 +158,33 @@ _READ = r"""
     return JSON.stringify({error:['auth','changed','format','incomplete'].includes(error.message) ? error.message : 'network'});
   } finally { clearTimeout(timer); }
 })()
-"""
+""".replace("HEADERS\n", _HEADERS)
+
+# 알림을 '열어봄'으로 기록한다 (#118). YouTube 워커가 알림을 눌렀을 때 보내는 것과
+# 같은 요청이다. 설정값은 로그인된 수신 탭에 이미 올라 있는 ytcfg 에서 읽는다. 결과로는
+# 성공 여부와 오류 종류만 나온다.
+_RECORD = r"""
+(async () => {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 20000);
+  const fail = code => { throw new Error(code); };
+HEADERS
+  try {
+    if (location.origin !== 'https://www.youtube.com') fail('auth');
+    if (typeof ytcfg !== 'object' || !ytcfg || typeof ytcfg.get !== 'function') fail('format');
+    const config = {INNERTUBE_CONTEXT:ytcfg.get('INNERTUBE_CONTEXT'), SESSION_INDEX:ytcfg.get('SESSION_INDEX'),
+      INNERTUBE_CONTEXT_CLIENT_NAME:ytcfg.get('INNERTUBE_CONTEXT_CLIENT_NAME')};
+    if (!config.INNERTUBE_CONTEXT?.client) fail('format');
+    const response = await fetch('/youtubei/v1/notification/record_interactions?prettyPrint=false', {
+      method:'POST', credentials:'same-origin', signal:deadline.signal, headers:await headers(config),
+      body:JSON.stringify({context:config.INNERTUBE_CONTEXT, serializedRecordNotificationInteractionsRequest:REQUEST})});
+    if (!response.ok) fail('network');
+    return JSON.stringify({ok:true});
+  } catch (error) {
+    return JSON.stringify({error:['auth','format'].includes(error.message) ? error.message : 'network'});
+  } finally { clearTimeout(timer); }
+})()
+""".replace("HEADERS\n", _HEADERS)
 
 
 def expression(video_id: str = "", account: str = "") -> str:
@@ -158,6 +192,17 @@ def expression(video_id: str = "", account: str = "") -> str:
         raise ValueError("잘못된 영상 ID")
     path = f"/watch?v={video_id}" if video_id else "/feed/channels"
     return _READ.replace("PATH", json.dumps(path)).replace("EXPECTED", json.dumps(account)).replace("VIDEO", json.dumps(video_id))
+
+
+def record_interactions(serialized: str) -> str:
+    """알림의 ``serializedInteractionsRequest`` 를 '열어봄'으로 보내는 페이지 스크립트.
+
+    값은 YouTube 가 알림에 실어 보낸 불투명한 문자열이다. 해석하지 않고 JSON 문자열로만
+    넣는다. 비었거나 지나치게 길면 알림 형식이 바뀐 것이므로 보내지 않는다.
+    """
+    if not isinstance(serialized, str) or not serialized or len(serialized) > 8192:
+        raise ValueError("잘못된 알림 기록 요청")
+    return _RECORD.replace("REQUEST", json.dumps(serialized))
 
 
 def _validated(value: object) -> dict:

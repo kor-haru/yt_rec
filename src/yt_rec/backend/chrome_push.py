@@ -21,6 +21,10 @@ QtWebEngine 의 Chromium 은 Google 이 폐기한 구형 GCM 등록 엔드포인
 
 주기 조회는 하지 않는다. 하트비트는 브라우저와 소켓이 살아 있는지만 확인하며
 youtube.com 에 아무것도 묻지 않는다.
+
+계정이 알림에 반응하지 않으면 YouTube 가 푸시를 끊는 것으로 보인다 (#118). 그래서
+받은 알림은 표시하자마자 스크립트로 닫고 '열어봄'으로 기록하며, 녹화로 넘어간 영상은
+숨은 새 창에서 로그인한 채로 잠깐 본다. 모두 알림이나 녹화가 생겼을 때만 돈다.
 """
 
 from __future__ import annotations
@@ -41,12 +45,13 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWebSockets import QWebSocket
 
 from .notifications import LiveNotification
-from .browser_web import BrowserRequest
+from .browser_web import BrowserRequest, record_interactions
 from .notification_history import ReceivedNotification
 from .push_payload import (
     NOTIFICATION_SETTINGS_URL,
     YOUTUBE,
     NoVideo,
+    _VIDEO_ID,
     _is_youtube_url,
     _video_from_data,
     _video_id_from_data,
@@ -89,6 +94,12 @@ _SERVICE_WORKER_SCOPE = YOUTUBE + "/"
 #: 쉬는 상태. 등록 확인을 마쳤을 때와, 녹화할 것이 없는 알림을 넘겼을 때 모두 여기로
 #: 돌아온다. 한 곳에 둬야 둘이 갈라지지 않는다.
 _RESTING = "알림 수신 준비됨 · 실제 도착 대기 중"
+#: 녹화로 넘어간 영상을 로그인한 채로 볼 때 재생할 본편 길이(초) (#118). 60~90초 사이.
+_WATCH_SECONDS = 75
+#: 시청 한 건의 상한. 광고와 로딩까지 덮고도 끝나지 않으면 창을 닫는다.
+_WATCH_LIMIT_MS = 240_000
+#: 시청 창이 본편 재생을 마쳤다고 알릴 때 쓰는 ``Runtime.addBinding`` 이름.
+_WATCH_BINDING = "__ytRecWatched"
 
 
 def chrome_executable() -> Path | None:
@@ -138,17 +149,32 @@ def _read_port(path: Path) -> int:
 #: 을 바로 감쌀 수 없다. 대신 ``push`` 리스너를 **가장 먼저** 걸어 두고, 그
 #: 리스너 안에서 감싼다 — 그때는 registration 이 존재하고, 리스너 등록 순서상
 #: YouTube 자신의 핸들러보다 먼저 돌기 때문에 첫 알림부터 잡힌다.
+#:
+#: 띄운 알림은 표시가 끝나자마자 스크립트로 닫는다 (#118). 그대로 두면 Windows
+#: 알림 센터가 72시간 뒤 만료로 닫고, Chrome 은 이것을 사용자가 닫은 것으로
+#: 보고한다. 그러면 YouTube 워커의 ``notificationclose`` 처리기가 '무시하고 닫음'을
+#: 기록한다. 스크립트로 닫으면 ``notificationclose`` 가 나지 않는다. 닫기가
+#: 실패해도 YouTube 가 받는 ``showNotification`` 결과는 원래 것 그대로다.
 _HOOK = """
 (() => {
   const scope = self;
   const send = value => { try { BINDING(JSON.stringify(value)); } catch (e) {} };
+  const dismiss = (registration, title, options) => Promise.resolve().then(() => {
+    const tag = options && typeof options.tag === 'string' ? options.tag : '';
+    return registration.getNotifications(tag ? {tag} : {}).then(list => {
+      const shown = tag ? list : list.filter(item => item.title === title);
+      if (!shown.length) send({kind: 'close_failed', reason: 'missing'});
+      for (const item of shown) item.close();
+    });
+  }).catch(error => send({kind: 'close_failed', reason: String((error && error.name) || 'error')}));
   const wrap = () => {
     if (scope.__ytRecWrapped || !scope.registration) return false;
     const proto = Object.getPrototypeOf(scope.registration);
     const original = proto.showNotification;
     proto.showNotification = function (title, options) {
       send({kind: 'notification', title: String(title), options: options || {}});
-      return original.apply(this, arguments);
+      return Promise.resolve(original.apply(this, arguments))
+        .then(value => dismiss(this, String(title), options).then(() => value));
     };
     scope.__ytRecWrapped = true;
     return true;
@@ -184,6 +210,40 @@ _REGISTRATION = """
   } catch (e) { out.failed = true; }
   return JSON.stringify(out);
 })()
+"""
+
+#: 시청 창의 새 문서마다 페이지 스크립트보다 먼저 돈다 (#118). watch 페이지에서만
+#: 움직인다. 소리는 재생 전에 끄고, 플레이어가 저장된 음량으로 되돌려도 곧바로 다시
+#: 끈다. 건너뛰기 단추가 보이면 누르고, 광고가 아닌 본편이 실제로 재생된 시간만 센다.
+#: YouTube 에 아무것도 묻지 않는다 — 창 안의 플레이어 상태만 본다.
+_WATCH = """
+(() => {
+  if (window.top !== window || location.pathname !== '/watch' || window.__ytRecWatching) return;
+  window.__ytRecWatching = true;
+  const mute = event => {
+    if (event.target instanceof HTMLMediaElement && !event.target.muted) event.target.muted = true;
+  };
+  for (const type of ['loadstart', 'play', 'volumechange']) document.addEventListener(type, mute, true);
+  let played = 0, last = 0;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const player = document.getElementById('movie_player');
+    const video = document.querySelector('#movie_player video');
+    const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
+    if (skip) skip.click();
+    const advert = !!player && player.classList.contains('ad-showing');
+    if (video) {
+      video.muted = true;
+      if (video.paused && !video.ended) video.play().catch(() => {});
+    }
+    if (last && video && !advert && !video.paused && video.readyState >= 3) played += (now - last) / 1000;
+    last = now;
+    if (played >= SECONDS) {
+      clearInterval(timer);
+      try { BINDING(JSON.stringify({played: Math.round(played)})); } catch (e) {}
+    }
+  }, 1000);
+})();
 """
 
 
@@ -264,6 +324,9 @@ class ChromePushReceiver(QObject):
     notification_arrived = Signal(object)  # Native display text, before video identification.
     status_changed = Signal(str, str)
     browser_changed = Signal(bool)  # page usable, not authenticated or push-ready
+    # 알림 닫기·열어봄 기록·짧은 시청의 결과 (#118). (성공 여부, 고정 문구). 푸시가 다시
+    # 오는지 운영 중에 따져 볼 근거라 앱이 앱 로그에 남긴다. 수신 상태와는 무관하다.
+    engagement = Signal(bool, str)
 
     def __init__(
         self, parent: QObject | None = None, *,
@@ -298,6 +361,14 @@ class ChromePushReceiver(QObject):
         self._page_target = ""
         self._page_sessions: dict[str, str] = {}
         self._page_urls: dict[str, str] = {}
+        # 녹화로 넘어간 영상을 잠깐 보는 창 (#118). 한 번에 하나뿐이다. ``_watching`` 은
+        # 그 한 건의 표지라 늦게 온 응답이 다음 시청을 건드리지 못한다. 시청 창으로
+        # 만든 targetId 는 닫은 뒤에도 기억한다 — 닫히는 중에 늦게 온 사건으로 그 창을
+        # 수신용 YouTube 탭으로 붙잡으면, 곧 떨어져 나가면서 계정 연결을 흔든다.
+        self._watching: object | None = None
+        self._watch_target = ""
+        self._watch_session = ""
+        self._watch_targets: set[str] = set()
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(_HEARTBEAT_MS)
         self._heartbeat.timeout.connect(self._pulse)
@@ -494,6 +565,8 @@ class ChromePushReceiver(QObject):
         target = info.get("targetId")
         if not isinstance(target, str) or not isinstance(url, str):
             return
+        if target in self._watch_targets:
+            return  # 잠깐 보는 시청 창이다. 수신용 YouTube 탭으로 붙잡지 않는다 (#118).
         if info.get("type") == "page":
             previous = self._page_urls.get(target)
             self._page_urls[target] = url
@@ -648,6 +721,10 @@ class ChromePushReceiver(QObject):
     # -- 수신 -----------------------------------------------------------------
 
     def _binding_called(self, params: dict, session: str) -> None:
+        if self._watch_session and session == self._watch_session:
+            if not self._closed and params.get("name") == _WATCH_BINDING:
+                self._watch_reported(params.get("payload"))
+            return
         if (not self._closed and params.get("name") == "__ytRecAccountChanged"
                 and session in self._page_sessions.values()):
             self._page_loaded({}, session)
@@ -671,6 +748,12 @@ class ChromePushReceiver(QObject):
             self._notification(value)
         elif value.get("kind") == "push":
             self._push(value)
+        elif value.get("kind") == "close_failed":
+            # 알림 수신은 이미 끝났다. 수신 상태를 바꾸지 않고 사유만 남긴다 (#118).
+            reason = value.get("reason")
+            if not (isinstance(reason, str) and reason.isascii() and reason.isalpha() and len(reason) <= 64):
+                reason = "unknown"
+            self._engaged(False, f"표시한 알림을 닫지 못했습니다: {reason}")
         else:
             # 후킹은 우리가 넣은 것이다. 모르는 형태가 오면 후킹이 갈렸다는 뜻이다.
             self._status("error", "식별할 수 없는 알림을 무시했습니다")
@@ -688,6 +771,7 @@ class ChromePushReceiver(QObject):
         self.notification_arrived.emit(ReceivedNotification(
             datetime.now(timezone.utc), title, body, synthetic=False,
         ))
+        self._record_opened(options.get("data"))
         video = _video_from_data(options.get("data"))
         if video is NoVideo.ABSENT:
             # 커뮤니티 글이나 멤버십 알림에는 watch 주소가 없다 (#94). 구독 채널이
@@ -724,6 +808,155 @@ class ChromePushReceiver(QObject):
     def _emit(self, video_id: str) -> None:
         self._status("received", "영상 알림 수신 · 채널과 현재 방송 상태 확인 중")
         self.notification_received.emit(LiveNotification(video_id, time.time(), synthetic=False))
+
+    # -- 열어봄·시청 (#118) ---------------------------------------------------
+    #
+    # 2026-10-06 부터 계정 알림함에는 알림이 쌓이는데 이 브라우저로는 푸시가 오지
+    # 않았다. 알림을 한 번도 열지 않았고, 녹화는 비로그인 yt-dlp 라 채널 시청으로도
+    # 잡히지 않는다. YouTube 가 반응 없는 계정으로 본 것으로 추정한다. 그래서 받은
+    # 알림은 연 것으로 기록하고, 녹화로 넘어간 영상은 로그인한 채로 잠깐 본다. 둘 다
+    # 알림이나 녹화가 생겼을 때만 돈다 — 주기 조회가 아니다. 무엇이 실패해도 로그만
+    # 남기고, 수신 상태와 녹화는 이 결과를 기다리지 않는다.
+
+    def _engaged(self, ok: bool, message: str) -> None:
+        """결과 한 건을 모듈 로거와 :attr:`engagement` 로 함께 남긴다. 문구는 고정문이다."""
+        (_LOG.info if ok else _LOG.warning)("%s", message)
+        self.engagement.emit(ok, message)
+
+    def _record_opened(self, data: object) -> None:
+        """받은 알림을 '열어봄'으로 기록한다.
+
+        YouTube 워커가 알림을 눌렀을 때 보내는 ``record_interactions`` 요청과 같은
+        본문을 로그인된 수신 탭에서 보낸다. 인증 머리글은 페이지 안에서 만든다.
+        """
+        endpoint = data.get("clickEndpoint") if isinstance(data, dict) else None
+        endpoint = endpoint.get("recordNotificationInteractionsEndpoint") if isinstance(endpoint, dict) else None
+        request = endpoint.get("serializedInteractionsRequest") if isinstance(endpoint, dict) else None
+        if request is None:
+            _LOG.info("열어봄을 기록할 정보가 없는 알림입니다")
+            return
+        try:
+            expression = record_interactions(request)
+        except ValueError:
+            self._engaged(False, "알림의 열어봄 기록 요청 형식을 알 수 없어 보내지 않았습니다")
+            return
+        cdp, session = self._cdp, self._page_session
+        if cdp is None or not session:
+            self._engaged(False, "수신 브라우저에 YouTube 탭이 없어 알림 열어봄을 기록하지 못했습니다")
+            return
+
+        def finished(reply: dict) -> None:
+            value = CdpProtocol.value(reply)
+            if isinstance(value, dict) and value.get("ok") is True:
+                self._engaged(True, "알림 열어봄을 기록했습니다")
+                return
+            error = value.get("error") if isinstance(value, dict) else None
+            kind = error if error in ("auth", "format", "network") else "unknown"
+            self._engaged(False, f"알림 열어봄을 기록하지 못했습니다: {kind}")
+
+        cdp.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True, "returnByValue": True},
+                 session=session, on_reply=finished)
+
+    @Slot(str)
+    def watch_briefly(self, video_id: str) -> None:
+        """녹화로 넘어간 영상을 수신 브라우저에서 로그인한 채로 잠깐 본다.
+
+        같은 창의 백그라운드 탭은 숨은 상태라 YouTube 가 재생하지 않으므로 새 창
+        (``newWindow``)으로 연다. 헤드리스 브라우저의 새 창은 화면에 뜨지 않는다.
+        창을 띄운 모드이거나 헤드리스인지 확인되지 않으면 하지 않는다. 음소거로
+        본편 :data:`_WATCH_SECONDS` 초를 재생한 뒤 창을 닫는다. 한 번에 하나만 보고,
+        보는 중에 넘어온 영상은 건너뛴다.
+        """
+        if self._closed or not isinstance(video_id, str) or not _VIDEO_ID.fullmatch(video_id):
+            return
+        if self._cdp is None or self._visible:
+            _LOG.info("수신 브라우저가 숨은 상태로 연결돼 있지 않아 녹화 영상 시청을 건너뜁니다")
+            return
+        if self._watching is not None:
+            _LOG.info("다른 영상을 보는 중이라 이번 녹화 영상 시청은 건너뜁니다")
+            return
+        token = self._watching = object()
+        self._watch_target = self._watch_session = ""
+        QTimer.singleShot(_WATCH_LIMIT_MS, lambda: self._watch_finish(token, "제한 시간 안에 끝나지 않았습니다"))
+        # 이어받은 브라우저는 창을 띄운 모드일 수 있다. 헤드리스인지 먼저 확인한다.
+        self._cdp.call("Browser.getVersion", on_reply=lambda reply: self._watch_open(token, video_id, reply))
+
+    def _watch_open(self, token: object, video_id: str, reply: dict) -> None:
+        if self._watching is not token or self._cdp is None:
+            return
+        result = reply.get("result")
+        agent = result.get("userAgent") if isinstance(result, dict) else None
+        if not isinstance(agent, str) or "HeadlessChrome" not in agent:
+            self._watch_finish(token, "수신 브라우저가 헤드리스인지 확인하지 못했습니다")
+            return
+        # 처음부터 watch 주소로 만들면 ``Target.targetCreated`` 가 응답보다 먼저 와서
+        # 수신용 YouTube 탭으로 붙잡힌다. 빈 창으로 만들어 targetId 를 받은 뒤 옮긴다.
+        self._cdp.call("Target.createTarget", {"url": "about:blank", "newWindow": True},
+                       on_reply=lambda reply: self._watch_created(token, video_id, reply))
+
+    def _watch_created(self, token: object, video_id: str, reply: dict) -> None:
+        result = reply.get("result")
+        target = result.get("targetId") if isinstance(result, dict) else None
+        if not isinstance(target, str) or not target:
+            self._watch_finish(token, "시청 창을 만들지 못했습니다")
+            return
+        self._watch_targets.add(target)
+        self._page_urls.pop(target, None)
+        if self._watching is not token or self._cdp is None:
+            # 그사이 끝났다. 늦게 생긴 창도 남기지 않는다.
+            if self._cdp is not None:
+                self._cdp.call("Target.closeTarget", {"targetId": target})
+            return
+        self._watch_target = target
+        self._cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True},
+                       on_reply=lambda reply: self._watch_attached(token, video_id, reply))
+
+    def _watch_attached(self, token: object, video_id: str, reply: dict) -> None:
+        cdp = self._cdp
+        if self._watching is not token or cdp is None:
+            return
+        result = reply.get("result")
+        session = result.get("sessionId") if isinstance(result, dict) else None
+        if not isinstance(session, str) or not session:
+            self._watch_finish(token, "시청 창에 붙지 못했습니다")
+            return
+        self._watch_session = session
+        cdp.call("Runtime.enable", session=session)
+        cdp.call("Runtime.addBinding", {"name": _WATCH_BINDING}, session=session)
+        cdp.call("Page.enable", session=session)
+        source = _WATCH.replace("SECONDS", str(_WATCH_SECONDS)).replace("BINDING(", _WATCH_BINDING + "(")
+        cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": source}, session=session)
+        cdp.call("Page.navigate", {"url": f"{YOUTUBE}/watch?v={video_id}"}, session=session,
+                 on_reply=lambda reply: self._watch_navigated(token, reply))
+
+    def _watch_navigated(self, token: object, reply: dict) -> None:
+        result = reply.get("result")
+        if not isinstance(result, dict) or result.get("errorText"):
+            self._watch_finish(token, "영상 페이지를 열지 못했습니다")
+
+    def _watch_reported(self, payload: object) -> None:
+        try:
+            value = json.loads(payload) if isinstance(payload, str) and len(payload) <= 256 else None
+        except (ValueError, RecursionError):
+            value = None
+        played = value.get("played") if isinstance(value, dict) else None
+        if type(played) is not int:
+            self._watch_finish(self._watching, "시청 창이 알 수 없는 값을 보냈습니다")
+            return
+        self._watch_finish(self._watching, played=played)
+
+    def _watch_finish(self, token: object, problem: str = "", *, played: int = 0) -> None:
+        """시청 한 건을 끝내고 창을 닫는다. 같은 건은 한 번만 끝난다."""
+        if token is None or self._watching is not token:
+            return
+        target = self._watch_target
+        self._watching, self._watch_target, self._watch_session = None, "", ""
+        if target and self._cdp is not None:
+            self._cdp.call("Target.closeTarget", {"targetId": target})
+        if problem:
+            self._engaged(False, f"녹화가 시작된 영상을 잠깐 보지 못했습니다: {problem}")
+        else:
+            self._engaged(True, f"녹화가 시작된 영상을 로그인한 채로 {played}초 보고 창을 닫았습니다")
 
     # -- 점검 -----------------------------------------------------------------
 
