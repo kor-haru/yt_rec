@@ -122,6 +122,12 @@ class NotificationSession(QObject):
             if self.account_browser is not None:
                 self.account_browser.bind(self.receiver)
                 self.receiver.browser_changed.connect(self._browser_changed)
+            # 알림이 녹화로 넘어가면 수신 브라우저가 그 영상을 로그인한 채로 잠깐 본다 (#118).
+            # 백엔드 작업 스레드에서 오는 신호다. 녹화는 이 결과를 기다리지 않는다.
+            handed = getattr(self.source, "recording_handed", None)
+            watch = getattr(self.receiver, "watch_briefly", None)
+            if handed is not None and watch is not None:
+                handed.connect(watch, Qt.ConnectionType.QueuedConnection)
             self.receiver.start()
         except Exception as exc:
             # No fallback discovery: startup failure must remain visible and safe.

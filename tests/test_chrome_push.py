@@ -386,6 +386,82 @@ def test_failed_hook_installation_is_reported(receiver):
     assert receiver.status[0] == "error"
 
 
+#: 워커 대신 페이지에 가짜 registration 을 두고 실제로 워커에 넣는 후킹을 그대로 돌린다.
+#: ``older`` 는 앞서 떠 있던 다른 알림이다. 이것까지 닫으면 안 된다.
+_HOOK_PAGE = """(async () => {
+  const messages = [], order = [], shown = [], mode = MODE;
+  window.BINDING = text => messages.push(JSON.parse(text));
+  class Registration {
+    showNotification(title, options) {
+      order.push('show');
+      if (mode === 'rejected') return Promise.reject(new TypeError('no permission'));
+      shown.push({title, tag: options && options.tag, close() { order.push('close:' + this.title); }});
+      return Promise.resolve('shown');
+    }
+    getNotifications(filter) {
+      order.push('get:' + JSON.stringify(filter));
+      if (mode === 'broken') return Promise.reject(new DOMException('gone', 'InvalidStateError'));
+      if (mode === 'missing') return Promise.resolve([]);
+      return Promise.resolve(shown.filter(item => !filter.tag || item.tag === filter.tag));
+    }
+  }
+  self.registration = new Registration();
+  shown.push({title: 'older', tag: 'older', close() { order.push('close:older'); }});
+  HOOK;
+  let value = null, error = null;
+  try { value = await self.registration.showNotification('live now', OPTIONS); }
+  catch (e) { error = e.name; }
+  console.log('RESULT:' + JSON.stringify({value, error, order,
+    messages: messages.map(m => m.kind + (m.reason ? ':' + m.reason : ''))}));
+})();"""
+
+
+@pytest.mark.parametrize("mode, options, value, error, order, messages", [
+    # 표시가 끝난 뒤에 그 알림만 닫는다. YouTube 는 원래 결과를 그대로 받는다.
+    ("ok", {"tag": "live-1", "body": "b"}, "shown", None,
+     ["show", 'get:{"tag":"live-1"}', "close:live now"], ["notification"]),
+    # 태그가 없으면 제목으로 고른다. 앞서 떠 있던 다른 알림은 건드리지 않는다.
+    ("ok", {"body": "b"}, "shown", None, ["show", "get:{}", "close:live now"], ["notification"]),
+    # 표시 자체가 실패하면 닫을 것도 없다. 실패는 YouTube 에 그대로 돌려준다.
+    ("rejected", {"tag": "live-1"}, None, "TypeError", ["show"], ["notification"]),
+    # 닫기가 실패해도 YouTube 가 받는 결과는 성공 그대로다. 사유만 앱으로 보낸다.
+    ("broken", {"tag": "live-1"}, "shown", None, ["show", 'get:{"tag":"live-1"}'],
+     ["notification", "close_failed:InvalidStateError"]),
+    ("missing", {"tag": "live-1"}, "shown", None, ["show", 'get:{"tag":"live-1"}'],
+     ["notification", "close_failed:missing"]),
+])
+def test_the_hook_closes_each_notification_right_after_it_is_shown(
+    receiver, run_js, mode, options, value, error, order, messages,
+):
+    """띄운 알림을 스크립트로 바로 닫는다 (#118).
+
+    그대로 두면 Windows 가 72시간 뒤 만료로 닫고, Chrome 은 그것을 사용자가 닫은
+    것으로 알려 YouTube 워커가 '무시하고 닫음'을 기록한다. 스크립트로 닫으면
+    ``notificationclose`` 가 나지 않는다.
+    """
+    sent = open_session(receiver)
+    attach_worker(receiver)
+    hook = next(call for call in calls(sent)
+                if call["method"] == "Runtime.evaluate" and call.get("sessionId") == WORKER_SESSION)
+    expression = hook["params"]["expression"]
+    assert "getNotifications" in expression and ".close()" in expression
+    result = run_js(_HOOK_PAGE.replace("MODE", json.dumps(mode)).replace("OPTIONS", json.dumps(options))
+                    .replace("BINDING", module.BINDING).replace("HOOK", expression))
+    assert result == {"value": value, "error": error, "order": order, "messages": messages}
+
+
+def test_a_failed_close_is_logged_without_touching_the_receiver_state(receiver, caplog):
+    open_session(receiver)
+    attach_worker(receiver)
+    receiver._status("ready", module._RESTING)
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        binding(receiver, json.dumps({"kind": "close_failed", "reason": "InvalidStateError"}))
+        binding(receiver, json.dumps({"kind": "close_failed", "reason": "<b>page text</b>"}))
+    assert receiver.status == ("ready", module._RESTING)
+    assert "InvalidStateError" in caplog.text and "unknown" in caplog.text
+    assert "page text" not in caplog.text
+
+
 # -- 신호에서 영상 뽑기 -------------------------------------------------------
 
 
@@ -504,6 +580,226 @@ def test_raw_push_body_records_one_video_and_drops_anything_else(receiver):
     binding(receiver, json.dumps({"kind": "push", "text": "not json"}))
     binding(receiver, json.dumps({"kind": "push", "text": None}))
     assert live == [] and receiver.status == before
+
+
+# -- 열어봄·시청 (#118) -------------------------------------------------------
+
+SERIALIZED = "CAUQ-synthetic_only=="
+WATCH_TARGET = "WATCH-TARGET"
+WATCH_SESSION = "WATCH-SESSION"
+HEADLESS = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "HeadlessChrome/154.0.0.0 Safari/537.36")
+
+
+def clicked(video: str = VIDEO, request: object = SERIALIZED) -> str:
+    """YouTube 알림처럼 클릭 기록 요청을 실은 페이로드. 값은 합성이다."""
+    return json.dumps({"kind": "notification", "title": "채널이 라이브 중", "options": {
+        "body": "지금 방송 중", "tag": "live",
+        "data": {"url": f"{module.YOUTUBE}/watch?v={video}", "clickEndpoint": {
+            "recordNotificationInteractionsEndpoint": {"serializedInteractionsRequest": request}}},
+    }})
+
+
+def answer(receiver, call_id: int, result: dict) -> None:
+    receiver._cdp.feed(json.dumps({"id": call_id, "result": result}))
+
+
+def refuse(receiver, call_id: int) -> None:
+    receiver._cdp.feed(json.dumps({"id": call_id, "error": {"code": -32000, "message": "refused"}}))
+
+
+def latest(sent: list[str], method: str, session: str | None = None) -> dict:
+    return next(call for call in reversed(calls(sent))
+                if call["method"] == method and (session is None or call.get("sessionId") == session))
+
+
+def start_watch(receiver, sent: list[str], video: str = VIDEO) -> None:
+    """시청 창을 여는 대화를 끝까지 답해 준다. 창 이름표와 세션은 고정값이다."""
+    receiver.watch_briefly(video)
+    answer(receiver, last_id(sent, "Browser.getVersion"), {"product": "Chrome/154.0.8037.97", "userAgent": HEADLESS})
+    answer(receiver, last_id(sent, "Target.createTarget"), {"targetId": WATCH_TARGET})
+    answer(receiver, last_id(sent, "Target.attachToTarget"), {"sessionId": WATCH_SESSION})
+
+
+def watched(receiver, played: int = module._WATCH_SECONDS) -> None:
+    feed(receiver, "Runtime.bindingCalled",
+         {"name": module._WATCH_BINDING, "payload": json.dumps({"played": played})}, WATCH_SESSION)
+
+
+def test_a_received_notification_is_recorded_as_opened_from_the_signed_in_tab(receiver, caplog):
+    """YouTube 워커가 알림 클릭 때 보내는 기록을 로그인된 수신 탭에서 보낸다."""
+    sent = open_session(receiver)
+    attach_worker(receiver)
+    attach_page(receiver)
+    sent.clear()
+    live: list[LiveNotification] = []
+    receiver.notification_received.connect(live.append)
+    binding(receiver, clicked())
+    record = latest(sent, "Runtime.evaluate", PAGE_SESSION)
+    assert record["params"]["expression"] == module.record_interactions(SERIALIZED)
+    assert record["params"]["awaitPromise"] is True
+    # 기록은 따로 돈다. 녹화로 넘기는 흐름은 그 답을 기다리지 않는다.
+    assert [item.video_id for item in live] == [VIDEO] and receiver.status[0] == "received"
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        reply(receiver, record["id"], {"ok": True})
+        binding(receiver, clicked(OTHER_VIDEO))
+        reply(receiver, latest(sent, "Runtime.evaluate", PAGE_SESSION)["id"], {"error": "auth"})
+    assert "열어봄을 기록했습니다" in caplog.text
+    assert "열어봄을 기록하지 못했습니다: auth" in caplog.text
+    assert receiver.status[0] == "received"
+    assert SERIALIZED not in caplog.text
+
+
+@pytest.mark.parametrize("request_value", [None, "", 42, "x" * 9000])
+def test_a_notification_without_a_usable_click_record_sends_nothing_to_the_page(receiver, request_value):
+    sent = open_session(receiver)
+    attach_worker(receiver)
+    attach_page(receiver)
+    sent.clear()
+    live: list[LiveNotification] = []
+    receiver.notification_received.connect(live.append)
+    binding(receiver, clicked(request=request_value))
+    assert [call for call in calls(sent) if call.get("sessionId") == PAGE_SESSION] == []
+    assert [item.video_id for item in live] == [VIDEO]
+
+
+def test_without_a_signed_in_tab_the_opened_record_is_skipped_and_receiving_goes_on(receiver, caplog):
+    sent = open_session(receiver)
+    attach_worker(receiver)
+    sent.clear()
+    live: list[LiveNotification] = []
+    receiver.notification_received.connect(live.append)
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        binding(receiver, clicked())
+    assert "Runtime.evaluate" not in methods(sent)
+    assert [item.video_id for item in live] == [VIDEO]
+    assert "YouTube 탭이 없어" in caplog.text
+
+
+def test_a_handed_video_plays_in_a_new_hidden_window_that_is_closed_afterwards(receiver, timers):
+    """백그라운드 탭은 숨은 상태라 YouTube 가 재생하지 않는다. 새 창이어야 한다.
+
+    헤드리스 브라우저의 새 창은 화면에 뜨지 않는다. 시청 창은 수신용 YouTube 탭이
+    아니므로 붙잡거나 계정 연결을 흔들면 안 된다.
+    """
+    assert 60 <= module._WATCH_SECONDS <= 90
+    sent = open_session(receiver)
+    attach_page(receiver)
+    sent.clear()
+    changes: list[bool] = []
+    receiver.browser_changed.connect(changes.append)
+    start_watch(receiver, sent)
+    create = latest(sent, "Target.createTarget")
+    assert create["params"]["newWindow"] is True and create["params"].get("background") is not True
+    assert create["params"]["url"] == "about:blank"
+    assert latest(sent, "Target.attachToTarget")["params"] == {"targetId": WATCH_TARGET, "flatten": True}
+    on_watch = [call for call in calls(sent) if call.get("sessionId") == WATCH_SESSION]
+    assert [call["method"] for call in on_watch] == [
+        "Runtime.enable", "Runtime.addBinding", "Page.enable",
+        "Page.addScriptToEvaluateOnNewDocument", "Page.navigate",
+    ]
+    assert on_watch[1]["params"] == {"name": module._WATCH_BINDING}
+    source = on_watch[3]["params"]["source"]
+    assert module._WATCH_BINDING + "(" in source and f"played >= {module._WATCH_SECONDS}" in source
+    assert "muted = true" in source and "ad-showing" in source and "skip" in source
+    assert on_watch[4]["params"] == {"url": f"{module.YOUTUBE}/watch?v={VIDEO}"}
+    moved = {"targetInfo": {"targetId": WATCH_TARGET, "type": "page", "url": f"{module.YOUTUBE}/watch?v={VIDEO}"}}
+    sent.clear()
+    feed(receiver, "Target.targetInfoChanged", moved)
+    assert "Target.attachToTarget" not in methods(sent)
+    watched(receiver)
+    assert latest(sent, "Target.closeTarget")["params"] == {"targetId": WATCH_TARGET}
+    assert receiver._watching is None
+    # 닫히는 중에 늦게 온 사건도 마찬가지다.
+    sent.clear()
+    feed(receiver, "Target.targetInfoChanged", moved)
+    assert methods(sent) == []
+    assert receiver._page_session == PAGE_SESSION and changes == []
+
+
+def test_only_one_watch_runs_at_a_time(receiver, timers):
+    sent = open_session(receiver)
+    sent.clear()
+    receiver.watch_briefly(VIDEO)
+    receiver.watch_briefly(OTHER_VIDEO)  # 보는 중에 넘어온 영상은 건너뛴다
+    assert methods(sent) == ["Browser.getVersion"]
+    answer(receiver, last_id(sent, "Browser.getVersion"), {"userAgent": HEADLESS})
+    answer(receiver, last_id(sent, "Target.createTarget"), {"targetId": WATCH_TARGET})
+    receiver.watch_briefly(OTHER_VIDEO)
+    assert methods(sent).count("Target.createTarget") == 1
+    answer(receiver, last_id(sent, "Target.attachToTarget"), {"sessionId": WATCH_SESSION})
+    watched(receiver)
+    assert methods(sent).count("Target.closeTarget") == 1
+    sent.clear()
+    receiver.watch_briefly(OTHER_VIDEO)  # 끝난 뒤에는 다음 영상을 본다
+    assert methods(sent) == ["Browser.getVersion"]
+
+
+def test_a_watch_that_never_finishes_is_closed_by_its_time_limit(receiver, timers, caplog):
+    sent = open_session(receiver)
+    sent.clear()
+    start_watch(receiver, sent)
+    assert [delay for delay, _ in timers.pending] == [module._WATCH_LIMIT_MS]
+    sent.clear()
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        timers.fire()
+    assert methods(sent) == ["Target.closeTarget"]
+    assert receiver._watching is None and "보지 못했습니다" in caplog.text
+    # 늦게 온 보고는 이미 끝난 시청을 다시 닫지 않는다.
+    sent.clear()
+    watched(receiver)
+    assert methods(sent) == []
+
+
+def test_no_watch_window_unless_the_browser_is_known_to_be_headless(receiver, timers):
+    """창을 띄운 모드에서 새 창을 만들면 사용자 화면에 영상 창이 뜬다."""
+    sent = open_session(receiver)
+    sent.clear()
+    receiver._visible = True  # 사용자가 로그인 창을 띄워 둔 상태
+    receiver.watch_briefly(VIDEO)
+    assert sent == []
+    receiver._visible = False  # 이어받은 브라우저는 모드를 모른다
+    receiver.watch_briefly(VIDEO)
+    answer(receiver, last_id(sent, "Browser.getVersion"), {
+        "product": "Chrome/154.0.8037.97",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/154.0.0.0 Safari/537.36",
+    })
+    assert "Target.createTarget" not in methods(sent)
+    assert receiver._watching is None
+
+
+def test_watch_failures_are_only_logged_and_receiving_goes_on(receiver, timers, caplog):
+    sent = open_session(receiver)
+    attach_worker(receiver)
+    receiver._status("ready", module._RESTING)
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        receiver.watch_briefly(VIDEO)
+        answer(receiver, last_id(sent, "Browser.getVersion"), {"userAgent": HEADLESS})
+        refuse(receiver, last_id(sent, "Target.createTarget"))
+        assert receiver._watching is None and "Target.closeTarget" not in methods(sent)
+        receiver.watch_briefly(VIDEO)
+        answer(receiver, last_id(sent, "Browser.getVersion"), {"userAgent": HEADLESS})
+        answer(receiver, last_id(sent, "Target.createTarget"), {"targetId": WATCH_TARGET})
+        answer(receiver, last_id(sent, "Target.attachToTarget"), {"sessionId": WATCH_SESSION})
+        answer(receiver, last_id(sent, "Page.navigate"), {"frameId": "F", "errorText": "net::ERR_FAILED"})
+    assert latest(sent, "Target.closeTarget")["params"] == {"targetId": WATCH_TARGET}
+    assert receiver._watching is None and caplog.text.count("보지 못했습니다") == 2
+    assert receiver.status == ("ready", module._RESTING)
+    live: list[LiveNotification] = []
+    receiver.notification_received.connect(live.append)
+    binding(receiver, json.dumps({"kind": "notification", "title": "t", "options": {"data": {"videoId": VIDEO}}}))
+    assert [item.video_id for item in live] == [VIDEO]
+
+
+def test_watch_is_refused_after_close_and_for_anything_but_a_video_id(receiver):
+    sent = open_session(receiver)
+    sent.clear()
+    receiver.watch_briefly("tooshort")
+    receiver.watch_briefly(f"{VIDEO}&list=x")
+    assert sent == []
+    receiver.close()
+    receiver.watch_briefly(VIDEO)
+    assert "Browser.getVersion" not in methods(sent)
 
 
 # -- 상태 점검 ----------------------------------------------------------------

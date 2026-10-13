@@ -8,7 +8,7 @@ from uuid import uuid4
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QThread, QTimer, Slot
+from PySide6.QtCore import QThread, QTimer, Signal, Slot
 
 from yt_rec.recording.options import RecordingOptions, default_settings_path, load_settings, save_settings
 from yt_rec.recording.events import ProgressReported
@@ -50,6 +50,10 @@ class BackendSource(EventSource):
     루프백 대기와 API 호출이 GUI 를 막지 않게 하기 위해서다. 결과는
     :attr:`event_ready` 로만 나간다.
     """
+
+    #: 실제 수신 알림이 녹화로 넘어갔다(``handed``). 영상 ID 만 싣는다 (#118).
+    #: 작업 스레드에서 방출하므로 받는 쪽은 큐 연결로 GUI 스레드에서 처리한다.
+    recording_handed = Signal(str)
 
     def __init__(
         self,
@@ -229,6 +233,8 @@ class BackendSource(EventSource):
                      f"첫 미디어={result.first_media_at}; {result.reason}; "
                      f"coverage={result.coverage}: {result.coverage_reason}"),
         )))
+        if result.status == "handed" and not result.notification.synthetic:
+            self.recording_handed.emit(result.notification.video_id)
 
     def recording_progress(self, event: ProgressReported) -> None:
         """Engine byte evidence only. This callback performs no network I/O."""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 
 import pytest
@@ -187,6 +188,9 @@ def test_normal_app_auto_login_logout_and_expired_watch_restore_without_oauth(pr
             super().__init__()
             self.setParent(parent)
             self.opens = 0
+            self.watched = []
+        def watch_briefly(self, video_id):
+            self.watched.append((video_id, QThread.currentThread()))
         def start(self):
             self.status_changed.emit("ready", "Push readiness does not prove login")
         def open_browser(self):
@@ -222,6 +226,9 @@ def test_normal_app_auto_login_logout_and_expired_watch_restore_without_oauth(pr
         receiver.value, receiver.video_value = feed(), player()
         receiver.browser_changed.emit(True)
         until(qapp, lambda: VIDEO in engines)
+        # 녹화로 넘어간 알림만 수신 브라우저의 짧은 시청으로 이어진다 (#118). GUI 스레드에서 받는다.
+        until(qapp, lambda: receiver.watched)
+        assert receiver.watched == [(VIDEO, qapp.thread())]
         context.state.disconnect_account()
         until(qapp, lambda: context.state.connection is ConnectionState.DISCONNECTED)
         assert engines[VIDEO].actions.empty() and selected.load() == (CHANNEL,)
@@ -253,24 +260,10 @@ def continuation_page(items, account="private-fixture-only"):
 
 
 @pytest.fixture
-def run_script(qapp):
+def run_script(run_js):
     """Run the exact async production JS in off-record Chromium with only fake fetch."""
-    from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-    profile = QWebEngineProfile()
-    class Page(QWebEnginePage):
-        def javaScriptConsoleMessage(self, _level, message, _line, _source):
-            if message.startswith("RESULT:"):
-                self.result = json.loads(message[7:])
-                self.loop.quit()
-    page = Page(profile)
     def run(responses):
-        page.result = None
-        page.loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(page.loop.quit)
-        script = """(() => {
+        return run_js("""(() => {
             const location = {origin:'https://www.youtube.com'};
             const document = {cookie:'SAPISID=synthetic-only'};
             const crypto = {subtle:{digest:async () => new Uint8Array(32).buffer}};
@@ -281,21 +274,8 @@ def run_script(qapp):
               return {ok:true,url:location.origin + url,text:async () => value,json:async () => value};
             };
             SCRIPT.then(value => console.log('RESULT:' + JSON.stringify({value:JSON.parse(value), calls})));
-        })();""".replace("RESPONSES", json.dumps(responses)).replace("SCRIPT", web.expression())
-        def loaded(_ok):
-            page.runJavaScript(script)
-        page.loadFinished.connect(loaded)
-        page.setHtml("<html><body>synthetic only</body></html>")
-        timer.start(5000)
-        page.loop.exec()
-        page.loadFinished.disconnect(loaded)
-        assert page.result is not None
-        return page.result
-    yield run
-    page.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    profile.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        })();""".replace("RESPONSES", json.dumps(responses)).replace("SCRIPT", web.expression()))
+    return run
 
 
 def test_script_reads_all_pages_without_exporting_account_or_continuation(run_script):
@@ -331,3 +311,70 @@ def test_script_distinguishes_empty_auth_failure_account_switch_and_incomplete(r
         repeated = continuation_page([continuation("same")])
         replies, expected = [initial, repeated], "incomplete"
     assert run_script(replies)["value"] == {"error":expected}
+
+
+# -- 알림 열어봄 기록 (#118) ---------------------------------------------------
+
+SERIALIZED = "CAUQ-synthetic_only=="
+YTCFG = {"INNERTUBE_CONTEXT": {"client": {"clientName": "WEB", "clientVersion": "2.20261013.00.00"}},
+         "SESSION_INDEX": "0", "INNERTUBE_CONTEXT_CLIENT_NAME": 1}
+
+
+def record_page(*, serialized=SERIALIZED, cookie="SAPISID=synthetic-only", ytcfg=True, ok=True):
+    """record_interactions 스크립트를 가짜 페이지 환경에 넣는다. 요청은 밖으로 나가지 않는다."""
+    return """(() => {
+        const location = {origin:'https://www.youtube.com'};
+        const document = {cookie:__COOKIE__};
+        const crypto = {subtle:{digest:async () => new Uint8Array(20).buffer}};
+        const values = __CONFIG__;
+        const ytcfg = values ? {get:key => values[key]} : undefined;
+        const requests = [];
+        const fetch = async (url, options) => { requests.push({url, options}); return {ok:__OK__}; };
+        __SCRIPT__.then(value => console.log('RESULT:' + JSON.stringify({value:JSON.parse(value), requests})));
+    })();""".replace("__COOKIE__", json.dumps(cookie)).replace("__CONFIG__", json.dumps(YTCFG if ytcfg else None)) \
+        .replace("__OK__", json.dumps(ok)).replace("__SCRIPT__", web.record_interactions(serialized))
+
+
+def test_record_interactions_sends_the_notification_click_record_from_the_signed_in_page(run_js):
+    """YouTube 워커가 알림을 눌렀을 때 보내는 것과 같은 요청이다. 인증은 페이지 안에서 만든다."""
+    result = run_js(record_page())
+    assert result["value"] == {"ok": True}
+    [request] = result["requests"]
+    assert request["url"] == "/youtubei/v1/notification/record_interactions?prettyPrint=false"
+    options = request["options"]
+    assert options["method"] == "POST" and options["credentials"] == "same-origin"
+    headers = options["headers"]
+    assert re.fullmatch(r"SAPISIDHASH \d+_0{40}", headers["Authorization"])
+    assert headers["X-Origin"] == "https://www.youtube.com" and headers["X-Goog-AuthUser"] == "0"
+    assert headers["X-Youtube-Client-Name"] == "1"
+    assert headers["X-Youtube-Client-Version"] == "2.20261013.00.00"
+    assert json.loads(options["body"]) == {
+        "context": YTCFG["INNERTUBE_CONTEXT"], "serializedRecordNotificationInteractionsRequest": SERIALIZED,
+    }
+    # 쿠키 값은 요청 머리글의 해시로만 쓰이고 결과로 나오지 않는다.
+    assert "synthetic-only" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("case, expected, fetches", [
+    ("signed-out", "auth", 0),
+    ("no-config", "format", 0),
+    ("rejected", "network", 1),
+])
+def test_record_interactions_reports_only_the_failure_kind(run_js, case, expected, fetches):
+    result = run_js(record_page(cookie="PREF=f6=40000000" if case == "signed-out" else "SAPISID=synthetic-only",
+                                ytcfg=case != "no-config", ok=case != "rejected"))
+    assert result["value"] == {"error": expected}
+    assert len(result["requests"]) == fetches
+
+
+def test_record_interactions_passes_the_opaque_value_through_verbatim(run_js):
+    hostile = "a\"});fetch('/elsewhere');({\"b </script>"
+    [request] = run_js(record_page(serialized=hostile))["requests"]
+    assert request["url"].startswith("/youtubei/v1/notification/record_interactions")
+    assert json.loads(request["options"]["body"])["serializedRecordNotificationInteractionsRequest"] == hostile
+
+
+@pytest.mark.parametrize("value", ["", None, 42, "x" * 8193])
+def test_record_interactions_refuses_a_value_it_cannot_pass_through(value):
+    with pytest.raises(ValueError):
+        web.record_interactions(value)

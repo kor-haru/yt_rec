@@ -315,6 +315,26 @@ def test_trusted_notice_handoff_actual_progress_completion_and_dedup(wired, qapp
     assert all(thread is not qapp.thread() for thread in api.network_threads)
 
 
+def test_only_an_actual_handoff_asks_the_receiver_to_watch(wired, qapp):
+    """수신 브라우저의 짧은 시청은 녹화로 넘어간 영상에만 걸린다 (#118).
+
+    무시된 알림·중복 알림·진행·완료는 부르지 않는다. 녹화는 이 신호의 결과를 모른다.
+    """
+    source, api, engines, _, _, events = wired
+    handed: list[str] = []
+    source.recording_handed.connect(handed.append)
+    api.lives_by_id[OTHER] = LiveBroadcast(OTHER, "UC2", "not selected")
+    source.receive_notification(notice(OTHER), trusted=True)
+    assert source.receive_notification(notice(), trusted=True)
+    until(qapp, lambda: VIDEO in engines and bool(diagnostic(events, "handed")))
+    source.receive_notification(notice(), trusted=True)
+    engines[VIDEO].actions.put(("progress", 100))
+    engines[VIDEO].actions.put(("finish", True))
+    until(qapp, lambda: bool(diagnostic(events, "completed")))
+    flush(source, qapp)
+    assert handed == [VIDEO]
+
+
 def test_slot_release_and_capacity_changes_resume_only_pending_notices(wired, qapp):
     source, api, engines, _, _, events = wired
     source.receive_notification(notice(), trusted=True)

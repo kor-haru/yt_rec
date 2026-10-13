@@ -177,6 +177,53 @@ def window_settings(tmp_path) -> WindowSettings:
 
 
 @pytest.fixture
+def run_js(qapp):
+    """제품 페이지 스크립트를 기록이 남지 않는 Chromium 페이지에서 그대로 돌린다.
+
+    스크립트는 끝나면 ``console.log('RESULT:' + JSON)`` 으로 결과를 남긴다. 네트워크·
+    쿠키·서비스 워커는 시험 쪽이 가짜로 넣는다. 실제 계정이나 사이트에 닿지 않는다.
+    """
+    import json
+
+    from PySide6.QtCore import QEvent, QEventLoop, QTimer
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+
+    profile = QWebEngineProfile()
+
+    class Page(QWebEnginePage):
+        def javaScriptConsoleMessage(self, _level, message, _line, _source):
+            if message.startswith("RESULT:"):
+                self.result = json.loads(message[7:])
+                self.loop.quit()
+
+    page = Page(profile)
+
+    def run(script: str) -> object:
+        page.result = None
+        page.loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(page.loop.quit)
+
+        def loaded(_ok):
+            page.runJavaScript(script)
+
+        page.loadFinished.connect(loaded)
+        page.setHtml("<html><body>synthetic only</body></html>")
+        timer.start(5000)
+        page.loop.exec()
+        page.loadFinished.disconnect(loaded)
+        assert page.result is not None
+        return page.result
+
+    yield run
+    page.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    profile.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+@pytest.fixture
 def fake_push_receiver(monkeypatch):
     """Native receiver contract double: no WebEngine profile or real network."""
     import types
