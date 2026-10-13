@@ -45,6 +45,47 @@ def test_스텁_없이_실제_백엔드를_붙인다(qapp, monkeypatch, fake_pus
         context.window.close()
 
 
+def test_수신기의_열어봄_시청_결과는_앱_로그에_남는다(qapp, monkeypatch, fake_push_receiver, window_settings) -> None:
+    """알림 닫기·열어봄 기록·짧은 시청의 결과는 운영 중에 보여야 한다 (#118).
+
+    성공은 INFO, 실패는 WARNING 이고 출처는 ``notification-engagement`` 다. 수신기를
+    멈춘 뒤에 늦게 온 결과는 남기지 않는다.
+    """
+    from PySide6.QtCore import Signal
+    from yt_rec.state import events as ev
+    from yt_rec.state.models import Severity
+
+    class Receiver(fake_push_receiver):
+        engagement = Signal(bool, str)
+
+    fake = _FakeBackend()
+    published: list[object] = []
+    fake.event_ready.connect(published.append)
+    monkeypatch.setattr("yt_rec.app.create_backend_source", lambda **_kwargs: fake)
+    monkeypatch.setattr("yt_rec.app.notification_receiver_class", lambda _name: Receiver)
+    context = build_application([], settings=window_settings)
+
+    def entries():
+        return [(event.entry.severity, event.entry.message) for event in published
+                if isinstance(event, ev.LogAppended) and event.entry.source == "notification-engagement"]
+
+    try:
+        receiver = context.notifications.receiver
+        receiver.engagement.emit(True, "알림 열어봄을 기록했습니다")
+        receiver.engagement.emit(False, "알림 열어봄을 기록하지 못했습니다: auth")
+        assert entries() == [
+            (Severity.INFO, "알림 열어봄을 기록했습니다"),
+            (Severity.WARNING, "알림 열어봄을 기록하지 못했습니다: auth"),
+        ]
+        assert context.state.notification.code != "error"  # 수신 상태 표시는 그대로다
+        context.notifications.stop()
+        receiver.engagement.emit(False, "녹화가 시작된 영상을 잠깐 보지 못했습니다: 제한 시간 안에 끝나지 않았습니다")
+        assert len(entries()) == 2
+    finally:
+        context.notifications.stop()
+        context.window.close()
+
+
 def test_명령은_fifo로_직렬화된다(qapp) -> None:
     from yt_rec.backend.controller import WatchController
     from yt_rec.backend.selection import MemorySelectionStore

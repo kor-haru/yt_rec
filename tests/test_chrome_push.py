@@ -454,12 +454,17 @@ def test_a_failed_close_is_logged_without_touching_the_receiver_state(receiver, 
     open_session(receiver)
     attach_worker(receiver)
     receiver._status("ready", module._RESTING)
+    outcomes: list[tuple[bool, str]] = []
+    receiver.engagement.connect(lambda ok, message: outcomes.append((ok, message)))
     with caplog.at_level(logging.WARNING, logger=module.__name__):
         binding(receiver, json.dumps({"kind": "close_failed", "reason": "InvalidStateError"}))
         binding(receiver, json.dumps({"kind": "close_failed", "reason": "<b>page text</b>"}))
     assert receiver.status == ("ready", module._RESTING)
     assert "InvalidStateError" in caplog.text and "unknown" in caplog.text
     assert "page text" not in caplog.text
+    # 앱 로그로도 간다. 페이지에서 온 글자는 싣지 않는다.
+    assert outcomes == [(False, "표시한 알림을 닫지 못했습니다: InvalidStateError"),
+                        (False, "표시한 알림을 닫지 못했습니다: unknown")]
 
 
 # -- 신호에서 영상 뽑기 -------------------------------------------------------
@@ -626,6 +631,13 @@ def watched(receiver, played: int = module._WATCH_SECONDS) -> None:
          {"name": module._WATCH_BINDING, "payload": json.dumps({"played": played})}, WATCH_SESSION)
 
 
+def engaged(receiver) -> list[tuple[bool, str]]:
+    """앱 로그로 가는 결과 신호를 모은다."""
+    outcomes: list[tuple[bool, str]] = []
+    receiver.engagement.connect(lambda ok, message: outcomes.append((ok, message)))
+    return outcomes
+
+
 def test_a_received_notification_is_recorded_as_opened_from_the_signed_in_tab(receiver, caplog):
     """YouTube 워커가 알림 클릭 때 보내는 기록을 로그인된 수신 탭에서 보낸다."""
     sent = open_session(receiver)
@@ -634,6 +646,7 @@ def test_a_received_notification_is_recorded_as_opened_from_the_signed_in_tab(re
     sent.clear()
     live: list[LiveNotification] = []
     receiver.notification_received.connect(live.append)
+    outcomes = engaged(receiver)
     binding(receiver, clicked())
     record = latest(sent, "Runtime.evaluate", PAGE_SESSION)
     assert record["params"]["expression"] == module.record_interactions(SERIALIZED)
@@ -648,6 +661,8 @@ def test_a_received_notification_is_recorded_as_opened_from_the_signed_in_tab(re
     assert "열어봄을 기록하지 못했습니다: auth" in caplog.text
     assert receiver.status[0] == "received"
     assert SERIALIZED not in caplog.text
+    # 같은 결과가 앱 로그용 신호로도 나간다.
+    assert outcomes == [(True, "알림 열어봄을 기록했습니다"), (False, "알림 열어봄을 기록하지 못했습니다: auth")]
 
 
 @pytest.mark.parametrize("request_value", [None, "", 42, "x" * 9000])
@@ -658,9 +673,13 @@ def test_a_notification_without_a_usable_click_record_sends_nothing_to_the_page(
     sent.clear()
     live: list[LiveNotification] = []
     receiver.notification_received.connect(live.append)
+    outcomes = engaged(receiver)
     binding(receiver, clicked(request=request_value))
     assert [call for call in calls(sent) if call.get("sessionId") == PAGE_SESSION] == []
     assert [item.video_id for item in live] == [VIDEO]
+    # 기록 정보가 아예 없는 알림은 흔하다. 앱 로그에는 형식이 바뀐 경우만 남긴다.
+    assert outcomes == ([] if request_value is None
+                        else [(False, "알림의 열어봄 기록 요청 형식을 알 수 없어 보내지 않았습니다")])
 
 
 def test_without_a_signed_in_tab_the_opened_record_is_skipped_and_receiving_goes_on(receiver, caplog):
@@ -669,11 +688,13 @@ def test_without_a_signed_in_tab_the_opened_record_is_skipped_and_receiving_goes
     sent.clear()
     live: list[LiveNotification] = []
     receiver.notification_received.connect(live.append)
+    outcomes = engaged(receiver)
     with caplog.at_level(logging.WARNING, logger=module.__name__):
         binding(receiver, clicked())
     assert "Runtime.evaluate" not in methods(sent)
     assert [item.video_id for item in live] == [VIDEO]
     assert "YouTube 탭이 없어" in caplog.text
+    assert outcomes == [(False, "수신 브라우저에 YouTube 탭이 없어 알림 열어봄을 기록하지 못했습니다")]
 
 
 def test_a_handed_video_plays_in_a_new_hidden_window_that_is_closed_afterwards(receiver, timers):
@@ -688,6 +709,7 @@ def test_a_handed_video_plays_in_a_new_hidden_window_that_is_closed_afterwards(r
     sent.clear()
     changes: list[bool] = []
     receiver.browser_changed.connect(changes.append)
+    outcomes = engaged(receiver)
     start_watch(receiver, sent)
     create = latest(sent, "Target.createTarget")
     assert create["params"]["newWindow"] is True and create["params"].get("background") is not True
@@ -710,6 +732,7 @@ def test_a_handed_video_plays_in_a_new_hidden_window_that_is_closed_afterwards(r
     watched(receiver)
     assert latest(sent, "Target.closeTarget")["params"] == {"targetId": WATCH_TARGET}
     assert receiver._watching is None
+    assert outcomes == [(True, f"녹화가 시작된 영상을 로그인한 채로 {module._WATCH_SECONDS}초 보고 창을 닫았습니다")]
     # 닫히는 중에 늦게 온 사건도 마찬가지다.
     sent.clear()
     feed(receiver, "Target.targetInfoChanged", moved)
@@ -738,6 +761,7 @@ def test_only_one_watch_runs_at_a_time(receiver, timers):
 def test_a_watch_that_never_finishes_is_closed_by_its_time_limit(receiver, timers, caplog):
     sent = open_session(receiver)
     sent.clear()
+    outcomes = engaged(receiver)
     start_watch(receiver, sent)
     assert [delay for delay, _ in timers.pending] == [module._WATCH_LIMIT_MS]
     sent.clear()
@@ -745,19 +769,21 @@ def test_a_watch_that_never_finishes_is_closed_by_its_time_limit(receiver, timer
         timers.fire()
     assert methods(sent) == ["Target.closeTarget"]
     assert receiver._watching is None and "보지 못했습니다" in caplog.text
-    # 늦게 온 보고는 이미 끝난 시청을 다시 닫지 않는다.
+    # 늦게 온 보고는 이미 끝난 시청을 다시 닫지도, 다시 알리지도 않는다.
     sent.clear()
     watched(receiver)
     assert methods(sent) == []
+    assert outcomes == [(False, "녹화가 시작된 영상을 잠깐 보지 못했습니다: 제한 시간 안에 끝나지 않았습니다")]
 
 
 def test_no_watch_window_unless_the_browser_is_known_to_be_headless(receiver, timers):
     """창을 띄운 모드에서 새 창을 만들면 사용자 화면에 영상 창이 뜬다."""
     sent = open_session(receiver)
     sent.clear()
+    outcomes = engaged(receiver)
     receiver._visible = True  # 사용자가 로그인 창을 띄워 둔 상태
     receiver.watch_briefly(VIDEO)
-    assert sent == []
+    assert sent == [] and outcomes == []  # 사용자가 창을 연 동안 건너뛴 것은 정보일 뿐이다
     receiver._visible = False  # 이어받은 브라우저는 모드를 모른다
     receiver.watch_briefly(VIDEO)
     answer(receiver, last_id(sent, "Browser.getVersion"), {
@@ -766,12 +792,15 @@ def test_no_watch_window_unless_the_browser_is_known_to_be_headless(receiver, ti
     })
     assert "Target.createTarget" not in methods(sent)
     assert receiver._watching is None
+    # 헤드리스로 확인되지 않으면 시청이 계속 멈춰 있게 된다. 앱 로그에서 보이게 둔다.
+    assert outcomes == [(False, "녹화가 시작된 영상을 잠깐 보지 못했습니다: 수신 브라우저가 헤드리스인지 확인하지 못했습니다")]
 
 
 def test_watch_failures_are_only_logged_and_receiving_goes_on(receiver, timers, caplog):
     sent = open_session(receiver)
     attach_worker(receiver)
     receiver._status("ready", module._RESTING)
+    outcomes = engaged(receiver)
     with caplog.at_level(logging.WARNING, logger=module.__name__):
         receiver.watch_briefly(VIDEO)
         answer(receiver, last_id(sent, "Browser.getVersion"), {"userAgent": HEADLESS})
@@ -784,6 +813,8 @@ def test_watch_failures_are_only_logged_and_receiving_goes_on(receiver, timers, 
         answer(receiver, last_id(sent, "Page.navigate"), {"frameId": "F", "errorText": "net::ERR_FAILED"})
     assert latest(sent, "Target.closeTarget")["params"] == {"targetId": WATCH_TARGET}
     assert receiver._watching is None and caplog.text.count("보지 못했습니다") == 2
+    assert outcomes == [(False, "녹화가 시작된 영상을 잠깐 보지 못했습니다: 시청 창을 만들지 못했습니다"),
+                        (False, "녹화가 시작된 영상을 잠깐 보지 못했습니다: 영상 페이지를 열지 못했습니다")]
     assert receiver.status == ("ready", module._RESTING)
     live: list[LiveNotification] = []
     receiver.notification_received.connect(live.append)

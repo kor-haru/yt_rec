@@ -128,6 +128,9 @@ class NotificationSession(QObject):
             watch = getattr(self.receiver, "watch_briefly", None)
             if handed is not None and watch is not None:
                 handed.connect(watch, Qt.ConnectionType.QueuedConnection)
+            engagement = getattr(self.receiver, "engagement", None)
+            if engagement is not None:
+                engagement.connect(self._engagement)
             self.receiver.start()
         except Exception as exc:
             # No fallback discovery: startup failure must remain visible and safe.
@@ -172,6 +175,16 @@ class NotificationSession(QObject):
         self.source.publish(ev.LogAppended(LogEntry(
             at=datetime.now(timezone.utc), severity=Severity.ERROR if code == "error" else Severity.INFO,
             source="notification-receiver", message=f"{code}: {status.detail}",
+        )))
+
+    def _engagement(self, ok: bool, message: str) -> None:
+        # 알림 닫기·열어봄 기록·짧은 시청의 결과 (#118). 푸시가 다시 오는지 운영 중에
+        # 따져 볼 근거라 앱 로그에 남긴다. 수신 상태 표시는 바꾸지 않는다.
+        if self._stopped:
+            return
+        self.source.publish(ev.LogAppended(LogEntry(
+            at=datetime.now(timezone.utc), severity=Severity.INFO if ok else Severity.WARNING,
+            source="notification-engagement", message=redact(message),
         )))
 
     def handle_command(self, command: object) -> None:

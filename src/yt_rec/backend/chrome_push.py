@@ -324,6 +324,9 @@ class ChromePushReceiver(QObject):
     notification_arrived = Signal(object)  # Native display text, before video identification.
     status_changed = Signal(str, str)
     browser_changed = Signal(bool)  # page usable, not authenticated or push-ready
+    # 알림 닫기·열어봄 기록·짧은 시청의 결과 (#118). (성공 여부, 고정 문구). 푸시가 다시
+    # 오는지 운영 중에 따져 볼 근거라 앱이 앱 로그에 남긴다. 수신 상태와는 무관하다.
+    engagement = Signal(bool, str)
 
     def __init__(
         self, parent: QObject | None = None, *,
@@ -750,7 +753,7 @@ class ChromePushReceiver(QObject):
             reason = value.get("reason")
             if not (isinstance(reason, str) and reason.isascii() and reason.isalpha() and len(reason) <= 64):
                 reason = "unknown"
-            _LOG.warning("표시한 알림을 닫지 못했습니다: %s", reason)
+            self._engaged(False, f"표시한 알림을 닫지 못했습니다: {reason}")
         else:
             # 후킹은 우리가 넣은 것이다. 모르는 형태가 오면 후킹이 갈렸다는 뜻이다.
             self._status("error", "식별할 수 없는 알림을 무시했습니다")
@@ -815,6 +818,11 @@ class ChromePushReceiver(QObject):
     # 알림이나 녹화가 생겼을 때만 돈다 — 주기 조회가 아니다. 무엇이 실패해도 로그만
     # 남기고, 수신 상태와 녹화는 이 결과를 기다리지 않는다.
 
+    def _engaged(self, ok: bool, message: str) -> None:
+        """결과 한 건을 모듈 로거와 :attr:`engagement` 로 함께 남긴다. 문구는 고정문이다."""
+        (_LOG.info if ok else _LOG.warning)("%s", message)
+        self.engagement.emit(ok, message)
+
     def _record_opened(self, data: object) -> None:
         """받은 알림을 '열어봄'으로 기록한다.
 
@@ -830,21 +838,21 @@ class ChromePushReceiver(QObject):
         try:
             expression = record_interactions(request)
         except ValueError:
-            _LOG.warning("알림의 열어봄 기록 요청 형식을 알 수 없어 보내지 않았습니다")
+            self._engaged(False, "알림의 열어봄 기록 요청 형식을 알 수 없어 보내지 않았습니다")
             return
         cdp, session = self._cdp, self._page_session
         if cdp is None or not session:
-            _LOG.warning("수신 브라우저에 YouTube 탭이 없어 알림 열어봄을 기록하지 못했습니다")
+            self._engaged(False, "수신 브라우저에 YouTube 탭이 없어 알림 열어봄을 기록하지 못했습니다")
             return
 
         def finished(reply: dict) -> None:
             value = CdpProtocol.value(reply)
             if isinstance(value, dict) and value.get("ok") is True:
-                _LOG.info("알림 열어봄을 기록했습니다")
+                self._engaged(True, "알림 열어봄을 기록했습니다")
                 return
             error = value.get("error") if isinstance(value, dict) else None
-            _LOG.warning("알림 열어봄을 기록하지 못했습니다: %s",
-                         error if error in ("auth", "format", "network") else "unknown")
+            kind = error if error in ("auth", "format", "network") else "unknown"
+            self._engaged(False, f"알림 열어봄을 기록하지 못했습니다: {kind}")
 
         cdp.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True, "returnByValue": True},
                  session=session, on_reply=finished)
@@ -946,9 +954,9 @@ class ChromePushReceiver(QObject):
         if target and self._cdp is not None:
             self._cdp.call("Target.closeTarget", {"targetId": target})
         if problem:
-            _LOG.warning("녹화가 시작된 영상을 잠깐 보지 못했습니다: %s", problem)
+            self._engaged(False, f"녹화가 시작된 영상을 잠깐 보지 못했습니다: {problem}")
         else:
-            _LOG.info("녹화가 시작된 영상을 로그인한 채로 %d초 보고 창을 닫았습니다", played)
+            self._engaged(True, f"녹화가 시작된 영상을 로그인한 채로 {played}초 보고 창을 닫았습니다")
 
     # -- 점검 -----------------------------------------------------------------
 
