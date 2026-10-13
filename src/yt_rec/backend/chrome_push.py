@@ -287,6 +287,10 @@ class ChromePushReceiver(QObject):
         self._port = 0
         self._attempts = 0
         self._restarts = 0
+        # 브라우저를 접을 때마다 올린다. 그 전에 걸어 둔 연결 재시도·포트 응답·재시작
+        # 예약은 이 값이 달라졌으면 낡은 것이므로 아무것도 하지 않는다 (#117).
+        self._generation = 0
+        self._restart_pending = False
         self._rechecks = 0
         self._awaiting_pong = False
         self._worker_sessions: dict[str, str] = {}  # targetId -> sessionId
@@ -317,10 +321,16 @@ class ChromePushReceiver(QObject):
         if self._closed or self._started:
             return
         self._started = True
-        self._bring_up()
+        self._bring_up(adopt=True)
 
-    def _bring_up(self, visible_url: str = "") -> None:
-        """수신기를 세운다. ``visible_url`` 이 있으면 그 주소를 보이는 창으로 연다."""
+    def _bring_up(self, visible_url: str = "", *, adopt: bool = False) -> None:
+        """수신기를 세운다. ``visible_url`` 이 있으면 그 주소를 보이는 창으로 연다.
+
+        ``adopt`` 일 때만 포트 파일이 가리키는 브라우저에 먼저 붙어 본다. 앱이 새로
+        뜰 때 남아 있던 고아 브라우저를 되찾는 경로다. 우리가 띄운 브라우저가 끝난
+        뒤의 재시작에서는 쓰지 않는다 — 그 포트는 아직 종료 중인 이전 Chrome 이라
+        잠깐 붙었다가 또 끊긴다 (#117).
+        """
         if self._closed:
             return
         executable = self._find_executable()
@@ -334,8 +344,8 @@ class ChromePushReceiver(QObject):
         except (OSError, RuntimeError):
             self._status("error", "수신 브라우저 프로필 폴더를 만들지 못했습니다. 로그를 확인하세요.")
             return
-        port = _read_port(profile / PORT_FILE)
-        if port and not visible_url:
+        port = _read_port(profile / PORT_FILE) if adopt and not visible_url else 0
+        if port:
             # 앱만 다시 뜬 경우다. 이미 로그인된 브라우저를 두 번 띄우지 않는다.
             # 그 브라우저가 어느 모드인지는 알 수 없고, 알 필요도 없다.
             self._status("connecting", "이미 실행 중인 수신 브라우저에 연결하는 중입니다.")
@@ -376,22 +386,27 @@ class ChromePushReceiver(QObject):
         self._owns_process = True
         self._visible = bool(visible_url)
         self._attempts = 0
+        # 실행에 실패하면 ``start`` 안에서 곧바로 재시작이 예약되며 세대가 바뀐다.
+        # 그 전에 세대를 잡아 둬야 이 연결 재시도가 낡은 것으로 걸러진다.
+        generation = self._generation
         process.start()
-        QTimer.singleShot(_CONNECT_RETRY_MS, self._retry_resolve)
+        QTimer.singleShot(_CONNECT_RETRY_MS, lambda: self._retry_resolve(generation))
 
-    @Slot()
-    def _retry_resolve(self) -> None:
-        if self._closed or self._socket is not None:
+    def _retry_resolve(self, generation: int) -> None:
+        # 그사이 브라우저를 접었으면 이 재시도는 이전 Chrome 의 것이다. 이어 가면
+        # 이전 포트에 붙거나, 횟수를 다 썼다며 새로 띄운 Chrome 까지 접는다 (#117).
+        if self._closed or self._socket is not None or generation != self._generation:
             return
         self._attempts += 1
         if self._attempts > _CONNECT_ATTEMPTS:
-            self._status("chrome_down", "수신 브라우저(Chrome)에 연결하지 못했습니다. 잠시 뒤 다시 시도합니다.")
-            self._schedule_restart()
+            self._schedule_restart("chrome_down", "수신 브라우저(Chrome)에 연결하지 못했습니다. 잠시 뒤 다시 시도합니다.")
             return
-        self._resolve(on_failure=lambda: QTimer.singleShot(_CONNECT_RETRY_MS, self._retry_resolve))
+        self._resolve(on_failure=lambda: QTimer.singleShot(
+            _CONNECT_RETRY_MS, lambda: self._retry_resolve(generation)))
 
     def _resolve(self, *, on_failure: Callable[[], None]) -> None:
         """디버깅 포트에서 브라우저 세션 WebSocket 주소를 받아 온다."""
+        generation = self._generation
         request = QNetworkRequest(QUrl(f"http://127.0.0.1:{self._port}/json/version"))
         reply = self._network.get(request)
 
@@ -399,7 +414,7 @@ class ChromePushReceiver(QObject):
             body = bytes(reply.readAll())
             failed = reply.error() != QNetworkReply.NetworkError.NoError
             reply.deleteLater()
-            if self._closed or self._socket is not None:
+            if self._closed or self._socket is not None or generation != self._generation:
                 return
             address = ""
             if not failed:
@@ -437,10 +452,7 @@ class ChromePushReceiver(QObject):
 
     @Slot()
     def _socket_disconnected(self) -> None:
-        if self._closed:
-            return
-        self._status("chrome_down", "수신 브라우저와의 연결이 끊어졌습니다. 다시 연결을 시도합니다.")
-        self._schedule_restart()
+        self._schedule_restart("chrome_down", "수신 브라우저와의 연결이 끊어졌습니다. 다시 연결을 시도합니다.")
 
     # -- CDP 세션 -------------------------------------------------------------
 
@@ -727,7 +739,10 @@ class ChromePushReceiver(QObject):
 
     def _check(self) -> None:
         if self._closed or self._cdp is None:
-            if not self._closed and self._started:
+            # 붙는 중이거나 재시작을 기다리는 중이면 그쪽이 붙은 뒤 확인까지 한다. 여기서
+            # 또 세우면 같은 프로필에 Chrome 이 둘 뜬다 (#117). 아무것도 진행 중이 아닐
+            # 때만 — 예컨대 Chrome 을 못 찾았던 뒤 — 다시 세운다.
+            if not self._closed and self._started and not self._restart_pending and not self._port:
                 self._bring_up()
             return
         if not self._page_session:
@@ -796,16 +811,13 @@ class ChromePushReceiver(QObject):
         if self._closed:
             return
         if self._owns_process and self._process is not None and self._process.state() == QProcess.ProcessState.NotRunning:
-            self._status("chrome_down", "수신 브라우저(Chrome)가 종료되었습니다. 다시 실행을 시도합니다.")
-            self._schedule_restart()
+            self._schedule_restart("chrome_down", "수신 브라우저(Chrome)가 종료되었습니다. 다시 실행을 시도합니다.")
             return
         if self._cdp is None or self._socket is None or not self._socket.isValid():
-            self._status("chrome_down", "수신 브라우저와의 연결이 끊어졌습니다. 다시 연결을 시도합니다.")
-            self._schedule_restart()
+            self._schedule_restart("chrome_down", "수신 브라우저와의 연결이 끊어졌습니다. 다시 연결을 시도합니다.")
             return
         if self._awaiting_pong:
-            self._status("error", "수신 브라우저가 응답하지 않습니다. 연결을 다시 만듭니다.")
-            self._schedule_restart()
+            self._schedule_restart("error", "수신 브라우저가 응답하지 않습니다. 연결을 다시 만듭니다.")
             return
         self._awaiting_pong = True
         self._cdp.call("Browser.getVersion", on_reply=self._pong)
@@ -813,20 +825,45 @@ class ChromePushReceiver(QObject):
     def _pong(self, _message: dict) -> None:
         self._awaiting_pong = False
 
-    def _schedule_restart(self) -> None:
-        if self._closed:
+    def _schedule_restart(self, code: str, detail: str) -> None:
+        """브라우저를 접고 재시작을 한 번만 예약한다.
+
+        창을 닫으면 소켓 끊김과 프로세스 종료가 따로 들어오고, 하트비트나 연결
+        재시도도 같은 사건을 뒤늦게 다시 본다. 이미 예약되어 있으면 알리지도 다시
+        예약하지도 않는다 — 겹친 재시작이 같은 프로필에 Chrome 을 둘 띄워 끊김이
+        되풀이됐다 (#117).
+
+        우리가 띄운 브라우저였다면 포트 파일을 버리고 다음에는 새로 띄운다. 이어받은
+        브라우저는 우리가 끝낼 수 없으니 예전처럼 그 포트에 다시 붙어 본다.
+        """
+        if self._closed or self._restart_pending:
             return
+        self._status(code, detail)
+        owned = self._owns_process
+        # 접는 동안 이전 프로세스가 끝날 때까지 기다린다. 프로필 잠금이 풀린 뒤에만
+        # 다음 Chrome 이 뜬다.
         self._teardown()
+        if owned:
+            self._forget_port()
         delay = _RESTART_DELAY_MS[min(self._restarts, len(_RESTART_DELAY_MS) - 1)]
         self._restarts += 1
-        QTimer.singleShot(delay, self._restart)
+        self._restart_pending = True
+        generation = self._generation
+        QTimer.singleShot(delay, lambda: self._restart(generation, adopt=not owned))
 
-    @Slot()
-    def _restart(self) -> None:
-        if not self._closed and self._started:
-            self._bring_up()
+    def _restart(self, generation: int, *, adopt: bool) -> None:
+        # 그사이 창을 열어 새로 세웠으면 이 예약은 낡은 것이다. 그대로 돌면 보이는 창이
+        # 떠 있는 동안 헤드리스를 또 세운다 (#117).
+        if self._closed or generation != self._generation:
+            return
+        self._restart_pending = False
+        if self._started:
+            self._bring_up(adopt=adopt)
 
     def _teardown(self) -> None:
+        self._generation += 1
+        self._restart_pending = False
+        self._port = 0
         self.browser_changed.emit(False)
         self._heartbeat.stop()
         self._visible = False  # 다음 기동은 언제나 헤드리스다. 보이는 모드는 눌어붙지 않는다.
@@ -849,20 +886,17 @@ class ChromePushReceiver(QObject):
                 process.terminate()
                 if not process.waitForFinished(2000):
                     process.kill()
+                    # kill 도 비동기다. 끝나기 전에 다음 Chrome 을 띄우면 그 Chrome 은
+                    # 프로필을 쥔 이전 프로세스에 명령줄만 넘기고 바로 끝난다.
+                    process.waitForFinished(2000)
             process.deleteLater()
         self._owns_process = False
 
     def _process_finished(self, _code: int, _status: object) -> None:
-        if self._closed:
-            return
-        self._status("chrome_down", "수신 브라우저(Chrome)가 종료되었습니다. 다시 실행을 시도합니다.")
-        self._schedule_restart()
+        self._schedule_restart("chrome_down", "수신 브라우저(Chrome)가 종료되었습니다. 다시 실행을 시도합니다.")
 
     def _process_error(self, _error: object) -> None:
-        if self._closed:
-            return
-        self._status("chrome_down", "수신 브라우저(Chrome)를 실행하지 못했습니다. 다시 실행을 시도합니다.")
-        self._schedule_restart()
+        self._schedule_restart("chrome_down", "수신 브라우저(Chrome)를 실행하지 못했습니다. 다시 실행을 시도합니다.")
 
     # -- 창 -------------------------------------------------------------------
 
@@ -887,7 +921,8 @@ class ChromePushReceiver(QObject):
         보인다. Chrome 은 같은 ``--user-data-dir`` 에 두 번째 프로세스를 붙이지
         않으므로, 돌고 있는 브라우저를 닫고 같은 프로필을 보이는 모드로 다시 띄운다
         — 프로필이 같아 로그인과 푸시 등록은 그대로 남는다. 사용자가 그 창을 닫으면
-        기존 재시작 경로가 돌면서 다시 헤드리스로 올라온다.
+        기존 재시작 경로가 돌면서 다시 헤드리스로 올라온다. 그 재시작은 닫힌 창의
+        포트에 다시 붙지 않고 새로 띄운다 (#117).
         """
         if self._closed:
             return

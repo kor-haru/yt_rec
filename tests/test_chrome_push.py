@@ -40,6 +40,9 @@ class FakeProcess(QObject):
         self.program = ""
         self.arguments: list[str] = []
         self.started = 0
+        self.exits_on_terminate = True
+        self.killed = 0
+        self.waits = 0
         FakeProcess.instances.append(self)
 
     def setProgram(self, program): self.program = program
@@ -47,8 +50,12 @@ class FakeProcess(QObject):
     def start(self): self.started += 1
     def state(self): return module.QProcess.ProcessState.Running
     def terminate(self): pass
-    def kill(self): pass
-    def waitForFinished(self, _ms): return True
+    def kill(self): self.killed += 1
+
+    def waitForFinished(self, _ms):
+        self.waits += 1
+        return self.exits_on_terminate or self.killed > 0
+
     def deleteLater(self): pass
 
 
@@ -244,18 +251,15 @@ def test_a_second_press_while_the_window_is_open_only_adds_a_tab(receiver):
     assert create["params"] == {"url": module.NOTIFICATION_SETTINGS_URL}
 
 
-def test_a_restart_after_a_visible_window_goes_back_to_headless(receiver, monkeypatch):
+def test_a_restart_after_a_visible_window_goes_back_to_headless(receiver, timers):
     """보이는 모드는 눌어붙지 않는다. 창을 닫으면 다시 백그라운드로 돌아간다."""
     receiver.start()
     open_session(receiver)
     receiver.open_browser()
     visible = FakeProcess.instances[-1]
     assert "--headless=new" not in visible.arguments
-    # 남은 포트 파일이 가리키는 브라우저는 방금 닫혔으므로 이어받기는 실패한다.
-    monkeypatch.setattr(module.ChromePushReceiver, "_resolve",
-                        lambda self, *, on_failure: on_failure())
     visible.finished.emit(0, None)  # 사용자가 창을 닫았다
-    receiver._restart()
+    timers.fire()
     assert len(FakeProcess.instances) == 3
     assert "--headless=new" in FakeProcess.instances[-1].arguments
 
@@ -612,13 +616,17 @@ def test_a_tab_that_never_attaches_asks_for_login_only_after_retrying(receiver, 
 # -- 살아 있는지 --------------------------------------------------------------
 
 
-def test_browser_exit_is_reported_and_a_restart_is_scheduled(receiver):
+def test_browser_exit_is_reported_and_a_restart_is_scheduled(receiver, timers):
     receiver.start()
     seen: list[str] = []
     receiver.status_changed.connect(lambda code, _detail: seen.append(code))
     receiver._process_finished(1, None)
     assert seen == ["chrome_down"]
     assert receiver._restarts == 1
+    # 같은 종료가 다른 신호로 또 들어와도 재시작은 이미 예약되어 있다 (#117).
+    receiver._process_error(None)
+    assert seen == ["chrome_down"] and receiver._restarts == 1
+    timers.fire()  # 다시 띄운 Chrome 이 또 죽으면 그때는 새로 센다
     receiver._process_error(None)
     assert seen[-1] == "chrome_down" and receiver._restarts == 2
 
@@ -660,6 +668,119 @@ def test_close_is_final_and_idempotent(receiver):
     receiver.close()
     receiver.start()
     assert receiver.status[0] == "stopped" and live == []
+
+
+# -- 재시작은 한 번, 새 브라우저로 (#117) -------------------------------------
+
+
+@pytest.fixture
+def resolved(monkeypatch) -> list[int]:
+    """디버깅 포트에 붙으러 간 기록. 실제 포트에는 아무것도 묻지 않는다."""
+    ports: list[int] = []
+    monkeypatch.setattr(module.ChromePushReceiver, "_resolve",
+                        lambda self, *, on_failure: ports.append(self._port))
+    return ports
+
+
+def test_closing_the_visible_window_restarts_once_on_a_fresh_headless_browser(receiver, timers, resolved, tmp_path):
+    """창을 닫으면 끊김이 한 번만 보이고, 닫힌 창의 포트가 아니라 새 Chrome 에 붙는다.
+
+    실측 회귀: 소켓 끊김·프로세스 종료·하트비트가 저마다 재시작을 걸었고, 재시작은
+    포트 파일이 가리키는 — 아직 종료 중인 — 이전 Chrome 에 먼저 붙었다. 40~50초
+    동안 끊김과 재시작이 4~5번 되풀이됐다.
+    """
+    receiver.start()
+    open_session(receiver)
+    receiver.open_browser()
+    visible = FakeProcess.instances[-1]
+    port_file = tmp_path / "profile" / module.PORT_FILE
+    old_port = module._read_port(port_file)
+    assert old_port and f"--remote-debugging-port={old_port}" in visible.arguments
+    open_session(receiver)  # 보이는 브라우저에 붙었다
+    seen: list[str] = []
+    receiver.status_changed.connect(lambda code, _detail: seen.append(code))
+
+    # 사용자가 창을 닫았다. 같은 사건이 여러 길로 들어온다.
+    receiver._socket.disconnected.emit()
+    receiver._process_finished(0, None)
+    receiver._pulse()
+    assert seen == ["chrome_down"]
+    assert receiver._restarts == 1
+    # 이전 Chrome 이 끝나기를 기다렸고, 그 포트는 버렸다. 새 Chrome 은 아직 없다.
+    assert visible.waits == 1
+    assert not port_file.exists()
+    assert len(FakeProcess.instances) == 2
+
+    timers.fire()  # 앞서 걸린 연결 재시도들과 재시작 예약이 함께 돈다
+    assert len(FakeProcess.instances) == 3
+    assert "--headless=new" in FakeProcess.instances[-1].arguments
+    assert resolved == []  # 낡은 연결 재시도가 이전 포트로 가지 않았다
+    assert seen == ["chrome_down", "connecting"]
+    assert receiver.status == ("connecting", "수신 브라우저(Chrome)를 시작하는 중입니다.")
+
+    timers.fire()  # 이제 남은 것은 새 Chrome 의 연결 재시도뿐이다
+    assert len(FakeProcess.instances) == 3
+    assert resolved == [module._read_port(port_file)]
+    assert f"--remote-debugging-port={resolved[0]}" in FakeProcess.instances[-1].arguments
+
+
+def test_a_browser_that_ignores_terminate_is_reaped_before_the_next_one(receiver):
+    """kill 도 비동기다. 이전 프로세스가 프로필을 쥔 채로 다음 Chrome 이 뜨면 안 된다."""
+    receiver.start()
+    process = FakeProcess.instances[0]
+    process.exits_on_terminate = False
+    receiver._socket_disconnected()
+    assert process.killed == 1
+    assert process.waits == 2  # terminate 뒤 한 번, kill 뒤 한 번
+
+
+def test_reopening_the_window_drops_the_restart_that_was_waiting(receiver, timers, resolved):
+    """실측 회귀: 끊긴 뒤 창을 다시 열면, 앞서 걸린 재시작이 몇 초 뒤 돌면서 창이 떠
+    있는 동안 '이미 실행 중인 수신 브라우저에 연결' 로 바뀌고 그 포트에 또 붙었다.
+    """
+    receiver.start()
+    open_session(receiver)
+    receiver._socket_disconnected()
+    receiver.open_browser()
+    assert "--headless=new" not in FakeProcess.instances[-1].arguments
+    open_session(receiver)
+    timers.fire()
+    assert len(FakeProcess.instances) == 2
+    assert resolved == []
+    assert receiver.status[0] == "checking"
+
+
+def test_a_check_while_a_restart_waits_does_not_launch_a_second_browser(receiver, timers, resolved):
+    """같은 프로필에 두 번째 Chrome 은 붙지 못하고 바로 끝나 또 끊김이 된다."""
+    receiver.start()
+    receiver._process_finished(1, None)
+    receiver.inspect_registration()
+    assert len(FakeProcess.instances) == 1
+    timers.fire()
+    assert len(FakeProcess.instances) == 2
+    receiver.inspect_registration()  # 새 Chrome 에 붙는 중이다
+    assert len(FakeProcess.instances) == 2
+    assert resolved == []
+
+
+def test_app_start_still_adopts_an_orphan_browser(receiver, timers, resolved, tmp_path):
+    """이어받기는 앱이 새로 뜰 때 남아 있던 고아 브라우저를 되찾는 경로로 남는다.
+
+    우리가 띄우지 않은 브라우저는 끝날 때까지 기다릴 수도 없으므로, 그 연결이
+    끊기면 예전처럼 같은 포트에 다시 붙어 본다.
+    """
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / module.PORT_FILE).write_text("45678", encoding="ascii")
+    receiver.start()
+    assert resolved == [45678]
+    assert FakeProcess.instances == []
+    assert receiver.status == ("connecting", "이미 실행 중인 수신 브라우저에 연결하는 중입니다.")
+    open_session(receiver)  # 고아 브라우저에 붙었다
+    receiver._socket_disconnected()
+    timers.fire()
+    assert resolved == [45678, 45678]
+    assert FakeProcess.instances == []
 
 
 # -- 설정 ---------------------------------------------------------------------
