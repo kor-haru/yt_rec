@@ -54,6 +54,7 @@ from .merge import (
 from .metadata import LiveMetadata, fetch_metadata
 from .naming import FORBIDDEN_CHAR_MAP, local_date_from_epoch, sanitize_filename_component
 from .options import (
+    OUTPUT_CODECS,
     QUALITY_PRESETS,
     RecordingOptions,
     default_settings_path,
@@ -63,6 +64,7 @@ from .options import (
 from .progress import ProgressSnapshot, StallDetector
 
 __all__ = [
+    "OUTPUT_CODECS",
     "QUALITY_PRESETS",
     "BinaryNotFoundError",
     "DenialCategory",

@@ -67,6 +67,7 @@ from .merge import (
 from .metadata import LiveMetadata, fetch_metadata
 from .naming import reserve_unique_path
 from .options import RecordingOptions
+from .transcode import apply_output_codec, commit_encoded
 from .ownership import RecordingOwnedError, VideoLease, validate_video_id
 from .progress import (
     PROGRESS_TEMPLATE,
@@ -874,6 +875,14 @@ class RecordingEngine:
             # 중간 파일은 정리하지 않았으므로 손으로 살릴 수 있다.
             return fail(message=f"마무리 중 오류: {exc}")
 
+    def _verify(self, path: Path) -> MediaVerification:
+        return verify_media(
+            path,
+            self.toolchain,
+            deep=self.options.verify_deep,
+            timeout=self.options.verify_timeout_seconds,
+        )
+
     def _finalize_inner(
         self,
         *,
@@ -980,14 +989,46 @@ class RecordingEngine:
                         message=f"병합 실패: {exc}",
                     )
 
+        # av1 은 병합 뒤에만 시도한다. 검증을 통과하기 전에는 받은 파일을 지우지 않는다.
+        # 인코딩은 길어서, 끝나기 전에 상태를 바꿔 두지 않으면 다운로드 중으로 보인다.
+        if self.options.output_codec == "av1":
+            self._emit(StatusChanged(video_id=video_id, status=RecordingStatus.MERGING))
+            self._emit(
+                LogLine(
+                    video_id=video_id,
+                    text="[yt-rec] AV1 인코딩을 시작합니다 (av1_qsv slow GQ 21)",
+                )
+            )
+        outcome = apply_output_codec(merged, self.toolchain, self.options.output_codec)
+        if outcome.note:
+            self._emit(LogLine(video_id=video_id, text=f"[yt-rec] {outcome.note}"))
+
         # 검증
         self._emit(StatusChanged(video_id=video_id, status=RecordingStatus.VERIFYING))
-        verification = verify_media(
-            merged,
-            self.toolchain,
-            deep=self.options.verify_deep,
-            timeout=self.options.verify_timeout_seconds,
-        )
+        verification = self._verify(outcome.path)
+        if outcome.replaces_source:
+            if verification.playable and verification.complete:
+                try:
+                    merged = commit_encoded(merged, outcome, accepted=True)
+                except OSError as exc:
+                    self._emit(
+                        LogLine(
+                            video_id=video_id,
+                            text=f"[yt-rec] AV1 결과를 올리지 못해 받은 파일을 유지한다: {exc}",
+                        )
+                    )
+                    verification = self._verify(merged)
+                else:
+                    verification = replace(verification, path=merged)
+            else:
+                self._emit(
+                    LogLine(
+                        video_id=video_id,
+                        text="[yt-rec] AV1 검증을 통과하지 못해 받은 파일을 유지한다",
+                    )
+                )
+                merged = commit_encoded(merged, outcome, accepted=False)
+                verification = self._verify(merged)
         if verification.timed_out:
             # 검증이 물렸다. 다운로드 단계의 정지 감지기는 여기까지 오지 않는다.
             self._emit(

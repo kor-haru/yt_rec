@@ -325,11 +325,18 @@ def test_recording_limit_and_new_options_only_affect_next_recording(tmp_path):
     try:
         assert recorder.start("one") is True
         assert recorder.start("two") is False
-        recorder.update_options({"output_dir": tmp_path / "next", "max_height": 720, "max_recordings": 2})
+        recorder.update_options({
+            "output_dir": tmp_path / "next",
+            "max_height": 720,
+            "max_recordings": 2,
+            "output_codec": "av1",
+        })
         assert recorder.start("two") is True
         assert engines[0].options == old
+        assert engines[0].options.output_codec == "copy"
         assert engines[1].options.output_dir == tmp_path / "next"
         assert engines[1].options.max_height == 720
+        assert engines[1].options.output_codec == "av1"
     finally:
         recorder.stop_all()
         recorder.join_all(5)
@@ -349,3 +356,18 @@ def test_requested_poll_interval_is_used_and_quota_floor_preserved(tmp_path):
     assert watch.next_check_at == now[0] + timedelta(seconds=300)
     controller.handle_command(cmd.UpdateSettings({"poll_interval_seconds": 30}))
     assert controller.poll_interval >= 30
+
+
+def test_코덱_선택은_다음_저장에_실린다(tmp_path, state):
+    commands = []
+    state.command_requested.connect(commands.append)
+    dialog = open_dialog(state, tmp_path)
+    try:
+        assert dialog.codec_combo.currentData() == "copy"
+        note = dialog.findChild(QLabel, "outputCodecInfo")
+        assert "받은 파일" in note.text()
+        dialog.codec_combo.setCurrentIndex(dialog.codec_combo.findData("av1"))
+        dialog._save()
+        assert commands[-1].values["output_codec"] == "av1"
+    finally:
+        dialog.close()

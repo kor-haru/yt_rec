@@ -28,6 +28,7 @@ from ..recording.naming import (
     render_filename,
 )
 from ..recording.options import (
+    OUTPUT_CODECS,
     QUALITY_PRESETS,
     RecordingOptions,
     output_free_bytes,
@@ -93,6 +94,20 @@ class SettingsDialog(QDialog):
         quality_note = QLabel("선택값은 화질 상한입니다. 방송 화질이 더 낮으면 원래 화질로 녹화합니다.", self)
         quality_note.setWordWrap(True)
         form.addRow(quality_note)
+        self.codec_combo = QComboBox(self)
+        self.codec_combo.setObjectName("outputCodec")
+        for value, label in OUTPUT_CODECS.items():
+            self.codec_combo.addItem(label, value)
+        form.addRow("코덱", self.codec_combo)
+        codec_note = QLabel(
+            "AV1은 다운로드가 끝난 뒤 Intel GPU로 다시 만듭니다. "
+            "해상도·프레임·음성은 유지하고, 결과가 더 크거나 실패하면 받은 파일을 둡니다. "
+            "다른 변환이 GPU를 쓰는 중이면 인코딩은 실패하고 받은 파일이 남습니다.",
+            self,
+        )
+        codec_note.setObjectName("outputCodecInfo")
+        codec_note.setWordWrap(True)
+        form.addRow(codec_note)
         self.max_recordings_spin = QSpinBox(self)
         self.max_recordings_spin.setRange(1, 16)
         self.max_recordings_spin.setSuffix("개")
@@ -118,7 +133,10 @@ class SettingsDialog(QDialog):
         self.retention_spin.setRange(1, 365)
         self.retention_spin.setSuffix("일")
         form.addRow("로그 보관 기간 (1~365일)", self.retention_spin)
-        self.recording_note = QLabel("저장 위치와 화질 변경은 다음 녹화부터 적용됩니다. 진행 중인 녹화는 기존 설정으로 계속됩니다.", self)
+        self.recording_note = QLabel(
+            "저장 위치·화질·코덱 변경은 다음 녹화부터 적용됩니다. 진행 중인 녹화는 기존 설정으로 계속됩니다.",
+            self,
+        )
         self.recording_note.setWordWrap(True)
         layout.addWidget(self.recording_note)
         self.error_label = QLabel(self)
@@ -159,6 +177,11 @@ class SettingsDialog(QDialog):
             self.quality_combo.addItem(f"{options.max_height}p", options.max_height)
             index = self.quality_combo.count() - 1
         self.quality_combo.setCurrentIndex(index)
+        codec_index = self.codec_combo.findData(options.output_codec)
+        if codec_index < 0:
+            self.codec_combo.addItem(options.output_codec, options.output_codec)
+            codec_index = self.codec_combo.count() - 1
+        self.codec_combo.setCurrentIndex(codec_index)
         self.max_recordings_spin.setValue(options.max_recordings)
         self.autostart_check.setChecked(options.autostart)
         self.start_hidden_check.setChecked(options.start_hidden)
@@ -245,6 +268,7 @@ class SettingsDialog(QDialog):
             output_dir=self.output_edit.text(),
             filename_template=self.template_edit.text().strip(),
             max_height=self.quality_combo.currentData(),
+            output_codec=self.codec_combo.currentData(),
             max_recordings=self.max_recordings_spin.value(),
             autostart=self.autostart_check.isChecked(),
             start_hidden=self.start_hidden_check.isChecked(),
