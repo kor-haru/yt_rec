@@ -18,6 +18,7 @@ from .naming import DEFAULT_FILENAME_TEMPLATE, migrate_filename_template
 
 __all__ = [
     "NOTIFICATION_RECEIVERS",
+    "OUTPUT_CODECS",
     "QUALITY_PRESETS",
     "RecordingOptions",
     "default_settings_path",
@@ -35,6 +36,12 @@ __all__ = [
 NOTIFICATION_RECEIVERS: dict[str, str] = {
     "chrome": "Chrome (전용 프로필) — 권장",
     "qtwebengine": "내장 브라우저 (현재 푸시 등록 불가)",
+}
+
+#: 병합 뒤 코덱. 값 -> GUI 표시 문구. 기본은 받은 스트림 그대로다.
+OUTPUT_CODECS: dict[str, str] = {
+    "copy": "원본 유지 (기본)",
+    "av1": "AV1 (저장·스트리밍)",
 }
 
 #: GUI 콤보박스용 화질 상한 프리셋. ``None`` 은 상한 없음.
@@ -86,6 +93,9 @@ class RecordingOptions:
 
     #: 최종 컨테이너. ``mp4`` 또는 ``mkv``.
     container: str = "mp4"
+
+    #: 병합 뒤 코덱. ``copy`` 는 받은 스트림 그대로, ``av1`` 은 저장·스트리밍용 재인코딩.
+    output_codec: str = "copy"
 
     #: 전체(HTTP 요청) 재시도 상한. yt-dlp ``--retries``.
     total_retries: int = 10
@@ -171,6 +181,8 @@ class RecordingOptions:
             raise ValueError("notification_receiver: chrome 또는 qtwebengine 만 가능합니다")
         if self.container not in ("mp4", "mkv"):
             raise ValueError(f"지원하지 않는 컨테이너: {self.container}")
+        if self.output_codec not in OUTPUT_CODECS:
+            raise ValueError("output_codec: copy 또는 av1 만 가능합니다")
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.work_root is not None:
             object.__setattr__(self, "work_root", Path(self.work_root))

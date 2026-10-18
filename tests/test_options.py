@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,22 @@ def test_work_root_기본값은_출력_디렉터리_아래다(tmp_path):
 def test_지원하지_않는_컨테이너는_거부한다():
     with pytest.raises(ValueError):
         make(container="avi")
+
+
+def test_코덱_기본값은_받은_스트림이고_포맷_선택식은_그대로다():
+    assert make().output_codec == "copy"
+    assert make(output_codec="av1").format_selector() == make().format_selector()
+
+
+def test_모르는_코덱은_거부한다():
+    with pytest.raises(ValueError):
+        make(output_codec="hevc")
+
+
+def test_코덱_키가_없는_옛_설정은_원본_유지다(tmp_path):
+    path = tmp_path / "settings.json"
+    save_settings(make(output_dir=tmp_path), path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["output_codec"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert load_settings(path).output_codec == "copy"
