@@ -1,0 +1,475 @@
+diff --git a/convert_slot1_a.py b/convert_slot1_a.py
+index 8b5caa1..d77ab75 100644
+--- a/convert_slot1_a.py
++++ b/convert_slot1_a.py
+@@ -8,8 +8,8 @@
+ Space only: resolution and frame rate are kept, quality is locked (ICQ), and
+ the original stays unless the AV1 file is clearly smaller.
+
+-Resume-safe: done/skipped stay skipped. Default is to loop: after a pass over
+-every folder, wait and rescan so newly copied files are converted. Network
++Resume-safe: done/skipped stay skipped. Rescan the active folder after each
++processed file; after every folder, the default loop waits and scans again. Network
+ drops (daily ~05:00 router reboot) wait and retry the current file only.
+ """
+ from __future__ import annotations
+@@ -1480,6 +1480,7 @@ def convert_one(src: Path, item: dict, state: dict, tracks: list[dict] | None =
+         return
+     item["method"] = "audio" if audio_only else ("hevc" if APPLE_TV else "av1")
+     item["status"] = "done"
++    item["output_file"] = video_key(dest)
+     item["percent"] = 100
+     item["saved_bytes"] = src_size - dst_size
+     item["finished_at"] = now_stamp()
+@@ -1529,6 +1530,7 @@ def remux_one(src: Path, item: dict, state: dict) -> None:
+         res = publish(src, LOCAL_REMUX, src.with_suffix(".mp4"))
+         if not res:
+             item.update(status="done", method="remux", percent=100, dst_bytes=size, finished_at=now_stamp())
++            item["output_file"] = video_key(src.with_suffix(".mp4"))
+             item["saved_bytes"] = src_size - size
+             item.pop("error", None)
+             log(f"done remux {key} {src_size}->{size}")
+@@ -1559,6 +1561,21 @@ def skipped_next(err: str, policy: str | None) -> str:
+     return ""
+
+
++def file_settled(src: Path, should_yield: Callable[[], str]) -> bool:
++    """Defer newly discovered files whose size or modification time is still changing."""
++    try:
++        before = src.stat()
++        for _ in range(5):
++            if should_yield():
++                return False
++            time.sleep(1)
++        after = src.stat()
++        # shortcut: a paused copy can look stable; copy to a temporary extension then rename.
++        return not should_yield() and (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
++    except OSError:
++        return False
++
++
+ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+     if not map_drive():
+@@ -1578,6 +1595,31 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+             "items": [],
+         }
+     by_key = {it["file"]: it for it in state["items"]}
++    known = {video_key(p) for p in videos}
++    for it in state["items"]:
++        # Older progress recorded only the deleted source name, not the renamed result.
++        if (it.get("status") == "done" and not it.get("output_file")
++                and it["file"] not in known and it.get("method") in {"av1", "hevc", "audio", "remux"}):
++            src = ROOT / it["file"]
++            suffixes = {".mp4"} if it["method"] == "remux" else {
++                result_suffix(src.suffix, False), result_suffix(src.suffix, True),
++            }
++            matches = []
++            for suffix in suffixes:
++                dest = src.with_suffix(suffix)
++                try:
++                    if video_key(dest) in known and dest.stat().st_size == it.get("dst_bytes"):
++                        matches.append(video_key(dest))
++                except OSError:
++                    continue
++            if len(matches) == 1:
++                it["output_file"] = matches[0]
++        output = it.get("output_file")
++        if output and it["file"] not in known:
++            by_key.setdefault(output, it)
++    # Saved item order is the FIFO; new discoveries retain the scan's largest-first order.
++    queue_order = {it["file"]: index for index, it in enumerate(state["items"])}
++    videos.sort(key=lambda p: queue_order.get(by_key.get(video_key(p), {}).get("file"), len(queue_order)))
+     for p in videos:
+         key = video_key(p)
+         if key not in by_key:
+@@ -1593,14 +1635,42 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+         elif by_key[key].get("status") == "running":
+             by_key[key]["status"] = "pending"
+             by_key[key]["percent"] = 0
+-    known = {video_key(p) for p in videos}
+     for it in state["items"]:
+-        if it["file"] not in known and it.get("status") == "pending":
++        if (it["file"] not in known and it.get("output_file") not in known
++                and it.get("status") == "pending"):
+             it["status"] = "skipped"
+             it["error"] = "missing"
+     summarize(state)
+     save(state)
+
++    def refresh_queue() -> None:
++        if should_yield():
++            return
++        known.update(it["output_file"] for it in state["items"]
++                     if it.get("status") == "done" and it.get("output_file"))
++        added = 0
++        for p in list_videos():
++            key = video_key(p)
++            if key in known:
++                continue
++            try:
++                size = p.stat().st_size
++            except OSError:
++                continue
++            known.add(key)
++            if key not in by_key:
++                item = {"file": key, "status": "pending", "src_bytes": size, "percent": 0,
++                        "awaiting_stability": True}
++                state["items"].append(item)
++                by_key[key] = item
++            videos.append(p)
++            added += 1
++        if added:
++            state.pop("finished_at", None)
++            summarize(state)
++            save(state)
++            log(f"queue refreshed: added={added} total={len(state['items'])}")
++
+     skip_done = skip_av1 = skip_other = converted = 0
+     for src in videos:
+         reason = should_yield()
+@@ -1642,6 +1712,7 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+                 converted += 1
+                 summarize(state)
+                 save(state)
++                refresh_queue()
+                 continue
+             if again == "encode":
+                 log(f"retry skipped (streaming) {key}")
+@@ -1666,6 +1737,11 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+             elif not network_error(err):
+                 skip_other += 1
+                 continue
++        if item.get("awaiting_stability"):
++            if not file_settled(src, should_yield):
++                log(f"new file not settled; leaving pending for next pass: {key}")
++                continue
++            item.pop("awaiting_stability", None)
+         if APPLE_TV and apple_tv_ready(src):
+             item["status"] = "skipped"
+             item["error"] = "already plays on Apple TV"
+@@ -1676,6 +1752,7 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+             log(f"skip apple tv ready {key}")
+             summarize(state)
+             save(state)
++            refresh_queue()
+             continue
+         if APPLE_TV:
+             codec, tag = probe_video_codec_tag(src)
+@@ -1685,6 +1762,7 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+                 converted += 1
+                 summarize(state)
+                 save(state)
++                refresh_queue()
+                 continue
+         codec = probe_video_codec(src)
+         if not APPLE_TV and codec in CONVERTED_VIDEO:
+@@ -1693,6 +1771,7 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+             converted += 1
+             summarize(state)
+             save(state)
++            refresh_queue()
+             continue
+         tracks = probe_tracks(src)
+         extra = extra_tracks_skip(*track_counts(tracks))
+@@ -1707,12 +1786,14 @@ def run_pass(should_yield: Callable[[], str] = lambda: "") -> int:
+             error_log("SKIP", src.name, item["error"])
+             summarize(state)
+             save(state)
++            refresh_queue()
+             continue
+         log(f"new/pending {key}")
+         convert_one(src, item, state, tracks if extra else None)
+         converted += 1
+         summarize(state)
+         save(state)
++        refresh_queue()
+     log(
+         f"scan {len(videos)} in {ROOT}: convert={converted} "
+         f"skip_done={skip_done} skip_av1={skip_av1} skip_other={skip_other}"
+diff --git a/test_convert.py b/test_convert.py
+index 110cb66..38439df 100644
+--- a/test_convert.py
++++ b/test_convert.py
+@@ -4,8 +4,10 @@
+ """
+ import json
+ import tempfile
++from contextlib import contextmanager
+ from datetime import datetime
+ from pathlib import Path
++from unittest.mock import patch
+
+ import convert_slot1_a as c
+
+@@ -299,4 +301,247 @@ with tempfile.TemporaryDirectory() as tmp:
+     finally:
+         c.LOCK, c.SLOT6_LOCK, c.pid_alive, c.log = _lock, _slot, _alive, _log
+
++@contextmanager
++def queue_case(history=(), *, apple_tv=False):
++    """Exercise real scanning/queue logic without NAS access or media subprocesses."""
++    with tempfile.TemporaryDirectory() as tmp:
++        root = Path(tmp)
++        state = {"folder": str(root), "items": [dict(it) for it in history]}
++        saved = []
++        def capture(s):
++            if s is not state:
++                state.clear()
++                state.update(s)
++            saved.append(json.loads(json.dumps(s)))
++        with patch.multiple(
++            c, ROOT=root, LOCAL_DIR=root, MIN_SIZE=1, RECURSIVE=True,
++            APPLE_TV=apple_tv, CONVERTED_VIDEO=set(), map_drive=lambda: True,
++            load_state=lambda: state, save=capture,
++            log=lambda *_: None, error_log=lambda *_: None,
++            probe_video_codec=lambda _: "h264", probe_tracks=lambda _: [V(), A(1)],
++            apple_tv_ready=lambda _: False, probe_video_codec_tag=lambda _: ("h264", "avc1"),
++            file_settled=lambda *_: True,
++        ):
++            yield root, state, saved
++
++
++# New files append after the existing queue, including additions during its last item.
++# Renamed outputs are not new videos even when CONVERTED_VIDEO is empty in a custom launcher.
++with queue_case() as (root, state, saved):
++    (root / "first.mkv").write_bytes(b"x" * 20)
++    (root / "second.mkv").write_bytes(b"x" * 10)
++    order = []
++    def convert_for_queue(src, item, _state, tracks=None):
++        order.append(c.video_key(src))
++        if src.name == "first.mkv":
++            (root / "nested").mkdir()
++            (root / "nested" / "new.mkv").write_bytes(b"x" * 30)
++        if src.name == "new.mkv":
++            (root / "last.mkv").write_bytes(b"x" * 40)
++        dest = src.with_suffix(".mp4")
++        src.replace(dest)
++        item.update(status="done", method="av1", dst_bytes=dest.stat().st_size,
++                    output_file=c.video_key(dest))
++    with patch.object(c, "convert_one", convert_for_queue):
++        assert c.run_pass() == 0
++    assert order == ["first.mkv", "second.mkv", str(Path("nested") / "new.mkv"), "last.mkv"], order
++    assert len(state["items"]) == 4 and state["summary"]["done"] == 4, state
++    assert any(s["summary"]["pending"] == 2 and len(s["items"]) == 3 for s in saved)
++    with patch.object(c, "convert_one", side_effect=AssertionError("output requeued after restart")):
++        assert c.run_pass() == 0
++    assert len(state["items"]) == 4
++
++
++# Pre-patch history is migrated only when a missing source has an output of the recorded size.
++# Failed/skipped entries and distinct same-stem files remain independent.
++with queue_case([
++    {"file": "old.mkv", "status": "done", "method": "av1", "dst_bytes": 7},
++    {"file": "bad.mkv", "status": "failed", "error": "EBML header parsing failed"},
++    {"file": "skip.mp4", "status": "skipped", "error": "missing"},
++    {"file": "same.mkv", "status": "done", "method": "av1", "dst_bytes": 3},
++    {"file": "wrong.mkv", "status": "done", "method": "av1", "dst_bytes": 100},
++]) as (root, state, saved):
++    for name, size in (("old.mp4", 7), ("bad.mkv", 6), ("skip.mp4", 5),
++                       ("same.mkv", 4), ("same.mp4", 3), ("wrong.mp4", 2)):
++        (root / name).write_bytes(b"x" * size)
++    order = []
++    def mark_done(src, item, _state, tracks=None):
++        order.append(src.name)
++        item.update(status="done", method="av1", output_file=c.video_key(src))
++    with patch.object(c, "convert_one", mark_done):
++        c.run_pass()
++    assert order == ["same.mp4", "wrong.mp4"], order
++    assert state["items"][0]["output_file"] == "old.mp4"
++    assert state["items"][1]["error"] == "EBML header parsing failed"
++    assert state["items"][2]["error"] == "missing"
++
++
++# An aliased AV1 output is still eligible for the existing Apple TV retry policy.
++with queue_case([{"file": "old.mkv", "output_file": "old.mp4", "status": "done",
++                  "method": "av1", "dst_bytes": 3}], apple_tv=True) as (root, state, saved):
++    (root / "old.mp4").write_bytes(b"src")
++    retried = []
++    def apple_retry(src, item, _state, tracks=None):
++        retried.append(src.name)
++        item.update(status="done", method="hevc", output_file=c.video_key(src))
++    with patch.object(c, "convert_one", apple_retry):
++        c.run_pass()
++    assert retried == ["old.mp4"] and len(state["items"]) == 1, state
++
++
++# Legacy foreign-container encodes with extra tracks produced MKV, not MP4.
++with queue_case([{"file": "old.avi", "status": "done", "method": "av1", "dst_bytes": 3}]) as (root, state, saved):
++    assert c.result_suffix(".avi", True) == ".mkv"
++    (root / "old.mkv").write_bytes(b"src")
++    with patch.object(c, "convert_one", side_effect=AssertionError("legacy MKV output requeued")):
++        c.run_pass()
++    assert len(state["items"]) == 1 and state["items"][0]["output_file"] == "old.mkv"
++
++
++# Two possible same-sized legacy outputs are ambiguous: neither independent source is suppressed.
++with queue_case([{"file": "old.avi", "status": "done", "method": "av1", "dst_bytes": 3}]) as (root, state, saved):
++    (root / "old.mkv").write_bytes(b"src")
++    (root / "old.mp4").write_bytes(b"src")
++    with patch.object(c, "convert_one", side_effect=lambda src, item, state, tracks: item.update(status="done")) as encode:
++        c.run_pass()
++    assert encode.call_count == 2 and "output_file" not in state["items"][0]
++
++
++# Resume keeps persisted FIFO even when a newly appended file is larger than remaining inputs.
++with queue_case() as (root, state, saved):
++    (root / "first.mkv").write_bytes(b"x" * 100)
++    (root / "second.mkv").write_bytes(b"x" * 10)
++    order = []
++    def append_before_pause(src, item, _state, tracks=None):
++        order.append(src.name)
++        item["status"] = "done"
++        (root / "new.mkv").write_bytes(b"x" * 30)
++    with patch.object(c, "convert_one", append_before_pause):
++        c.run_pass(lambda: "pause after refresh" if len(state["items"]) == 3 else "")
++    assert order == ["first.mkv"]
++    assert [it["file"] for it in state["items"] if it["status"] == "pending"] == ["second.mkv", "new.mkv"]
++    # Also append a still larger file discovered for the first time on restart.
++    (root / "restart.mkv").write_bytes(b"x" * 200)
++    def resume_in_order(src, item, _state, tracks=None):
++        order.append(src.name)
++        item["status"] = "done"
++    with patch.object(c, "convert_one", resume_in_order):
++        c.run_pass()
++    assert order == ["first.mkv", "second.mkv", "new.mkv", "restart.mkv"], order
++
++
++# Stop/yield after a completed file must not launch (or scan for) the following file.
++with queue_case() as (root, state, saved):
++    (root / "first.mkv").write_bytes(b"xx")
++    (root / "second.mkv").write_bytes(b"x")
++    calls = []
++    def stop_after_one(src, item, _state, tracks=None):
++        calls.append(src.name)
++        item["status"] = "done"
++    with patch.object(c, "convert_one", stop_after_one), patch.object(c, "list_videos", wraps=c.list_videos) as scans:
++        c.run_pass(lambda: "stop requested" if calls else "")
++    assert calls == ["first.mkv"] and scans.call_count == 1
++    assert state["summary"]["pending"] == 1
++
++
++# A changing newly appended file remains pending across restart, not failed or forgotten.
++with queue_case() as (root, state, saved):
++    (root / "first.mkv").write_bytes(b"xx")
++    order = []
++    def add_copy(src, item, _state, tracks=None):
++        order.append(src.name)
++        item["status"] = "done"
++        (root / "copying.mkv").write_bytes(b"x")
++    with patch.object(c, "convert_one", add_copy), patch.object(c, "file_settled", return_value=False):
++        c.run_pass()
++    assert order == ["first.mkv"] and state["summary"]["pending"] == 1
++    copying = state["items"][1]
++    assert copying["awaiting_stability"] and copying["status"] == "pending"
++    assert "finished_at" not in state
++    with patch.object(c, "convert_one", side_effect=AssertionError("unstable copy resumed")), \
++            patch.object(c, "file_settled", return_value=False) as settled:
++        c.run_pass()
++    assert settled.call_count == 1 and copying["status"] == "pending"
++    def finish_copy(src, item, _state, tracks=None):
++        item["status"] = "done"
++    with patch.object(c, "convert_one", finish_copy):
++        c.run_pass()
++    assert copying["status"] == "done" and "awaiting_stability" not in copying
++
++
++# Failure is also a processed-file boundary; its history is retained and never loops in-pass.
++with queue_case() as (root, state, saved):
++    (root / "bad.mkv").write_bytes(b"xx")
++    order = []
++    def fail_then_add(src, item, _state, tracks=None):
++        order.append(src.name)
++        if src.name == "bad.mkv":
++            item.update(status="failed", error="EBML header parsing failed")
++            (root / "new.mkv").write_bytes(b"x")
++        else:
++            item["status"] = "done"
++    with patch.object(c, "convert_one", fail_then_add):
++        c.run_pass()
++    assert order == ["bad.mkv", "new.mkv"] and state["summary"]["failed"] == 1
++
++
++# Existing one-time skip retries must still reach the encoder.
++with queue_case([{"file": "old.mkv", "status": "skipped",
++                  "error": "AV1 larger than original by >=10% (src=1 dst=2)"}]) as (root, state, saved):
++    (root / "old.mkv").write_bytes(b"src")
++    with patch.object(c, "convert_one", side_effect=lambda src, item, state, tracks: item.update(status="done")) as encode:
++        c.run_pass()
++    assert encode.call_count == 1
++
++
++# Resume a previously interrupted retry against the actual output, not the deleted original.
++with queue_case([{"file": "old.mkv", "output_file": "old.mp4", "status": "running",
++                  "percent": 70, "method": "av1"}]) as (root, state, saved):
++    (root / "old.mp4").write_bytes(b"src")
++    with patch.object(c, "convert_one", side_effect=lambda src, item, state, tracks: item.update(status="done")) as encode:
++        c.run_pass()
++    assert encode.call_args.args[0].name == "old.mp4" and len(state["items"]) == 1
++
++
++# Encode/remux success persist the real published output name; only media I/O is mocked.
++with queue_case() as (root, state, saved):
++    def encoded(src, local, *_args, **_kwargs):
++        local.write_bytes(b"done")
++        return True, ""
++    with patch.multiple(
++        c, LOCAL_OUT=root / "work" / "out.mp4", LOCAL_REMUX=root / "work" / "remux.mp4",
++        free_bytes=lambda: 10**12, probe_media=lambda _: (60, 1000),
++        probe_video_shape=lambda _: (1920, 1080, "30/1", "30/1"), probe_starts=lambda _: (0, 0),
++        probe_duration=lambda _: 60, probe_frames=lambda _: 1800, run_ffmpeg=encoded,
++    ):
++        src = root / "encode.mkv"
++        src.write_bytes(b"x" * 10)
++        item = {"file": src.name, "status": "pending"}
++        state["items"].append(item)
++        c.convert_one(src, item, state)
++        assert item["status"] == "done" and item["output_file"] == "encode.mp4", item
++        assert not src.exists() and (root / "encode.mp4").read_bytes() == b"done"
++        src = root / "remux.mkv"
++        src.write_bytes(b"x" * 10)
++        item = {"file": src.name, "status": "skipped"}
++        state["items"].append(item)
++        c.remux_one(src, item, state)
++        assert item["status"] == "done" and item["output_file"] == "remux.mp4", item
++        assert not src.exists() and (root / "remux.mp4").read_bytes() == b"done"
++
++
++# Size/mtime stability checks are bounded and interruptible, never requiring NAS/media tools.
++with tempfile.TemporaryDirectory() as tmp:
++    src = Path(tmp) / "copy.mkv"
++    src.write_bytes(b"src")
++    with patch.object(c.time, "sleep"):
++        assert c.file_settled(src, lambda: "")
++    with patch.object(c.time, "sleep", side_effect=lambda _: src.write_bytes(src.read_bytes() + b"x")):
++        assert not c.file_settled(src, lambda: "")
++    with patch.object(c.time, "sleep") as sleep:
++        assert not c.file_settled(src, lambda: "stop requested")
++        sleep.assert_not_called()
++    assert not c.file_settled(src.with_name("missing.mkv"), lambda: "")
++
++
+ print("test_convert OK")
+diff --git a/AGENTS.md b/AGENTS.md
+index 5c706c3..1f81329 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -33,6 +33,18 @@ nas-convert D:\dir --once                               # foreground, one pass,
+ `--start` while a converter runs saves the new job; the running process switches to it **after its
+ current file**. No restart needed to reorder folders.
+
++After each processed file, rescan the active folder (including subfolders with `--recursive`) and
++append newly discovered videos after the existing queue, even after its last file. Completed,
++skipped and failed history stays intact; renamed results are recorded as `output_file` and are not
++new inputs on resume. Saved queue order survives restart; only the initial queue and newly
++discovered batches use largest-first order. Old completed entries infer a missing source's supported
++`.mp4`/`.mkv` result only when exactly one candidate matches `dst_bytes`. Ambiguous candidates stay
++independent inputs. Existing policy retries still apply to an identified result.
++
++Newly appended files must keep the same size and modification time for 5 seconds before processing.
++Changing files remain pending for the next pass; `--once` needs another run for those files. A paused
++copy can look stable, so copy under a temporary non-video extension and rename only when complete.
++
+ ## Job model
+
+ | File (in `<dir>`) | Role |
