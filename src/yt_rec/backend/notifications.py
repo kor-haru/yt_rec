@@ -186,7 +186,20 @@ class NotificationRecorder:
                     return NotificationResult(notification, "scheduled", "이미 예정 시각을 기다리는 중입니다")
             return self._attempt(notification)
 
-    def _attempt(self, notice: LiveNotification) -> NotificationResult:
+    def receive_pasted(self, notification: LiveNotification) -> NotificationResult:
+        """사용자가 클립보드에 올린 주소. 감시 채널이 아니어도 녹화한다."""
+        with self._dispatch_lock:
+            with self._lock:
+                video_id = notification.video_id
+                if video_id in self._active:
+                    return self._active[video_id]
+                if video_id in self._pending:
+                    return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
+                if video_id in self._schedules:
+                    return NotificationResult(notification, "scheduled", "이미 예정 시각을 기다리는 중입니다")
+            return self._attempt(notification, require_selection=False)
+
+    def _attempt(self, notice: LiveNotification, *, require_selection: bool = True) -> NotificationResult:
         video_id = notice.video_id
         base = NotificationResult(notice, "ignored")
         try:
@@ -200,7 +213,7 @@ class NotificationRecorder:
                 if self._recorder.is_recording(video_id):
                     self._forget_schedule_locked(video_id)
                     return self._publish(replace(base, reason="이미 녹화 중입니다"))
-                if not self._selection.load():
+                if require_selection and not self._selection.load():
                     self._forget_schedule_locked(video_id)
                     return self._publish(replace(base, reason="선택한 채널이 없습니다"))
                 api = self._youtube()
@@ -217,7 +230,9 @@ class NotificationRecorder:
                 if not self._can_start():
                     return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
                 if state.status == "upcoming":
-                    return self._schedule_upcoming_locked(notice, state, base)
+                    return self._schedule_upcoming_locked(
+                        notice, state, base, require_selection=require_selection,
+                    )
                 live = state.broadcast if state.status == "live" else None
                 if live is None or live.video_id != video_id:
                     self._forget_schedule_locked(video_id)
@@ -225,7 +240,7 @@ class NotificationRecorder:
                 if state.premiere and not self._record_premieres():
                     return self._publish(replace(base, reason="프리미어 녹화가 꺼져 있습니다"))
                 # Re-read AFTER network I/O: selection may have changed while waiting.
-                if live.channel_id not in self._selection.load():
+                if require_selection and live.channel_id not in self._selection.load():
                     self._forget_schedule_locked(video_id)
                     return self._publish(replace(base, reason="선택이 해제되었거나 선택하지 않은 채널입니다"))
                 self._forget_schedule_locked(video_id)
@@ -254,6 +269,7 @@ class NotificationRecorder:
 
     def _schedule_upcoming_locked(
         self, notice: LiveNotification, state: VideoState, base: NotificationResult,
+        *, require_selection: bool = True,
     ) -> NotificationResult:
         """예약 라이브를 적어만 둔다. 지금은 아무것도 녹화하지 않는다."""
         video_id = notice.video_id
@@ -261,7 +277,7 @@ class NotificationRecorder:
         if live is None or scheduled_at is None:
             self._forget_schedule_locked(video_id)
             return self._publish(replace(base, reason="예약 라이브이지만 예정 시각을 알 수 없습니다"))
-        if live.channel_id not in self._selection.load():
+        if require_selection and live.channel_id not in self._selection.load():
             self._forget_schedule_locked(video_id)
             return self._publish(replace(base, reason="선택이 해제되었거나 선택하지 않은 채널입니다"))
         if state.premiere and not self._record_premieres():
