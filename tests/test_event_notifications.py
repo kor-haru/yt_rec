@@ -98,6 +98,18 @@ def test_idle_has_zero_queries_or_background_pollers(monkeypatch):
     assert handler.pending_video_ids == ()
 
 
+def test_pasted_live_records_without_a_watched_channel():
+    handler, api, recorder, selection, _ = setup_handler()
+    selection.save([])
+    api.lives[VIDEO] = LiveBroadcast(VIDEO, "UCother", "붙여넣은 라이브")
+    refused = handler.receive(notice())
+    accepted = handler.receive_pasted(notice())
+    assert refused.status != "handed"
+    assert accepted.status == "handed"
+    assert recorder.calls[0][0] == VIDEO
+    assert recorder.calls[0][1]["channel_id"] == "UCother"
+
+
 def test_immediate_handoff_is_not_media_or_full_coverage():
     handler, api, recorder, _, updates = setup_handler()
     result = handler.receive(notice())

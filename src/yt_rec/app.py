@@ -107,6 +107,24 @@ class NotificationSession(QObject):
         if self.account_browser is not None:
             self.account_browser.session_invalidated.connect(self._account_invalidated)
         state.command_requested.connect(self.handle_command)
+        self._clipboard_text = ""
+        clipboard = QApplication.clipboard()
+        clipboard.dataChanged.connect(self._clipboard_changed)
+        QTimer.singleShot(0, self._clipboard_changed)
+
+    def _clipboard_changed(self) -> None:
+        if self._stopped:
+            return
+        text = QApplication.clipboard().text() or ""
+        if text == self._clipboard_text:
+            return
+        self._clipboard_text = text
+        from .clipboard import youtube_video_id
+
+        video_id = youtube_video_id(text)
+        if video_id is None:
+            return
+        self.source.record_pasted(video_id)
 
     def start(self) -> None:
         if self._stopped or self.receiver is not None:

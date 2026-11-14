@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from uuid import uuid4
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -222,6 +223,13 @@ class BackendSource(EventSource):
             self._notifications.receive(notice)
         self._run(receive)
         return True
+
+    def record_pasted(self, video_id: str) -> None:
+        """클립보드에 올린 라이브 주소. 감시 채널이 아니어도 녹화 목록에 넣는다."""
+        if self._stopping or self._worker is None or self._notifications is None:
+            return
+        notice = LiveNotification(video_id, time.time(), synthetic=False)
+        self._run(lambda: self._notifications.receive_pasted(notice))
 
     def _notification_update(self, result: NotificationResult) -> None:
         self.publish(ev.LogAppended(LogEntry(
