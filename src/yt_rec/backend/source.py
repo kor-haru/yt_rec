@@ -225,7 +225,7 @@ class BackendSource(EventSource):
         return True
 
     def record_pasted(self, video_id: str) -> None:
-        """클립보드에 올린 라이브 주소. 감시 채널이 아니어도 녹화 목록에 넣는다."""
+        """앱 메인 창에 직접 붙여넣은 라이브 주소를 감시 채널 여부와 무관하게 녹화한다."""
         if self._stopping or self._worker is None or self._notifications is None:
             return
         notice = LiveNotification(video_id, time.time(), synthetic=False)
