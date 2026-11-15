@@ -34,6 +34,7 @@ from datetime import tzinfo
 from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable
+from uuid import uuid4
 
 from yt_rec.logs import RotatingLog, redact
 
@@ -82,6 +83,7 @@ __all__ = ["LOCK_FILENAME", "RecordingEngine", "STATE_FILENAME"]
 
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "yt-dlp.log"
+HISTORICAL_PATHS_FILENAME = "historical-output-paths.json"
 
 #: 이 work 디렉터리를 지금 쓰고 있는 프로세스 표시. :func:`_lock_owner` 참고.
 LOCK_FILENAME = "owner.lock"
@@ -255,6 +257,7 @@ class RecordingEngine:
         self._listeners: list[EventCallback] = []
         self._tz = tz
         self._ownership_root = ownership_root
+        self._historical_paths: tuple[str, ...] = ()
         self._stop = threading.Event()
         self._process: subprocess.Popen | None = None
         self._process_lock = threading.Lock()
@@ -324,7 +327,8 @@ class RecordingEngine:
         """
         self._stop.clear()
 
-    def record(self, video_id: str) -> RecordingResult:
+    def record(self, video_id: str, *, fresh: bool = False,
+               historical_paths: tuple[str, ...] = ()) -> RecordingResult:
         """``video_id`` 를 녹화하고 결과를 돌려준다. 예외 대신 결과로 실패를 알린다.
 
         이 계약은 **전 경로에서** 성립해야 한다. 도구를 못 찾거나(``yt-dlp``/``ffmpeg``
@@ -341,6 +345,14 @@ class RecordingEngine:
             # Acquire before metadata, work-dir writes, download or finalization.
             # All current GUI/CLI callers enter here, irrespective of output_dir.
             with VideoLease(video_id, root=self._ownership_root):
+                self._historical_paths = historical_paths
+                if fresh:
+                    previous = self.work_dir_for(video_id)
+                    if _lock_owner(previous) is not None:
+                        raise RecordingOwnedError("이 폴더에서 이전 녹화가 아직 진행 중입니다")
+                    if previous.exists():
+                        # Preserve the old result and all recoverable bytes, not just its final file.
+                        previous.rename(previous.with_name(f"{video_id}-previous-{uuid4().hex}"))
                 return self._record(video_id, started_at)
         except RecordingOwnedError as exc:
             return self._aborted(video_id, started_at, str(exc), read_metadata=False)
@@ -365,6 +377,11 @@ class RecordingEngine:
         # 살아 있는 녹화의 중간 파일을 병합하지 않는다.
         _write_lock(work_dir)
         try:
+            if self._historical_paths:
+                marker = work_dir / HISTORICAL_PATHS_FILENAME
+                temporary = marker.with_suffix(".tmp")
+                temporary.write_text(json.dumps(self._historical_paths), encoding="utf-8")
+                os.replace(temporary, marker)
             return self._record_locked(video_id, started_at, work_dir)
         finally:
             _release_lock(work_dir)
@@ -482,18 +499,22 @@ class RecordingEngine:
             # 한 건이 실패해도 나머지 복구는 계속한다.
             lease = None
             try:
-                lease = VideoLease(work_dir.name, root=self._ownership_root)
+                state = self._load_state(work_dir)
+                archived = re.fullmatch(r"([A-Za-z0-9_-]{11})-previous-[0-9a-f]{32}", work_dir.name)
+                video_id = str((state or {}).get("video_id") or (archived[1] if archived else work_dir.name))
+                lease = VideoLease(video_id, root=self._ownership_root)
                 lease.acquire()
+                # Identity may be read before locking, but completion must be rechecked under it.
+                state = self._load_state(work_dir)
                 owner = _lock_owner(work_dir)
                 if owner is not None:
                     self._emit(
                         LogLine(
-                            video_id=work_dir.name,
+                            video_id=video_id,
                             text=f"[yt-rec] 녹화 중이라 복구를 건너뛴다 (pid {owner})",
                         )
                     )
                     continue
-                state = self._load_state(work_dir)
                 if state and _is_terminal(state.get("status")):
                     try:
                         with RotatingLog(
@@ -502,23 +523,23 @@ class RecordingEngine:
                         ):
                             pass  # 종료된 녹화의 만료 로그도 앱 재시작 시 정리한다.
                     except OSError:
-                        self._emit(LogLine(video_id=work_dir.name, text="[yt-rec] 만료 로그를 정리하지 못했다"))
+                        self._emit(LogLine(video_id=video_id, text="[yt-rec] 만료 로그를 정리하지 못했다"))
                     self._cleanup_completed_leftovers(work_dir, state)
                     continue
                 if toolchain_error is not None:
-                    if _needs_finalize(work_dir, work_dir.name):
+                    if _needs_finalize(work_dir, video_id):
                         postpone = True
                     continue
                 metadata = LiveMetadata.load(work_dir) or LiveMetadata.placeholder_for(
-                    work_dir.name
+                    video_id
                 )
-                if not find_intermediates(work_dir, work_dir.name) and not _completed_output(
-                    work_dir, work_dir.name
+                if not find_intermediates(work_dir, video_id) and not _completed_output(
+                    work_dir, video_id
                 ):
                     continue
                 results.append(
                     self._finalize(
-                        video_id=work_dir.name,
+                        video_id=video_id,
                         metadata=metadata,
                         work_dir=work_dir,
                         started_at=float((state or {}).get("started_at") or time.time()),
@@ -897,6 +918,8 @@ class RecordingEngine:
         denial: DenialCategory | None,
         format_ids: tuple[str, ...] = (),
     ) -> RecordingResult:
+        # This must survive app restart and follow any rotated unfinished workdir.
+        historical_paths = list(self._load_historical_paths(work_dir))
         # 후보를 다 모으는 것이 아니라 **이번 시도가 받은 것**만 고른다. 지난 시도가
         # 검증 실패로 남긴 중간 파일이 있는데 사용자가 화질 상한을 낮춰 다시 녹화하면
         # 포맷 id 가 달라져 낡은 파일과 새 파일이 함께 모인다(A).
@@ -1064,7 +1087,16 @@ class RecordingEngine:
             recording_started_at=started_at,
         )
         basename = _fit_to_path_limit(self.options.output_dir, basename, suffix)
-        final_path = reserve_unique_path(self.options.output_dir, basename, suffix)
+        # Even a deleted old output must keep its identity: reusing that path would
+        # make its history point at this run and collapse the two archive entries.
+        for state_path in self.options.resolved_work_root().glob(f"{video_id}*/{STATE_FILENAME}"):
+            previous = self._load_state(state_path.parent) or {}
+            output = previous.get("output_path")
+            if previous.get("video_id") == video_id and isinstance(output, str) and output:
+                historical_paths.append(Path(output))
+        final_path = reserve_unique_path(
+            self.options.output_dir, basename, suffix, excluded_paths=historical_paths,
+        )
         try:
             os.replace(merged, final_path)
         except OSError:
@@ -1183,7 +1215,7 @@ class RecordingEngine:
             return
         raw = state.get("output_path")
         protect = Path(raw) if raw else None
-        self._try_cleanup_intermediates(work_dir, work_dir.name, protect=protect)
+        self._try_cleanup_intermediates(work_dir, str(state.get("video_id") or work_dir.name), protect=protect)
 
     def _try_cleanup_intermediates(
         self, work_dir: Path, video_id: str, *, protect: Path | None
@@ -1210,6 +1242,18 @@ class RecordingEngine:
         )
 
     # -- 상태 파일 -------------------------------------------------------------
+
+    @staticmethod
+    def _load_historical_paths(work_dir: Path) -> tuple[Path, ...]:
+        try:
+            raw = json.loads((work_dir / HISTORICAL_PATHS_FILENAME).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return ()  # Older recordings did not persist cross-root exclusions.
+        if (not isinstance(raw, list)
+                or any(not isinstance(path, str) or not Path(path).is_absolute()
+                       or ".." in Path(path).parts for path in raw)):
+            raise ValueError("이전 녹화 출력 경로 목록을 읽지 못했습니다")
+        return tuple(Path(path) for path in raw)
 
     @staticmethod
     def _save_state(work_dir: Path, result: RecordingResult) -> Path:

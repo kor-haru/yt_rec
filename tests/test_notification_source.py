@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import queue
+import json
+from dataclasses import replace
 import threading
 import time
 from datetime import timedelta
@@ -112,7 +114,9 @@ def production_backend(tmp_path, monkeypatch, qapp):
         def request_stop(self):
             self.actions.put(("finish", False))
 
-        def record(self, video_id):
+        def record(self, video_id, *, fresh=False, historical_paths=()):
+            self.fresh = fresh
+            self.historical_paths = historical_paths
             engines[video_id] = self
             while True:
                 action, value = self.actions.get(timeout=10)
@@ -182,6 +186,165 @@ def notice(video_id=VIDEO):
 def diagnostic(events, status):
     return [e.entry for e in events if isinstance(e, ev.LogAppended)
             and e.entry.source == "notification" and f": {status};" in e.entry.message]
+
+
+def previous_recording(source, root=None, *, present=True):
+    root = root or source._controller._options.output_dir
+    work = root / ".yt-rec" / VIDEO
+    work.mkdir(parents=True)
+    output = root / "previous.mp4"
+    if present:
+        output.write_bytes(b"previous recording")
+    state = work / "state.json"
+    state.write_text(json.dumps({
+        "video_id": VIDEO, "status": "completed", "output_path": str(output),
+        "started_at": 1, "finished_at": 2, "metadata": {"title": "old", "channel": "old"},
+    }), encoding="utf-8")
+    return output, state
+
+
+def test_paste_missing_file_with_retained_history_still_asks_and_cancel_preserves_history(wired, qapp):
+    source, _, engines, _, seen, _ = wired
+    output, state = previous_recording(source, present=False)
+    before = state.read_bytes()
+    seen.mark_done(VIDEO)
+    questions, messages = [], []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.paste_result.connect(messages.append)
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: bool(questions))
+    assert not engines
+    source.confirm_pasted(VIDEO, questions[0][1], False)
+    flush(source, qapp)
+    assert not engines and messages
+    assert not output.exists() and state.read_bytes() == before
+
+
+@pytest.mark.parametrize("answer", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+def test_paste_saved_history_requires_confirmation_and_preserves_existing_data(wired, qapp, answer, present):
+    source, _, engines, _, _, _ = wired
+    output, state = previous_recording(source, present=present)
+    before = {path: path.read_bytes() for path in (output, state) if path.exists()}
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: bool(questions))
+    video_id, token, paths = questions[0]
+    assert paths == (str(output),) and engines == {}
+    source.confirm_pasted(video_id, "stale-token", True)
+    flush(source, qapp)
+    assert engines == {}
+    source.confirm_pasted(video_id, token, answer)
+    if answer:
+        until(qapp, lambda: VIDEO in engines)
+        assert engines[VIDEO].fresh is True
+        assert engines[VIDEO].historical_paths == (str(output),)
+    else:
+        flush(source, qapp)
+        assert engines == {}
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+
+def test_paste_repeated_queued_request_reports_waiting_without_another_question(wired, qapp):
+    source, _, engines, _, _, _ = wired
+    source.record_pasted(OTHER)
+    until(qapp, lambda: OTHER in engines)
+    previous_recording(source)
+    questions, messages = [], []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.paste_result.connect(messages.append)
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: bool(questions))
+    source.confirm_pasted(VIDEO, questions[0][1], True)
+    flush(source, qapp)
+    assert VIDEO not in engines
+    source.record_pasted(VIDEO)
+    flush(source, qapp)
+    assert len(questions) == 1 and messages[-1] == "이미 대기 중입니다"
+    engines[OTHER].actions.put(("finish", True))
+    until(qapp, lambda: VIDEO in engines)
+    assert engines[VIDEO].fresh is True
+    source.record_pasted(VIDEO)
+    flush(source, qapp)
+    assert "이미 녹화 중" in messages[-1] and len(questions) == 1
+
+
+@pytest.mark.parametrize("old_root", [False, True])
+def test_paste_does_not_resurrect_dismissed_history(wired, qapp, tmp_path, old_root):
+    source, _, engines, _, _, _ = wired
+    root = tmp_path / "previous-output-root" if old_root else source._controller._options.output_dir
+    output, _ = previous_recording(source, root)
+    store = source._archive_store
+    store.remember(root)
+    store.dismiss(store.load())
+    assert not store.load()
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: VIDEO in engines)
+    assert questions == [] and engines[VIDEO].fresh is True
+    assert output.read_bytes() == b"previous recording"
+
+
+def test_paste_seen_only_and_untracked_output_does_not_ask(wired, qapp):
+    source, _, engines, _, seen, _ = wired
+    seen.mark_done(VIDEO)
+    output = source._controller._options.output_dir / "untracked-existing.mp4"
+    output.write_bytes(b"existing but no recording history")
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: VIDEO in engines)
+    assert questions == [] and engines[VIDEO].fresh is True
+    assert output.read_bytes() == b"existing but no recording history"
+
+
+def test_paste_confirmation_cannot_start_after_output_settings_change(wired, qapp, tmp_path):
+    source, _, engines, _, _, _ = wired
+    previous_recording(source)
+    questions, messages = [], []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.paste_result.connect(messages.append)
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: bool(questions))
+    source._controller._options = replace(source._controller._options, output_dir=tmp_path / "changed")
+    source.confirm_pasted(VIDEO, questions[0][1], True)
+    until(qapp, lambda: bool(messages))
+    assert "설정이 변경" in messages[-1] and not engines
+
+
+def test_paste_passes_missing_old_work_root_output_identity_to_new_run(wired, qapp, tmp_path):
+    source, _, engines, _, _, _ = wired
+    output, state = previous_recording(source, present=False)
+    old_work_root = tmp_path / "old-work-root"
+    old_work_root.mkdir()
+    state.parent.rename(old_work_root / VIDEO)
+    source._archive_store.remember(output.parent, work_root=old_work_root)
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: bool(questions))
+    source.confirm_pasted(VIDEO, questions[0][1], True)
+    until(qapp, lambda: VIDEO in engines)
+    assert engines[VIDEO].historical_paths == (str(output),)
+
+
+def test_dismissed_missing_old_root_does_not_ask_but_protects_its_output_path(wired, qapp, tmp_path):
+    source, _, engines, _, _, _ = wired
+    output, state = previous_recording(source, present=False)
+    old_work_root = tmp_path / "old-work-root"
+    old_work_root.mkdir()
+    state.parent.rename(old_work_root / VIDEO)
+    source._archive_store.remember(output.parent, work_root=old_work_root)
+    source._archive_store.dismiss(source._archive_store.load())
+    assert source._archive_items() == ()
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: VIDEO in engines)
+    assert not questions
+    assert engines[VIDEO].historical_paths == (str(output),)
 
 
 def test_factory_event_only_never_discovers_on_start_connect_selection_settings_or_ticks(wired, qapp):

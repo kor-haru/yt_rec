@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QLineEdit, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QLineEdit, QVBoxLayout, QMessageBox
 
 from yt_rec.app import NotificationSession
 from yt_rec.ui.main_window import MainWindow
@@ -110,3 +110,31 @@ def test_inactive_session_does_not_record(qapp, paste_session, inactive_state):
     qapp.clipboard().setText(URL)
     paste(qapp, window)
     assert recorded == []
+
+
+@pytest.mark.parametrize("answer", [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No])
+def test_confirmation_is_forwarded_on_gui_with_safe_default(paste_session, monkeypatch, answer):
+    window, session, _ = paste_session
+    replies = []
+    session.source.confirm_pasted = lambda *args: replies.append(args)
+    def question(parent, title, text, buttons, default):
+        assert parent is window and "previous.mp4" in text
+        assert default == QMessageBox.StandardButton.No
+        return answer
+    monkeypatch.setattr(QMessageBox, "question", question)
+    session._confirm_pasted("dQw4w9WgXcQ", "token", ("previous.mp4",))
+    assert replies == [("dQw4w9WgXcQ", "token", answer == QMessageBox.StandardButton.Yes)]
+    session._paste_result("이미 대기 중입니다")
+    assert window.statusBar().currentMessage() == "이미 대기 중입니다"
+
+
+def test_shutdown_during_confirmation_cannot_accept_new_recording(paste_session, monkeypatch):
+    _, session, _ = paste_session
+    replies = []
+    session.source.confirm_pasted = lambda *args: replies.append(args)
+    def question(*_):
+        session.stop()
+        return QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(QMessageBox, "question", question)
+    session._confirm_pasted("dQw4w9WgXcQ", "token", ("previous.mp4",))
+    assert replies == [("dQw4w9WgXcQ", "token", False)]

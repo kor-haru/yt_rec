@@ -234,6 +234,8 @@ class EngineRecorder:
         channel_id: str = "",
         channel_name: str = "",
         title: str = "",
+        fresh: bool = False,
+        historical_paths: tuple[str, ...] = (),
     ) -> bool:
         with self._lock:
             if self._closing:
@@ -271,7 +273,7 @@ class EngineRecorder:
         )
         thread = threading.Thread(
             target=self._run,
-            args=(video_id, engine),
+            args=(video_id, engine, fresh, historical_paths),
             name=f"yt-rec-record-{video_id}",
             daemon=False,
         )
@@ -334,10 +336,12 @@ class EngineRecorder:
             if self._on_result is not None:
                 self._on_result(result.video_id, result.succeeded)
 
-    def _run(self, video_id: str, engine: RecordingEngine) -> None:
+    def _run(self, video_id: str, engine: RecordingEngine, fresh: bool = False,
+             historical_paths: tuple[str, ...] = ()) -> None:
         ok = False
         try:
-            result = engine.record(video_id)
+            result = (engine.record(video_id, fresh=True, historical_paths=historical_paths)
+                      if fresh else engine.record(video_id))
             ok = bool(getattr(result, "succeeded", False))
         finally:
             with self._lock:

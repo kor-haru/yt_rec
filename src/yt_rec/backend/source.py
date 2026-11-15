@@ -55,6 +55,8 @@ class BackendSource(EventSource):
     #: 실제 수신 알림이 녹화로 넘어갔다(``handed``). 영상 ID 만 싣는다 (#118).
     #: 작업 스레드에서 방출하므로 받는 쪽은 큐 연결로 GUI 스레드에서 처리한다.
     recording_handed = Signal(str)
+    paste_confirmation_requested = Signal(str, str, object)
+    paste_result = Signal(str)
 
     def __init__(
         self,
@@ -87,6 +89,8 @@ class BackendSource(EventSource):
         self._history_loaded = False
         self._unsaved_results: dict[str, CompletedRecording] = {}
         self._results_lock = threading.Lock()
+        self._paste_confirmations: dict[str, tuple[str, RecordingOptions]] = {}
+        self._manual_requests: set[str] = set()
         self._notification_capacity = controller._options.max_recordings
         self._notifications = NotificationRecorder(
             youtube=lambda: controller._youtube if controller._connected and (
@@ -228,10 +232,69 @@ class BackendSource(EventSource):
         """앱 메인 창에 직접 붙여넣은 라이브 주소를 감시 채널 여부와 무관하게 녹화한다."""
         if self._stopping or self._worker is None or self._notifications is None:
             return
-        notice = LiveNotification(video_id, time.time(), synthetic=False)
-        self._run(lambda: self._notifications.receive_pasted(notice))
+        self._run(lambda: self._record_pasted(video_id))
+
+    def _record_pasted(self, video_id: str, *, confirmed: bool = False) -> None:
+        if self._stopping or self._notifications is None:
+            return
+        if self._controller._recorder.is_recording(video_id):
+            self.paste_result.emit("이미 녹화 중인 영상입니다.")
+            return
+        if video_id in self._paste_confirmations:
+            return
+        try:
+            recordings = tuple(item for item in self._archive_items() if item.recording_id == video_id)
+            history = tuple(item.output_path or item.title or video_id for item in recordings)
+            if history and not confirmed and video_id not in self._manual_requests:
+                token = uuid4().hex
+                self._paste_confirmations[video_id] = (token, self._controller._options)
+                self.paste_confirmation_requested.emit(video_id, token, history)
+                return
+            self._manual_requests.add(video_id)
+            # Dismissal hides confirmation history, not ownership of an old path.
+            historical = self._archive_store.load(include_dismissed=True) if self._archive_store is not None else ()
+            options = self._controller._options
+            historical = (*historical, *recordings, *load_archive(options.output_dir, work_root=options.work_root))
+            result = self._notifications.receive_pasted(
+                LiveNotification(video_id, time.time(), synthetic=False),
+                historical_paths=tuple(sorted({item.output_path for item in historical
+                                              if item.recording_id == video_id and item.output_path})),
+            )
+            # Active/pending requests can return without a new update event.
+            if video_id in self._manual_requests:
+                if result.reason:
+                    self.paste_result.emit(result.reason)
+                if result.status not in {"queued", "scheduled"}:
+                    self._manual_requests.discard(video_id)
+        except (OSError, ValueError) as exc:
+            self._manual_requests.discard(video_id)
+            self.paste_result.emit(f"녹화를 시작하지 못했습니다: {exc}")
+
+    def confirm_pasted(self, video_id: str, token: str, accepted: bool) -> None:
+        def confirm() -> None:
+            pending = self._paste_confirmations.get(video_id)
+            if pending is None or pending[0] != token:
+                return
+            self._paste_confirmations.pop(video_id, None)
+            if self._stopping:
+                return
+            if not accepted:
+                self.paste_result.emit("재녹화를 취소했습니다. 기존 파일은 그대로 보존됩니다.")
+                return
+            if pending[1] != self._controller._options:
+                self.paste_result.emit("설정이 변경됐습니다. 주소를 다시 붙여넣어 주세요.")
+                return
+            self._record_pasted(video_id, confirmed=True)
+        self._run(confirm)
 
     def _notification_update(self, result: NotificationResult) -> None:
+        video_id = result.notification.video_id
+        if video_id in self._manual_requests:
+            message = "녹화를 시작했습니다." if result.status == "handed" else result.reason
+            if message:
+                self.paste_result.emit(message)
+            if result.status not in {"queued", "scheduled"}:
+                self._manual_requests.discard(video_id)
         self.publish(ev.LogAppended(LogEntry(
             at=datetime.now(timezone.utc),
             severity=Severity.WARNING if result.status == "failed" else Severity.INFO,
