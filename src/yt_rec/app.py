@@ -23,7 +23,7 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
     QSystemTrayIcon, QVBoxLayout,
 )
 
@@ -111,6 +111,12 @@ class NotificationSession(QObject):
         self._paste_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._paste_shortcut.setAutoRepeat(False)
         self._paste_shortcut.activated.connect(self._paste_recording)
+        confirmation = getattr(source, "paste_confirmation_requested", None)
+        if confirmation is not None:
+            confirmation.connect(self._confirm_pasted, Qt.ConnectionType.QueuedConnection)
+        result = getattr(source, "paste_result", None)
+        if result is not None:
+            result.connect(self._paste_result, Qt.ConnectionType.QueuedConnection)
 
     def _paste_recording(self) -> None:
         if (self._stopped or not self.window.isVisible() or self.window.isMinimized()
@@ -123,6 +129,22 @@ class NotificationSession(QObject):
         if video_id is None:
             return
         self.source.record_pasted(video_id)
+
+    def _confirm_pasted(self, video_id: str, token: str, history: tuple[str, ...]) -> None:
+        if self._stopped:
+            return
+        answer = QMessageBox.question(
+            self.window, "녹화 이력이 있는 영상",
+            "이 영상의 이전 녹화 이력이 남아 있습니다.\n\n" + "\n".join(history)
+            + "\n\n기존 파일과 이력을 보존하고 새 파일로 다시 녹화할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self.source.confirm_pasted(video_id, token, not self._stopped and answer == QMessageBox.StandardButton.Yes)
+
+    def _paste_result(self, message: str) -> None:
+        if not self._stopped:
+            self.window.statusBar().showMessage(message, 15000)
 
     def start(self) -> None:
         if self._stopped or self.receiver is not None:

@@ -49,7 +49,8 @@ _LOG = logging.getLogger(__name__)
 class Recorder(Protocol):
     def is_recording(self, video_id: str) -> bool: ...
 
-    def start(self, video_id: str, *, channel_id: str, channel_name: str, title: str) -> bool: ...
+    def start(self, video_id: str, *, channel_id: str, channel_name: str, title: str, fresh: bool = False,
+              historical_paths: tuple[str, ...] = ()) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ class NotificationRecorder:
         self._dispatch_lock = threading.RLock()
         self._lock = threading.RLock()
         self._pending: dict[str, LiveNotification] = {}
+        self._manual: dict[str, tuple[str, ...]] = {}
         self._active: dict[str, NotificationResult] = {}
         self._draining = False
         # 재시작 복원. 예정 시각이 이미 지난 예약은 첫 확인에서 바로 처리된다.
@@ -165,6 +167,8 @@ class NotificationRecorder:
             _LOG.warning("예약 변경을 알리지 못했습니다: %s", redact(str(exc)))
 
     def _publish(self, result: NotificationResult) -> NotificationResult:
+        if result.status not in {"queued", "scheduled"}:
+            self._manual.pop(result.notification.video_id, None)
         if self._on_update is not None:
             try:
                 self._on_update(result)
@@ -184,30 +188,33 @@ class NotificationRecorder:
                     return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
                 if video_id in self._schedules:
                     return NotificationResult(notification, "scheduled", "이미 예정 시각을 기다리는 중입니다")
-            return self._attempt(notification)
+            return self._attempt(notification, require_selection=True)
 
-    def receive_pasted(self, notification: LiveNotification) -> NotificationResult:
+    def receive_pasted(self, notification: LiveNotification, *, historical_paths: tuple[str, ...] = ()) -> NotificationResult:
         """사용자가 앱 메인 창에 직접 붙여넣은 주소를 감시 채널 여부와 무관하게 녹화한다."""
         with self._dispatch_lock:
             with self._lock:
                 video_id = notification.video_id
-                if video_id in self._active:
-                    return self._active[video_id]
+                if video_id in self._active or self._recorder.is_recording(video_id):
+                    return self._publish(NotificationResult(notification, "ignored", "이미 녹화 중입니다"))
+                self._manual[video_id] = historical_paths
                 if video_id in self._pending:
                     return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
                 if video_id in self._schedules:
                     return NotificationResult(notification, "scheduled", "이미 예정 시각을 기다리는 중입니다")
             return self._attempt(notification, require_selection=False)
 
-    def _attempt(self, notice: LiveNotification, *, require_selection: bool = True) -> NotificationResult:
+    def _attempt(self, notice: LiveNotification, *, require_selection: bool | None = None) -> NotificationResult:
         video_id = notice.video_id
+        if require_selection is None:
+            require_selection = video_id not in self._manual
         base = NotificationResult(notice, "ignored")
         try:
             with self._lock:
                 self._pending.pop(video_id, None)
                 if not self._can_start():
                     return self._publish(replace(base, reason="종료 중이므로 새 녹화를 시작하지 않습니다"))
-                if self._seen.is_done(video_id):
+                if require_selection and self._seen.is_done(video_id):
                     self._forget_schedule_locked(video_id)
                     return self._publish(replace(base, reason="이미 완료한 영상입니다"))
                 if self._recorder.is_recording(video_id):
@@ -249,6 +256,8 @@ class NotificationRecorder:
                 self._active[video_id] = handed
                 accepted = self._recorder.start(
                     video_id, channel_id=live.channel_id, channel_name=live.channel_name, title=live.title,
+                    **({"fresh": True, "historical_paths": self._manual.get(video_id, ())}
+                       if not require_selection else {}),
                 )
                 if accepted is False:
                     self._active.pop(video_id, None)

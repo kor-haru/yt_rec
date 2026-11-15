@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone, tzinfo
 from pathlib import Path
@@ -249,7 +249,9 @@ def _collapse_separators(pieces: list[tuple[bool, str]]) -> str:
     return "".join(out)
 
 
-def reserve_unique_path(directory: Path, basename: str, extension: str) -> Path:
+def reserve_unique_path(
+    directory: Path, basename: str, extension: str, *, excluded_paths: Iterable[Path] = (),
+) -> Path:
     """``directory`` 안에서 아직 쓰이지 않은 경로를 잡아 0바이트 파일로 예약한다.
 
     같은 이름이 이미 있으면 ``이름 (2)``, ``이름 (3)`` … 으로 비켜간다. 예약은
@@ -261,10 +263,13 @@ def reserve_unique_path(directory: Path, basename: str, extension: str) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     suffix = extension if extension.startswith(".") else f".{extension}"
+    excluded = {Path(path).absolute() for path in excluded_paths}
 
     for attempt in range(1, 10_000):
         stem = basename if attempt == 1 else f"{basename} ({attempt})"
         candidate = directory / f"{stem}{suffix}"
+        if candidate.absolute() in excluded:
+            continue
         try:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:

@@ -94,6 +94,144 @@ def base_engine(tmp_path: Path, **overrides) -> RecordingEngine:
     return RecordingEngine(options, toolchain=DUMMY_TOOLCHAIN)
 
 
+@pytest.mark.parametrize("old_file_present", [False, True])
+@pytest.mark.parametrize("old_work_root", [False, True])
+def test_fresh_recording_preserves_old_output_and_history_without_reusing_media(tmp_path, monkeypatch, old_file_present, old_work_root):
+    from yt_rec.backend.archive import ArchiveStore, load_archive
+    from yt_rec.state.models import CompletionStatus
+    from yt_rec.recording.merge import MediaVerification
+
+    engine = base_engine(tmp_path)
+    metadata = stored_metadata()
+    work = tmp_path / "previous-work-root" / VIDEO_ID if old_work_root else engine.work_dir_for(VIDEO_ID)
+    work.mkdir(parents=True)
+    engine.options.output_dir.mkdir(parents=True, exist_ok=True)
+    old_output = engine.options.output_dir / f"{metadata.basename(engine.options.filename_template)}.mp4"
+    old_output.write_bytes(b"old final recording")
+    if not old_file_present:
+        old_output.unlink()
+    old_media = work / f"{VIDEO_ID}.mp4"
+    old_media.write_bytes(b"old work media")
+    old_result = RecordingResult(
+        video_id=VIDEO_ID, status=RecordingStatus.COMPLETED, metadata=metadata,
+        work_dir=work, output_path=old_output, started_at=1, finished_at=2,
+    )
+    engine._save_state(work, old_result)
+    old_state = (work / STATE_FILENAME).read_bytes()
+    downloads = []
+
+    def download(video_id, directory):
+        assert not (directory / f"{video_id}.mp4").exists()
+        downloads.append(video_id)
+        (directory / f"{video_id}.mp4").write_bytes(b"new actual recording")
+        return engine_module._DownloadOutcome()
+
+    monkeypatch.setattr(engine, "_secure_metadata", lambda *_: (metadata, None))
+    monkeypatch.setattr(engine, "_run_download", download)
+    monkeypatch.setattr(engine, "_verify", lambda path: MediaVerification(path, True, True))
+    result = engine.record(VIDEO_ID, fresh=True, historical_paths=(str(old_output),))
+    assert result.succeeded, result.message
+    assert downloads == [VIDEO_ID]
+    assert result.output_path != old_output
+    assert result.output_path.read_bytes() == b"new actual recording"
+    assert old_output.exists() is old_file_present
+    if old_file_present:
+        assert old_output.read_bytes() == b"old final recording"
+    if old_work_root:
+        previous = work
+    else:
+        previous, = work.parent.glob(f"{VIDEO_ID}-previous-*")
+    assert (previous / STATE_FILENAME).read_bytes() == old_state
+    assert (previous / old_media.name).read_bytes() == b"old work media"
+    items = (*load_archive(engine.options.output_dir),
+             *(load_archive(engine.options.output_dir, work_root=work.parent) if old_work_root else ()))
+    assert len(items) == 2 and {item.recording_id for item in items} == {VIDEO_ID}
+    assert {item.output_path for item in items} == {str(old_output), str(result.output_path)}
+    store = ArchiveStore(tmp_path / "archive-roots.json")
+    store.remember(engine.options.output_dir)
+    if old_work_root:
+        store.remember(engine.options.output_dir, work_root=work.parent)
+    assert len(store.load()) == 2
+    old_item = next(item for item in items if item.output_path == str(old_output))
+    if not old_file_present:
+        assert old_item.status is CompletionStatus.MISSING and old_item.file_missing
+        with pytest.raises(ValueError):
+            store.trash(old_item)
+        assert result.output_path.read_bytes() == b"new actual recording"
+    monkeypatch.setattr(engine, "_finalize", lambda **_: pytest.fail("terminal archive must not be finalized"))
+    assert engine.recover_pending() == []
+    assert old_output.exists() is old_file_present
+
+
+def test_fresh_recording_does_not_rotate_a_video_owned_by_another_run(tmp_path):
+    from yt_rec.recording.ownership import VideoLease
+
+    engine = base_engine(tmp_path)
+    work = engine.work_dir_for(VIDEO_ID)
+    work.mkdir(parents=True)
+    protected = work / "fragment.ts"
+    protected.write_bytes(b"active bytes")
+    with VideoLease(VIDEO_ID, root=engine._ownership_root):
+        result = engine.record(VIDEO_ID, fresh=True)
+    assert not result.succeeded
+    assert protected.read_bytes() == b"active bytes"
+    assert not list(work.parent.glob(f"{VIDEO_ID}-previous-*"))
+
+
+def test_fresh_without_history_preserves_a_colliding_filename_and_adds_suffix(tmp_path, monkeypatch):
+    from yt_rec.backend.archive import load_archive
+    from yt_rec.recording.merge import MediaVerification
+
+    engine = base_engine(tmp_path)
+    metadata = stored_metadata()
+    engine.options.output_dir.mkdir(parents=True)
+    existing = engine.options.output_dir / f"{metadata.basename(engine.options.filename_template)}.mp4"
+    existing.write_bytes(b"untracked original")
+    assert load_archive(engine.options.output_dir) == ()
+    def download(video_id, work):
+        (work / f"{video_id}.mp4").write_bytes(b"fresh recording")
+        return engine_module._DownloadOutcome()
+    monkeypatch.setattr(engine, "_secure_metadata", lambda *_: (metadata, None))
+    monkeypatch.setattr(engine, "_run_download", download)
+    monkeypatch.setattr(engine, "_verify", lambda path: MediaVerification(path, True, True))
+    result = engine.record(VIDEO_ID, fresh=True)
+    assert result.succeeded, result.message
+    assert result.output_path.name == f"{existing.stem} (2).mp4"
+    assert existing.read_bytes() == b"untracked original"
+    assert result.output_path.read_bytes() == b"fresh recording"
+
+
+@pytest.mark.parametrize("state_contents", [None, '{"status":'])
+def test_fresh_orphaned_media_remains_recoverable_with_original_video_id(tmp_path, monkeypatch, state_contents):
+    from yt_rec.recording.merge import MediaVerification
+
+    engine = base_engine(tmp_path)
+    work = engine.work_dir_for(VIDEO_ID)
+    work.mkdir(parents=True)
+    media = work / f"{VIDEO_ID}.mp4"
+    media.write_bytes(b"old recoverable media")
+    if state_contents is not None:
+        (work / STATE_FILENAME).write_text(state_contents, encoding="utf-8")
+    def download(video_id, directory):
+        assert not (directory / media.name).exists()
+        (directory / media.name).write_bytes(b"new download")
+        return engine_module._DownloadOutcome()
+    monkeypatch.setattr(engine, "_secure_metadata", lambda *_: (stored_metadata(), None))
+    monkeypatch.setattr(engine, "_run_download", download)
+    monkeypatch.setattr(engine, "_verify", lambda path: MediaVerification(path, True, True))
+    assert engine.record(VIDEO_ID, fresh=True).succeeded
+    previous, = work.parent.glob(f"{VIDEO_ID}-previous-*")
+    recovered = []
+    def finalize(**kwargs):
+        recovered.append(kwargs)
+        return "recovered"
+    monkeypatch.setattr(engine, "_finalize", finalize)
+    assert engine.recover_pending() == ["recovered"]
+    assert len(recovered) == 1 and recovered[0]["video_id"] == VIDEO_ID
+    assert recovered[0]["work_dir"] == previous
+    assert (previous / media.name).read_bytes() == b"old recoverable media"
+
+
 def test_방송_시작_지점부터_받는다(tmp_path):
     assert "--live-from-start" in base_engine(tmp_path).build_download_argv(VIDEO_ID)
 

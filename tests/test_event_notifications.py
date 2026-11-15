@@ -110,6 +110,55 @@ def test_pasted_live_records_without_a_watched_channel():
     assert recorder.calls[0][1]["channel_id"] == "UCother"
 
 
+def test_pasted_completed_live_starts_a_fresh_run_but_push_stays_deduplicated():
+    seen = MemorySeenStore([VIDEO])
+    handler, api, recorder, _, _ = setup_handler(seen=seen)
+    assert handler.receive(notice()).status == "ignored"
+    assert api.calls == []
+    assert handler.receive_pasted(notice()).status == "handed"
+    assert recorder.calls[0][1]["fresh"] is True
+    assert seen.is_done(VIDEO)
+
+
+def test_pasted_repeat_keeps_manual_intent_while_waiting_for_a_slot():
+    handler, api, recorder, selection, _ = setup_handler(seen=MemorySeenStore([VIDEO]))
+    recorder.active.add(OTHER)
+    selection.save([])
+    assert handler.receive_pasted(notice()).status == "queued"
+    recorder.active.clear()
+    handler.resume()
+    assert recorder.calls[0][0] == VIDEO
+    assert recorder.calls[0][1]["fresh"] is True
+
+
+def test_paste_upgrades_an_automatic_pending_request_to_manual():
+    handler, api, recorder, selection, _ = setup_handler()
+    recorder.active.add(OTHER)
+    assert handler.receive(notice()).status == "queued"
+    selection.save([])
+    assert handler.receive_pasted(notice()).status == "queued"
+    recorder.active.clear()
+    handler.resume()
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0][1]["fresh"] is True
+
+
+@pytest.mark.parametrize("automatic_first", [False, True])
+def test_pasted_schedule_keeps_manual_intent_until_live(automatic_first):
+    seen = MemorySeenStore()
+    handler, api, recorder, selection, _ = setup_handler(seen=seen)
+    api.lives.pop(VIDEO)
+    api.upcoming[VIDEO] = (100.0, False)
+    if automatic_first:
+        assert handler.receive(notice()).status == "scheduled"
+    assert handler.receive_pasted(notice()).status == "scheduled"
+    selection.save([])
+    seen.mark_done(VIDEO)
+    api.lives[VIDEO] = LiveBroadcast(VIDEO, "UC1", "live")
+    handler.check_schedules(now=100)
+    assert len(recorder.calls) == 1 and recorder.calls[0][1]["fresh"] is True
+
+
 def test_immediate_handoff_is_not_media_or_full_coverage():
     handler, api, recorder, _, updates = setup_handler()
     result = handler.receive(notice())
