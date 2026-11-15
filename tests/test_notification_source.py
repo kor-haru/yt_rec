@@ -330,6 +330,23 @@ def test_paste_passes_missing_old_work_root_output_identity_to_new_run(wired, qa
     assert engines[VIDEO].historical_paths == (str(output),)
 
 
+def test_dismissed_missing_old_root_does_not_ask_but_protects_its_output_path(wired, qapp, tmp_path):
+    source, _, engines, _, _, _ = wired
+    output, state = previous_recording(source, present=False)
+    old_work_root = tmp_path / "old-work-root"
+    old_work_root.mkdir()
+    state.parent.rename(old_work_root / VIDEO)
+    source._archive_store.remember(output.parent, work_root=old_work_root)
+    source._archive_store.dismiss(source._archive_store.load())
+    assert source._archive_items() == ()
+    questions = []
+    source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.record_pasted(VIDEO)
+    until(qapp, lambda: VIDEO in engines)
+    assert not questions
+    assert engines[VIDEO].historical_paths == (str(output),)
+
+
 def test_factory_event_only_never_discovers_on_start_connect_selection_settings_or_ticks(wired, qapp):
     source, api, engines, selected, _, events = wired
     assert source._poll_timer is None

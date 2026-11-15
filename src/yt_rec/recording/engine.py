@@ -83,6 +83,7 @@ __all__ = ["LOCK_FILENAME", "RecordingEngine", "STATE_FILENAME"]
 
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "yt-dlp.log"
+HISTORICAL_PATHS_FILENAME = "historical-output-paths.json"
 
 #: 이 work 디렉터리를 지금 쓰고 있는 프로세스 표시. :func:`_lock_owner` 참고.
 LOCK_FILENAME = "owner.lock"
@@ -376,6 +377,11 @@ class RecordingEngine:
         # 살아 있는 녹화의 중간 파일을 병합하지 않는다.
         _write_lock(work_dir)
         try:
+            if self._historical_paths:
+                marker = work_dir / HISTORICAL_PATHS_FILENAME
+                temporary = marker.with_suffix(".tmp")
+                temporary.write_text(json.dumps(self._historical_paths), encoding="utf-8")
+                os.replace(temporary, marker)
             return self._record_locked(video_id, started_at, work_dir)
         finally:
             _release_lock(work_dir)
@@ -912,6 +918,8 @@ class RecordingEngine:
         denial: DenialCategory | None,
         format_ids: tuple[str, ...] = (),
     ) -> RecordingResult:
+        # This must survive app restart and follow any rotated unfinished workdir.
+        historical_paths = list(self._load_historical_paths(work_dir))
         # 후보를 다 모으는 것이 아니라 **이번 시도가 받은 것**만 고른다. 지난 시도가
         # 검증 실패로 남긴 중간 파일이 있는데 사용자가 화질 상한을 낮춰 다시 녹화하면
         # 포맷 id 가 달라져 낡은 파일과 새 파일이 함께 모인다(A).
@@ -1081,7 +1089,6 @@ class RecordingEngine:
         basename = _fit_to_path_limit(self.options.output_dir, basename, suffix)
         # Even a deleted old output must keep its identity: reusing that path would
         # make its history point at this run and collapse the two archive entries.
-        historical_paths = [Path(path) for path in self._historical_paths]
         for state_path in self.options.resolved_work_root().glob(f"{video_id}*/{STATE_FILENAME}"):
             previous = self._load_state(state_path.parent) or {}
             output = previous.get("output_path")
@@ -1235,6 +1242,18 @@ class RecordingEngine:
         )
 
     # -- 상태 파일 -------------------------------------------------------------
+
+    @staticmethod
+    def _load_historical_paths(work_dir: Path) -> tuple[Path, ...]:
+        try:
+            raw = json.loads((work_dir / HISTORICAL_PATHS_FILENAME).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return ()  # Older recordings did not persist cross-root exclusions.
+        if (not isinstance(raw, list)
+                or any(not isinstance(path, str) or not Path(path).is_absolute()
+                       or ".." in Path(path).parts for path in raw)):
+            raise ValueError("이전 녹화 출력 경로 목록을 읽지 못했습니다")
+        return tuple(Path(path) for path in raw)
 
     @staticmethod
     def _save_state(work_dir: Path, result: RecordingResult) -> Path:

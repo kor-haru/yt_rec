@@ -232,6 +232,77 @@ def test_fresh_orphaned_media_remains_recoverable_with_original_video_id(tmp_pat
     assert (previous / media.name).read_bytes() == b"old recoverable media"
 
 
+@pytest.mark.parametrize("rotated", [False, True])
+def test_cross_root_output_identity_survives_restart_and_workdir_rotation(tmp_path, monkeypatch, rotated):
+    from yt_rec.backend.archive import ArchiveStore
+    from yt_rec.recording.merge import MediaVerification
+    from yt_rec.state.models import CompletionStatus
+
+    engine = base_engine(tmp_path)
+    metadata = stored_metadata()
+    engine.options.output_dir.mkdir(parents=True)
+    old_output = engine.options.output_dir / f"{metadata.basename(engine.options.filename_template)}.mp4"
+    old_work = tmp_path / "old-work" / VIDEO_ID
+    old_work.mkdir(parents=True)
+    engine._save_state(old_work, RecordingResult(
+        video_id=VIDEO_ID, status=RecordingStatus.COMPLETED, metadata=metadata,
+        work_dir=old_work, output_path=old_output, started_at=1, finished_at=2,
+    ))
+    before = (old_work / STATE_FILENAME).read_bytes()
+    def secure(video_id, work):
+        metadata.save(work)
+        return metadata, None
+    def interrupted_download(video_id, work):
+        (work / f"{video_id}.mp4").write_bytes(b"new recording before crash")
+        raise SystemExit("simulated process interruption")
+    monkeypatch.setattr(engine, "_secure_metadata", secure)
+    monkeypatch.setattr(engine, "_run_download", interrupted_download)
+    with pytest.raises(SystemExit):
+        engine.record(VIDEO_ID, fresh=True, historical_paths=(str(old_output),))
+    work = engine.work_dir_for(VIDEO_ID)
+    assert (work / engine_module.HISTORICAL_PATHS_FILENAME).is_file()
+    if rotated:
+        # Another explicit run archives the unfinished session, including its marker.
+        monkeypatch.setattr(engine, "_run_download", lambda *_: engine_module._DownloadOutcome())
+        engine.record(VIDEO_ID, fresh=True)
+        work, = work.parent.glob(f"{VIDEO_ID}-previous-*")
+    restarted = RecordingEngine(engine.options, toolchain=DUMMY_TOOLCHAIN)
+    monkeypatch.setattr(restarted, "_verify", lambda path: MediaVerification(path, True, True))
+    recovered, = restarted.recover_pending()
+    assert recovered.succeeded, recovered.message
+    assert recovered.video_id == VIDEO_ID
+    assert recovered.output_path.name == f"{old_output.stem} (2).mp4"
+    assert recovered.output_path.read_bytes() == b"new recording before crash"
+    assert not old_output.exists() and (old_work / STATE_FILENAME).read_bytes() == before
+    store = ArchiveStore(tmp_path / "roots.json")
+    store.remember(engine.options.output_dir)
+    store.remember(engine.options.output_dir, work_root=old_work.parent)
+    old_item = next(item for item in store.load() if item.output_path == str(old_output))
+    assert old_item.status is CompletionStatus.MISSING
+    assert len([item for item in store.load() if item.output_path]) == 2
+    with pytest.raises(ValueError):
+        store.trash(old_item)
+    assert recovered.output_path.read_bytes() == b"new recording before crash"
+
+
+@pytest.mark.parametrize("contents", ['{', '{}', '["relative.mp4"]', '[17]'])
+def test_invalid_historical_path_marker_cannot_publish_media(tmp_path, monkeypatch, contents):
+    from yt_rec.recording.merge import MediaVerification
+
+    engine = base_engine(tmp_path)
+    work = engine.work_dir_for(VIDEO_ID)
+    work.mkdir(parents=True)
+    media = work / f"{VIDEO_ID}.mp4"
+    media.write_bytes(b"recoverable recording")
+    stored_metadata().save(work)
+    (work / engine_module.HISTORICAL_PATHS_FILENAME).write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(engine, "_verify", lambda path: MediaVerification(path, True, True))
+    result, = engine.recover_pending()
+    assert not result.succeeded and result.output_path is None
+    assert media.read_bytes() == b"recoverable recording"
+    assert not list(engine.options.output_dir.glob("*.mp4"))
+
+
 def test_방송_시작_지점부터_받는다(tmp_path):
     assert "--live-from-start" in base_engine(tmp_path).build_download_argv(VIDEO_ID)
 

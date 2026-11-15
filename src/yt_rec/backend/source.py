@@ -251,9 +251,14 @@ class BackendSource(EventSource):
                 self.paste_confirmation_requested.emit(video_id, token, history)
                 return
             self._manual_requests.add(video_id)
+            # Dismissal hides confirmation history, not ownership of an old path.
+            historical = self._archive_store.load(include_dismissed=True) if self._archive_store is not None else ()
+            options = self._controller._options
+            historical = (*historical, *recordings, *load_archive(options.output_dir, work_root=options.work_root))
             result = self._notifications.receive_pasted(
                 LiveNotification(video_id, time.time(), synthetic=False),
-                historical_paths=tuple(item.output_path for item in recordings if item.output_path),
+                historical_paths=tuple(sorted({item.output_path for item in historical
+                                              if item.recording_id == video_id and item.output_path})),
             )
             # Active/pending requests can return without a new update event.
             if video_id in self._manual_requests:

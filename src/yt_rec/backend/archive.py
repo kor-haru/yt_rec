@@ -249,12 +249,13 @@ class ArchiveStore:
         _write_json(self.path, roots)
         self._roots = roots
 
-    def load(self) -> tuple[CompletedRecording, ...]:
+    def load(self, *, include_dismissed: bool = False) -> tuple[CompletedRecording, ...]:
         items = {}
         for root in self._roots:
             for item in load_archive(Path(root["output_dir"]), work_root=Path(root["work_root"])):
                 items[(item.recording_id, item.output_path)] = item
-        return self.visible(tuple(sorted(items.values(), key=lambda item: item.finished_at.timestamp() if item.finished_at else 0, reverse=True)))
+        result = tuple(sorted(items.values(), key=lambda item: item.finished_at.timestamp() if item.finished_at else 0, reverse=True))
+        return result if include_dismissed else self.visible(result)
 
     def visible(self, items: tuple[CompletedRecording, ...]) -> tuple[CompletedRecording, ...]:
         return tuple(item for item in items if archive_key(item) not in self._dismissed)
