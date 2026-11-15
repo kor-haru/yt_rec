@@ -187,7 +187,7 @@ class NotificationRecorder:
             return self._attempt(notification)
 
     def receive_pasted(self, notification: LiveNotification) -> NotificationResult:
-        """사용자가 클립보드에 올린 주소. 감시 채널이 아니어도 녹화한다."""
+        """사용자가 앱 메인 창에 직접 붙여넣은 주소를 감시 채널 여부와 무관하게 녹화한다."""
         with self._dispatch_lock:
             with self._lock:
                 video_id = notification.video_id

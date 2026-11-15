@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton,
     QSystemTrayIcon, QVBoxLayout,
@@ -107,18 +107,16 @@ class NotificationSession(QObject):
         if self.account_browser is not None:
             self.account_browser.session_invalidated.connect(self._account_invalidated)
         state.command_requested.connect(self.handle_command)
-        self._clipboard_text = ""
-        clipboard = QApplication.clipboard()
-        clipboard.dataChanged.connect(self._clipboard_changed)
-        QTimer.singleShot(0, self._clipboard_changed)
+        self._paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, window)
+        self._paste_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._paste_shortcut.setAutoRepeat(False)
+        self._paste_shortcut.activated.connect(self._paste_recording)
 
-    def _clipboard_changed(self) -> None:
-        if self._stopped:
+    def _paste_recording(self) -> None:
+        if (self._stopped or not self.window.isVisible() or self.window.isMinimized()
+                or QApplication.activeWindow() is not self.window):
             return
         text = QApplication.clipboard().text() or ""
-        if text == self._clipboard_text:
-            return
-        self._clipboard_text = text
         from .clipboard import youtube_video_id
 
         video_id = youtube_video_id(text)
@@ -284,6 +282,7 @@ class NotificationSession(QObject):
         if self._stopped:
             return
         self._stopped = True
+        self._paste_shortcut.setEnabled(False)
         self._account_refresh.stop()
         if self.account_browser is not None:
             self.account_browser.close()
