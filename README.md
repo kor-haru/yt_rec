@@ -568,6 +568,11 @@ Edge에서 로그인한 상태는 앱과 공유되지 않는다. Google이 추�
 `yt_rec.recording` 이 video id 하나를 방송 시작 지점부터 녹화해 재생 가능한 단일
 파일로 마무리한다. GUI 없이도 돌릴 수 있다.
 
+YouTube가 같은 해상도·HDR의 동등한 스트림을 제공하면 프레임률보다 AV1을 우선한다.
+AV1을 받기 위해 해상도를 낮추거나 재인코딩하지 않으며, 적합한 AV1이 없으면 다른
+코덱으로 녹화한다. 설정의 **코덱 → AV1 (저장·스트리밍)** 은 별도의 다운로드 후
+재인코딩 옵션이다.
+
 ```python
 from pathlib import Path
 from yt_rec.recording import RecordingEngine, RecordingOptions

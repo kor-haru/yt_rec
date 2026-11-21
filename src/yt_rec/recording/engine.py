@@ -127,7 +127,7 @@ _WHY_END_OF_OPTIONS = (
 
 #: extra_ytdlp_args 로 덮어쓸 수 없는 옵션 -> (값을 받는가, 거부 이유).
 #:
-#: :meth:`RecordingEngine.build_download_argv` 가 넘기는 옵션은 모두 여기 있어야 한다
+#: :meth:`RecordingEngine.build_download_argv` 가 넘기는 보호 옵션은 모두 여기 있어야 한다
 #: (테스트가 그 대응을 검사한다). 별칭과 부정형도 같은 옵션으로 취급한다.
 _ENGINE_OWNED_ARGS: dict[str, tuple[bool, str]] = {
     # 재시도 상한 — 이 엔진이 존재하는 이유다(#14).
@@ -615,7 +615,7 @@ class RecordingEngine:
     def build_download_argv(self, video_id: str) -> list[str]:
         """yt-dlp 명령줄. 테스트에서 인자 구성을 그대로 확인할 수 있게 공개한다.
 
-        사용자 추가 인자(:attr:`RecordingOptions.extra_ytdlp_args`)는 엔진 옵션보다
+        사용자 추가 인자(:attr:`RecordingOptions.extra_ytdlp_args`)는 보호할 엔진 옵션보다
         **앞에** 놓는다. yt-dlp 는 뒤에 온 옵션이 이기므로, 거부 목록
         (:data:`_ENGINE_OWNED_ARGS`)을 빠져나간 인자가 있어도 안전 옵션이 최종적으로
         이긴다. 거부한 인자는 이유와 함께 :class:`LogLine` 으로 알린다.
@@ -627,6 +627,10 @@ class RecordingEngine:
 
         argv = [
             str(self.toolchain.ytdlp),
+            # 추출기의 포맷 선호와 화질을 먼저 유지한다. 명시적인 추가 -S 는
+            # yt-dlp 가 뒤에 나온 정렬 키부터 적용하므로 이 기본 정렬보다 우선한다.
+            "--format-sort",
+            "quality,res,height,width,hdr:12,source,vcodec,fps",
             *extra,
             "--ignore-config",
             "--no-colors",
