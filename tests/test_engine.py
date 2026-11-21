@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -333,6 +335,66 @@ def test_화질_상한이_포맷_인자로_들어간다(tmp_path):
     assert argv[argv.index("-f") + 1] == "bv*[height<=720]+ba/b[height<=720]"
 
 
+def test_같은_해상도에서만_코덱을_우선한다(tmp_path):
+    argv = base_engine(tmp_path).build_download_argv(VIDEO_ID)
+    sort = argv[argv.index("--format-sort") + 1].split(",")
+    assert sort.index("height") < sort.index("vcodec") < sort.index("fps")
+    assert sort.index("width") < sort.index("vcodec")
+    assert sort.index("hdr:12") < sort.index("vcodec")
+    assert sort.index("source") < sort.index("vcodec")
+    assert "--format-sort-force" not in argv
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "av1_height, preference, source_priority, cap, extra, expected",
+    [
+        (1080, -1, -1, 1080, (), "av1+audio"),
+        (720, -1, -1, 1080, (), "h264+audio"),
+        (None, -1, -1, 1080, (), "h264+audio"),
+        (1080, -1, -20, 1080, (), "h264+audio"),
+        # yt-dlp 가 시작점부터 받을 수 없는 라이브 포맷에 주는 패널티다.
+        (1080, -11, -1, 1080, (), "h264+audio"),
+        (1080, -1, -1, 720, (), "720+audio"),
+        (1080, -1, -1, 1080, ("-S", "fps"), "h264+audio"),
+    ],
+)
+def test_yt_dlp가_다운로드_없이_고르는_포맷(
+    tmp_path, av1_height, preference, source_priority, cap, extra, expected,
+):
+    ytdlp = shutil.which("yt-dlp")
+    if ytdlp is None:
+        pytest.skip("yt-dlp 실행 파일이 필요하다")
+
+    def video(fmt, width, height, fps, codec, *, source=-1, pref=-1):
+        return dict(
+            format_id=fmt, url=f"https://example.invalid/{fmt}.mp4", ext="mp4",
+            width=width, height=height, fps=fps, vcodec=codec, acodec="none",
+            source_preference=source, preference=pref, dynamic_range="SDR",
+        )
+
+    formats = [
+        video("h264", 1920, 1080, 60, "avc1"),
+        video("720", 1280, 720, 60, "avc1"),
+        dict(format_id="audio", url="https://example.invalid/audio.m4a", ext="m4a",
+             vcodec="none", acodec="mp4a"),
+    ]
+    if av1_height is not None:
+        formats.append(video(
+            "av1", 1920 if av1_height == 1080 else 1280, av1_height, 30, "av01.0.08M.08",
+            source=source_priority, pref=preference,
+        ))
+    info = tmp_path / "formats.json"
+    info.write_text(json.dumps(dict(id=VIDEO_ID, title="Fixture", formats=formats)), encoding="utf-8")
+    argv = base_engine(tmp_path, max_height=cap, extra_ytdlp_args=extra).build_download_argv(VIDEO_ID)
+    result = subprocess.run(
+        [ytdlp, *argv[1:-1], "--load-info-json", str(info), "--simulate", "--print", "%(format_id)s"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
 def test_사용자_설정과_무관하게_동작하도록_설정_파일을_무시한다(tmp_path):
     assert "--ignore-config" in base_engine(tmp_path).build_download_argv(VIDEO_ID)
 
@@ -349,7 +411,7 @@ def test_추가_인자는_안전_옵션보다_앞에_놓인다(tmp_path):
         tmp_path, extra_ytdlp_args=("--cookies-from-browser", "chrome")
     ).build_download_argv(VIDEO_ID)
 
-    assert argv[1:3] == ["--cookies-from-browser", "chrome"]
+    assert argv[3:5] == ["--cookies-from-browser", "chrome"]
     for guarded in ("--fragment-retries", "--retries", "-o", "--live-from-start"):
         assert argv.index(guarded) > argv.index("--cookies-from-browser")
 
@@ -440,7 +502,7 @@ def test_단독_이중_대시는_거부한다(tmp_path):
     argv = engine.build_download_argv(VIDEO_ID)
 
     assert "--" not in argv
-    assert argv[1:3] == ["--cookies", "c.txt"]
+    assert argv[3:5] == ["--cookies", "c.txt"]
     assert "--live-from-start" in argv
     assert any("--" in e.text and "URL" in e.text for e in notes)
 
@@ -481,7 +543,7 @@ def test_안전과_무관한_추가_인자는_그대로_넘긴다(tmp_path):
 
     argv = engine.build_download_argv(VIDEO_ID)
 
-    assert argv[1 : 1 + len(extra)] == list(extra)
+    assert argv[3 : 3 + len(extra)] == list(extra)
     assert notes == []
 
 
@@ -491,7 +553,8 @@ def test_엔진이_넘기는_옵션은_모두_거부_목록에_있다(tmp_path):
     flags = [token for token in argv if token.startswith("-")]
 
     assert flags
-    assert [f for f in flags if f not in engine_module._ENGINE_OWNED_ARGS] == []
+    # 기본 정렬은 사용자가 명시적으로 준 포맷 정렬로 바꿀 수 있다.
+    assert [f for f in flags if f not in engine_module._ENGINE_OWNED_ARGS] == ["--format-sort"]
 
 
 # -- 도구를 못 찾았을 때 ---------------------------------------------------------
