@@ -121,6 +121,7 @@ class NotificationRecorder:
         self._schedules: dict[str, ScheduledLive] = {
             item.video_id: item for item in (schedules.load() if schedules is not None else ())
         }
+        self._manual.update({item.video_id: item.historical_paths for item in self._schedules.values() if item.manual})
 
     @property
     def pending_video_ids(self) -> tuple[str, ...]:
@@ -191,16 +192,20 @@ class NotificationRecorder:
             return self._attempt(notification, require_selection=True)
 
     def receive_pasted(self, notification: LiveNotification, *, historical_paths: tuple[str, ...] = ()) -> NotificationResult:
-        """사용자가 앱 메인 창에 직접 붙여넣은 주소를 감시 채널 여부와 무관하게 녹화한다."""
+        """직접 붙여넣은 영상은 저장하고 예약 방송은 시작을 기다린다."""
         with self._dispatch_lock:
             with self._lock:
                 video_id = notification.video_id
                 if video_id in self._active or self._recorder.is_recording(video_id):
-                    return self._publish(NotificationResult(notification, "ignored", "이미 녹화 중입니다"))
+                    return self._publish(NotificationResult(notification, "ignored", "이미 저장 중입니다"))
                 self._manual[video_id] = historical_paths
                 if video_id in self._pending:
                     return NotificationResult(self._pending[video_id], "queued", "이미 대기 중입니다")
                 if video_id in self._schedules:
+                    self._schedules[video_id] = replace(
+                        self._schedules[video_id], manual=True, historical_paths=historical_paths,
+                    )
+                    self._persist_schedules_locked()
                     return NotificationResult(notification, "scheduled", "이미 예정 시각을 기다리는 중입니다")
             return self._attempt(notification, require_selection=False)
 
@@ -240,10 +245,15 @@ class NotificationRecorder:
                     return self._schedule_upcoming_locked(
                         notice, state, base, require_selection=require_selection,
                     )
-                live = state.broadcast if state.status == "live" else None
+                downloadable = not require_selection and state.status in {"none", "ended"}
+                live = state.broadcast if state.status == "live" or downloadable else None
                 if live is None or live.video_id != video_id:
                     self._forget_schedule_locked(video_id)
-                    return self._publish(replace(base, reason="현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)"))
+                    reason = (
+                        "현재 송출 중인 영상이 아닙니다 (예약/종료/확인 불가)" if require_selection
+                        else "영상을 확인할 수 없어 저장하지 않습니다"
+                    )
+                    return self._publish(replace(base, reason=reason))
                 if state.premiere and not self._record_premieres():
                     return self._publish(replace(base, reason="프리미어 녹화가 꺼져 있습니다"))
                 # Re-read AFTER network I/O: selection may have changed while waiting.
@@ -303,6 +313,7 @@ class NotificationRecorder:
             kept.attempts if kept is not None else 0, notice.synthetic,
             kept.early_attempts if kept is not None else 0,
             channel_id=live.channel_id, title=live.title,
+            manual=not require_selection, historical_paths=self._manual.get(video_id, ()),
         )
         self._schedules[video_id] = entry
         self._persist_schedules_locked()

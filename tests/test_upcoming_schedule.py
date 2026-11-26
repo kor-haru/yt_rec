@@ -70,6 +70,7 @@ class Recorder:
     def __init__(self) -> None:
         self.active: set[str] = set()
         self.calls: list[str] = []
+        self.metadata: list[dict] = []
 
     def is_recording(self, video_id: str) -> bool:
         return video_id in self.active
@@ -77,6 +78,7 @@ class Recorder:
     def start(self, video_id: str, **metadata: object) -> bool:
         self.active.add(video_id)
         self.calls.append(video_id)
+        self.metadata.append(metadata)
         return True
 
 
@@ -157,6 +159,54 @@ def test_upcoming_branch_schedules_without_recording():
     assert handler.next_schedule_at() == FIRST_EARLY
     assert wakes == [1]  # 대기자에게 새 예약을 알렸다
     assert [update.status for update in updates] == ["scheduled"]
+
+
+@pytest.mark.parametrize("automatic_first", [False, True])
+def test_pasted_schedule_restores_manual_intent_and_history_after_restart(tmp_path, automatic_first):
+    store = FileScheduleStore(tmp_path / "upcoming.json")
+    handler, api, recorder, clock, _, _ = build(store=store)
+    api.upcoming(START)
+    if automatic_first:
+        assert handler.receive(notice()).status == "scheduled"
+    assert handler.receive_pasted(notice(), historical_paths=("old.mp4",)).status == "scheduled"
+    assert recorder.calls == []
+    assert store.load()[0].manual is True
+    assert store.load()[0].historical_paths == ("old.mp4",)
+
+    restored, api, recorder, clock, _, _ = build(
+        store=FileScheduleStore(store.path), seen=MemorySeenStore([VIDEO]),
+    )
+    restored._selection.save([])
+    api.upcoming(START + 600)
+    clock.now = FIRST_EARLY
+    restored.check_schedules()
+    assert store.load()[0].manual is True  # A postponed start must retain the request too.
+    api.live()
+    clock.now += RECHECK_INTERVAL_SECONDS
+    restored.check_schedules()
+    assert recorder.calls == [VIDEO]
+    assert recorder.metadata[0]["fresh"] is True
+    assert recorder.metadata[0]["historical_paths"] == ("old.mp4",)
+    assert store.load() == ()
+
+
+def test_legacy_schedule_defaults_to_automatic_and_still_requires_selected_channel():
+    entry = ScheduledLive.from_dict({"video_id": VIDEO, "scheduled_at": START, "received_at": NOTICE_AT})
+    assert entry.manual is False and entry.historical_paths == ()
+    handler, api, recorder, clock, _, _ = build(store=MemoryScheduleStore([entry]))
+    handler._selection.save([])
+    api.live()
+    clock.now = START
+    handler.check_schedules()
+    assert recorder.calls == [] and handler.scheduled_video_ids == ()
+
+
+@pytest.mark.parametrize("fields", [
+    {"manual": "false"}, {"historical_paths": "old.mp4"}, {"historical_paths": [None]},
+])
+def test_schedule_rejects_malformed_manual_fields(fields):
+    with pytest.raises(ValueError):
+        ScheduledLive.from_dict({"video_id": VIDEO, "scheduled_at": START, "received_at": NOTICE_AT, **fields})
 
 
 def test_schedule_uses_the_api_value_not_the_notification_body():

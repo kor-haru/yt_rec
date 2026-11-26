@@ -134,9 +134,9 @@ class NotificationSession(QObject):
         if self._stopped:
             return
         answer = QMessageBox.question(
-            self.window, "녹화 이력이 있는 영상",
-            "이 영상의 이전 녹화 이력이 남아 있습니다.\n\n" + "\n".join(history)
-            + "\n\n기존 파일과 이력을 보존하고 새 파일로 다시 녹화할까요?",
+            self.window, "저장 이력이 있는 영상",
+            "이 영상의 이전 저장 이력이 남아 있습니다.\n\n" + "\n".join(history)
+            + "\n\n기존 파일과 이력을 보존하고 새 파일로 다시 저장할까요?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

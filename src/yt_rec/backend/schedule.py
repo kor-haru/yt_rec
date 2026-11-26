@@ -98,6 +98,9 @@ class ScheduledLive:
     #: 대시보드 채널 줄에 붙일 채널과 제목(#108). 옛 예약 파일에는 없어 빈 값이다.
     channel_id: str = ""
     title: str = ""
+    #: 직접 붙여넣은 예약은 재시작 후에도 채널 선택과 완료 이력에 막히지 않는다.
+    manual: bool = False
+    historical_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not _VIDEO_ID.fullmatch(self.video_id):
@@ -149,12 +152,18 @@ class ScheduledLive:
             "early_attempts": self.early_attempts,
             "channel_id": self.channel_id,
             "title": self.title,
+            "manual": self.manual,
+            "historical_paths": list(self.historical_paths),
         }
 
     @classmethod
     def from_dict(cls, data: Any) -> ScheduledLive:
         if not isinstance(data, dict):
             raise ValueError("예약 항목은 JSON 객체여야 합니다")
+        manual = data.get("manual", False)
+        paths = data.get("historical_paths", [])
+        if not isinstance(manual, bool) or not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise ValueError("예약의 수동 요청 또는 이전 저장 경로가 올바르지 않습니다")
         return cls(
             video_id=str(data.get("video_id") or ""),
             scheduled_at=float(data.get("scheduled_at") or 0.0),
@@ -164,6 +173,8 @@ class ScheduledLive:
             early_attempts=int(data.get("early_attempts") or 0),
             channel_id=str(data.get("channel_id") or ""),
             title=str(data.get("title") or ""),
+            manual=manual,
+            historical_paths=tuple(paths),
         )
 
 

@@ -222,12 +222,15 @@ def test_paste_missing_file_with_retained_history_still_asks_and_cancel_preserve
 
 @pytest.mark.parametrize("answer", [False, True])
 @pytest.mark.parametrize("present", [False, True])
-def test_paste_saved_history_requires_confirmation_and_preserves_existing_data(wired, qapp, answer, present):
-    source, _, engines, _, _, _ = wired
+@pytest.mark.parametrize("status", ["live", "none", "ended"])
+def test_paste_saved_history_requires_confirmation_and_preserves_existing_data(wired, qapp, answer, present, status):
+    source, api, engines, _, _, _ = wired
+    api.get_video_state = lambda video_id: VideoState(video_id, status, LiveBroadcast(video_id, "UC1", "saved video"))
     output, state = previous_recording(source, present=present)
     before = {path: path.read_bytes() for path in (output, state) if path.exists()}
-    questions = []
+    questions, messages = [], []
     source.paste_confirmation_requested.connect(lambda *args: questions.append(args))
+    source.paste_result.connect(messages.append)
     source.record_pasted(VIDEO)
     until(qapp, lambda: bool(questions))
     video_id, token, paths = questions[0]
@@ -238,8 +241,10 @@ def test_paste_saved_history_requires_confirmation_and_preserves_existing_data(w
     source.confirm_pasted(video_id, token, answer)
     if answer:
         until(qapp, lambda: VIDEO in engines)
+        flush(source, qapp)
         assert engines[VIDEO].fresh is True
         assert engines[VIDEO].historical_paths == (str(output),)
+        assert "영상 저장을 시작했습니다." in messages
     else:
         flush(source, qapp)
         assert engines == {}
@@ -267,7 +272,7 @@ def test_paste_repeated_queued_request_reports_waiting_without_another_question(
     assert engines[VIDEO].fresh is True
     source.record_pasted(VIDEO)
     flush(source, qapp)
-    assert "이미 녹화 중" in messages[-1] and len(questions) == 1
+    assert "이미 저장 중" in messages[-1] and len(questions) == 1
 
 
 @pytest.mark.parametrize("old_root", [False, True])
