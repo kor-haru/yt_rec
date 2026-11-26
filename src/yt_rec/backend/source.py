@@ -229,7 +229,7 @@ class BackendSource(EventSource):
         return True
 
     def record_pasted(self, video_id: str) -> None:
-        """앱 메인 창에 직접 붙여넣은 라이브 주소를 감시 채널 여부와 무관하게 녹화한다."""
+        """직접 붙여넣은 주소의 라이브는 녹화하고 일반 영상은 다운로드한다."""
         if self._stopping or self._worker is None or self._notifications is None:
             return
         self._run(lambda: self._record_pasted(video_id))
@@ -238,7 +238,7 @@ class BackendSource(EventSource):
         if self._stopping or self._notifications is None:
             return
         if self._controller._recorder.is_recording(video_id):
-            self.paste_result.emit("이미 녹화 중인 영상입니다.")
+            self.paste_result.emit("이미 저장 중인 영상입니다.")
             return
         if video_id in self._paste_confirmations:
             return
@@ -268,7 +268,7 @@ class BackendSource(EventSource):
                     self._manual_requests.discard(video_id)
         except (OSError, ValueError) as exc:
             self._manual_requests.discard(video_id)
-            self.paste_result.emit(f"녹화를 시작하지 못했습니다: {exc}")
+            self.paste_result.emit(f"영상 저장을 시작하지 못했습니다: {exc}")
 
     def confirm_pasted(self, video_id: str, token: str, accepted: bool) -> None:
         def confirm() -> None:
@@ -279,7 +279,7 @@ class BackendSource(EventSource):
             if self._stopping:
                 return
             if not accepted:
-                self.paste_result.emit("재녹화를 취소했습니다. 기존 파일은 그대로 보존됩니다.")
+                self.paste_result.emit("영상 저장을 취소했습니다. 기존 파일은 그대로 보존됩니다.")
                 return
             if pending[1] != self._controller._options:
                 self.paste_result.emit("설정이 변경됐습니다. 주소를 다시 붙여넣어 주세요.")
@@ -290,7 +290,7 @@ class BackendSource(EventSource):
     def _notification_update(self, result: NotificationResult) -> None:
         video_id = result.notification.video_id
         if video_id in self._manual_requests:
-            message = "녹화를 시작했습니다." if result.status == "handed" else result.reason
+            message = "영상 저장을 시작했습니다." if result.status == "handed" else result.reason
             if message:
                 self.paste_result.emit(message)
             if result.status not in {"queued", "scheduled"}:

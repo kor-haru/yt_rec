@@ -110,6 +110,50 @@ def test_pasted_live_records_without_a_watched_channel():
     assert recorder.calls[0][1]["channel_id"] == "UCother"
 
 
+@pytest.mark.parametrize("status", ["none", "ended"])
+def test_pasted_video_downloads_but_automatic_notification_stays_live_only(status):
+    handler, api, recorder, selection, _ = setup_handler()
+    api.get_video_state = lambda video_id: VideoState(
+        video_id, status, LiveBroadcast(video_id, "UC1", "일반 영상", "채널"),
+    )
+    assert handler.receive(notice()).status == "ignored"
+    assert recorder.calls == []
+    selection.save([])
+    result = handler.receive_pasted(notice(), historical_paths=("previous.mp4",))
+    assert result.status == "handed"
+    assert recorder.calls == [(VIDEO, {
+        "channel_id": "UC1", "channel_name": "채널", "title": "일반 영상",
+        "fresh": True, "historical_paths": ("previous.mp4",),
+    })]
+
+
+@pytest.mark.parametrize("status, broadcast", [
+    ("unknown", LiveBroadcast(VIDEO, "UC1", "unknown")),
+    ("none", None),
+    ("ended", LiveBroadcast(OTHER, "UC1", "wrong video")),
+])
+def test_pasted_unavailable_or_unconfirmed_video_is_not_downloaded(status, broadcast):
+    handler, api, recorder, _, _ = setup_handler()
+    api.get_video_state = lambda video_id: VideoState(video_id, status, broadcast)
+    assert handler.receive_pasted(notice()).status == "ignored"
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("status", ["none", "ended"])
+def test_pasted_download_retains_manual_history_while_waiting_for_a_slot(status):
+    handler, api, recorder, selection, _ = setup_handler(seen=MemorySeenStore([VIDEO]))
+    selection.save([])
+    api.get_video_state = lambda video_id: VideoState(
+        video_id, status, LiveBroadcast(video_id, "UCother", "download"),
+    )
+    recorder.active.add(OTHER)
+    assert handler.receive_pasted(notice(), historical_paths=("old.mp4",)).status == "queued"
+    recorder.active.clear()
+    handler.resume()
+    assert recorder.calls[0][1]["fresh"] is True
+    assert recorder.calls[0][1]["historical_paths"] == ("old.mp4",)
+
+
 def test_pasted_completed_live_starts_a_fresh_run_but_push_stays_deduplicated():
     seen = MemorySeenStore([VIDEO])
     handler, api, recorder, _, _ = setup_handler(seen=seen)
